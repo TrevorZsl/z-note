@@ -8,27 +8,18 @@ from tkinter import font as tkfont, messagebox
 from ctypes import wintypes
 
 import pystray
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw, ImageFont, ImageTk
 
 APP_NAME = "z-note"
 DATA_DIR = os.path.join(os.environ.get("APPDATA", "."), "z-note")
 DATA_FILE = os.path.join(DATA_DIR, "notes.json")
 BACKUP_DIR = os.path.join(DATA_DIR, "backup")
 
-PALETTE = {  # 名称: (背景, 描边) —— 冷调便签色
-    "淡黄": ("#FFF7DC", "#EBDCA6"), "粉": ("#FCE9EE", "#F0CBD4"),
-    "蓝": ("#E5EEFA", "#C9D9EE"),   "绿": ("#E4F1E6", "#C6DCCC"),
-    "紫": ("#EDE8F8", "#D6CBEE"),   "橙": ("#FDEDDF", "#F1D5BB"),
-    "灰白": ("#F4F5F7", "#DFE2E6"), "白": ("#FDFDFE", "#E4E6EA"),
-}
+NOTE_BG, NOTE_BORDER = "#FFFFFF", "#DFE2E6"
 T_COLOR = "#010203"   # 窗口透明色键（圆角外的部分透出去）
 RADIUS = 20
 EDGE = 7                              # 窗口边缘可拖拽调大小的宽度
-ICON_FONT, ICON_FONT_FALLBACK = "Segoe Fluent Icons", "Segoe MDL2 Assets"
-GLYPH_PIN = "\uE718"                   # 图钉：黑色=置底，灰色=置顶
-GLYPH_COLOR = "\uE790"                 # 调色板
-GLYPH_NEW, GLYPH_HIDE, GLYPH_DELETE = "\uE710", "\uE921", "\uE74D"
-BOX_ON, BOX_OFF = "\uE73E", "\uECCA"   # 勾选框：对勾 / 空心圆
+ICON_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets", "icons")
 PREFIX_PAD = "  "                       # 勾选框后跟 2 个空格
 INK, QUIET = "#6B7280", "#666D75"      # 图标与状态栏的墨色（冷灰单色系）
 
@@ -40,6 +31,11 @@ user32.SetWindowPos.restype = wintypes.BOOL
 user32.GetParent.argtypes = [wintypes.HWND]
 user32.GetParent.restype = wintypes.HWND
 user32.GetForegroundWindow.restype = wintypes.HWND
+user32.GetFocus.restype = wintypes.HWND
+
+dwmapi = ctypes.WinDLL("dwmapi")
+dwmapi.DwmSetWindowAttribute.argtypes = [wintypes.HWND, wintypes.DWORD, ctypes.c_void_p, wintypes.DWORD]
+dwmapi.DwmSetWindowAttribute.restype = ctypes.c_long
 
 HWND_BOTTOM = wintypes.HWND(1)
 SWP_NOSIZE, SWP_NOMOVE, SWP_NOACTIVATE = 0x0001, 0x0002, 0x0010
@@ -47,6 +43,28 @@ WM_HOTKEY, MOD_ALT, MOD_CONTROL = 0x0312, 0x0001, 0x0002
 
 class _POINT(ctypes.Structure):
     _fields_ = [("x", wintypes.LONG), ("y", wintypes.LONG)]
+
+# 使用控件字体和光标位置显示 Windows 输入法预编辑文字。
+imm32 = ctypes.WinDLL("imm32")
+imm32.ImmGetContext.argtypes = [wintypes.HWND]
+imm32.ImmGetContext.restype = wintypes.HANDLE
+imm32.ImmReleaseContext.argtypes = [wintypes.HWND, wintypes.HANDLE]
+imm32.ImmGetCompositionStringW.argtypes = [wintypes.HANDLE, wintypes.DWORD, ctypes.c_void_p, wintypes.DWORD]
+
+user32.MapWindowPoints.argtypes = [wintypes.HWND, wintypes.HWND, ctypes.POINTER(_POINT), wintypes.UINT]
+
+class _CANDIDATEFORM(ctypes.Structure):
+    _fields_ = [("index", wintypes.DWORD), ("style", wintypes.DWORD),
+                ("point", _POINT), ("area", wintypes.RECT)]
+
+imm32.ImmSetCandidateWindow.argtypes = [wintypes.HANDLE, ctypes.POINTER(_CANDIDATEFORM)]
+_WNDPROC = ctypes.WINFUNCTYPE(ctypes.c_ssize_t, wintypes.HWND, wintypes.UINT,
+                             wintypes.WPARAM, wintypes.LPARAM)
+user32.SetWindowLongPtrW.argtypes = [wintypes.HWND, ctypes.c_int, ctypes.c_void_p]
+user32.SetWindowLongPtrW.restype = ctypes.c_void_p
+user32.CallWindowProcW.argtypes = [ctypes.c_void_p, wintypes.HWND, wintypes.UINT,
+                                 wintypes.WPARAM, wintypes.LPARAM]
+user32.CallWindowProcW.restype = ctypes.c_ssize_t
 
 def cursor_pos():
     pt = _POINT()
@@ -61,11 +79,6 @@ def ensure_single_instance():
         os._exit(0)
 
 # ---------- 小工具 ----------
-def darken(hex_color, f=0.90):
-    c = hex_color.lstrip("#")
-    r, g, b = int(c[0:2], 16), int(c[2:4], 16), int(c[4:6], 16)
-    return "#%02x%02x%02x" % (int(r * f), int(g * f), int(b * f))
-
 def mix(a, b, t):
     ca, cb = a.lstrip("#"), b.lstrip("#")
     return "#%02x%02x%02x" % tuple(
@@ -83,7 +96,7 @@ def round_rect(cv, x1, y1, x2, y2, r, **kw):
 
 # ---------- 数据 ----------
 DEFAULT_SETTINGS = {"autostart": False, "showOnStartup": True,
-                    "opacity": 0.95, "color": "淡黄", "fontSize": 11}
+                    "opacity": 0.95, "color": "白", "fontSize": 11}
 
 def load_data():
     if not os.path.exists(DATA_FILE):
@@ -192,20 +205,26 @@ class Tooltip:
         Tooltip._cur = tw
 
 # ---------- 工具栏圆形按钮 ----------
-class ToolButton(tk.Canvas):
-    """圆形悬浮底 + 图标字形的扁平按钮；active 态为深色实底（图钉的按下感）。"""
+def load_icon(master, name, size=18, active=False):
+    state = "active" if active else "normal"
+    with Image.open(os.path.join(ICON_DIR, f"{name}-{state}.png")) as image:
+        return ImageTk.PhotoImage(image.resize((size, size), Image.Resampling.LANCZOS),
+                                  master=master)
 
-    def __init__(self, master, glyph, get_tip, cmd, icon_font, bg,
-                 active_glyph=None, size=26, ink=INK):
+
+class ToolButton(tk.Canvas):
+    """圆形悬浮底 + Lucide 图标的扁平按钮；active 态仅加深图标。"""
+
+    def __init__(self, master, icon, get_tip, cmd, bg, size=26):
         super().__init__(master, width=size, height=size, bg=bg,
                          highlightthickness=0, bd=0, cursor="hand2")
-        self._bg, self._ink, self._font = bg, ink, icon_font
-        self._glyph, self._aglyph, self._active, self._cmd = glyph, active_glyph, False, cmd
+        self._bg, self._active, self._cmd = bg, False, cmd
+        self._image = load_icon(self, icon)
+        self._active_image = load_icon(self, icon, active=True) if icon == "pin" else self._image
         r = 11
         self._pill = self.create_oval(size/2 - r, size/2 - r, size/2 + r, size/2 + r,
                                       state="hidden", outline="")
-        self._icon = self.create_text(size/2, size/2, text=glyph,
-                                      font=(icon_font, 11), fill=ink)
+        self._icon = self.create_image(size/2, size/2 + 1, image=self._image)
         self.bind("<Enter>", self._on_enter)
         self.bind("<Leave>", self._on_leave)
         self.bind("<Button-1>", lambda e: cmd())
@@ -222,16 +241,14 @@ class ToolButton(tk.Canvas):
     def set_bg(self, bg):
         self._bg = bg
         self.config(bg=bg)
-        if self._active:
-            self.itemconfig(self._pill, fill=darken(bg, 0.72))
 
     def set_active(self, on):
         self._active = on
+        self.itemconfig(self._pill, state="hidden")
         if on:
-            self.itemconfig(self._pill, state="hidden")
-            self.itemconfig(self._icon, fill="#1F2328", text=self._aglyph or self._glyph)
+            self.itemconfig(self._icon, image=self._active_image)
         else:
-            self.itemconfig(self._icon, fill=self._ink, text=self._glyph)
+            self.itemconfig(self._icon, image=self._image)
 
 # ---------- 便签窗口 ----------
 class NoteWindow(tk.Toplevel):
@@ -239,50 +256,50 @@ class NoteWindow(tk.Toplevel):
         super().__init__(app.root)
         self.app, self.d = app, data
         self._boosted = False
-        self._bg, self._border = PALETTE[data["color"]]
-        self.configure(bg=T_COLOR)
-        self.attributes("-transparentcolor", T_COLOR)
+        self._bg, self._border = NOTE_BG, NOTE_BORDER
+        self.d["color"] = "白"
+        self.configure(bg=self._bg)
         self.geometry(f"{data['w']}x{data['h']}+{data['x']}+{data['y']}")
         self.attributes("-alpha", data["opacity"])
         self.overrideredirect(True)
 
         # 画布画圆角底板，控件都放圆角内部
-        self.cv = tk.Canvas(self, bg=T_COLOR, highlightthickness=0, bd=0)
+        self.cv = tk.Canvas(self, bg=self._bg, highlightthickness=0, bd=0)
         self.cv.pack(fill="both", expand=True)
 
         # -- 工具栏 --
         self.toolbar = tk.Frame(self, bg=self._bg)
         self._tool_btns = []
         self._chip_font = tkfont.Font(family="Microsoft YaHei UI", size=10, weight="bold")
+        self._title_edit_font = tkfont.Font(family="Microsoft YaHei UI", size=10)
 
-        def btn(glyph, get_tip, cmd):
-            b = ToolButton(self.toolbar, glyph, get_tip, cmd, app.icon_font, self._bg)
+        def btn(icon, get_tip, cmd):
+            b = ToolButton(self.toolbar, icon, get_tip, cmd, self._bg)
             self._tool_btns.append(b)
             return b
 
-        self.b_pin = ToolButton(self.toolbar, GLYPH_PIN,
-                                lambda: "图钉：黑色 = 置底，灰色 = 置顶",
-                                self.toggle_pin, app.icon_font, self._bg,
-                                ink="#9B968D")
+        self.b_pin = ToolButton(self.toolbar, "pin",
+                                lambda: "取消置顶" if self.d["z"] == "top" else "置顶",
+                                self.toggle_pin, self._bg)
         self._tool_btns.append(self.b_pin)
-        self.b_pin.pack(side="left", padx=(8, 3), pady=9)
+        self.b_pin.pack(side="left", padx=(3, 8), pady=9)
 
         # 标题胶囊：悬停有提示，点击改名
         self.title_box = tk.Frame(self.toolbar, bg=self._bg)
         self.title_box.pack(side="left", padx=2)
         self.title_chip = tk.Canvas(self.title_box, height=28, bg=self._bg,
                                     highlightthickness=0, cursor="hand2")
+        self._title_editor = None
         self.title_chip.pack(pady=8)
         self.title_chip.bind("<Button-1>", lambda e: self.edit_title())
         Tooltip(self.title_chip, lambda: "点击修改标题")
 
         spacer = tk.Label(self.toolbar, text="", bg=self._bg, cursor="fleur")
         spacer.pack(side="left", fill="both", expand=True)
-        btn(GLYPH_HIDE, lambda: "隐藏这张便签", self.hide).pack(side="right", padx=(2, 8), pady=9)
-        btn(GLYPH_DELETE, lambda: "删除便签", self.delete_self).pack(side="right", padx=5, pady=9)
-        btn(GLYPH_NEW, lambda: "新建便签（Ctrl+Alt+N）",
+        btn("minus", lambda: "隐藏这张便签", self.hide).pack(side="right", padx=(2, 8), pady=9)
+        btn("sticky-note", lambda: "新建便签（Ctrl+Alt+N）",
             lambda: self.app.new_note()).pack(side="right", padx=5, pady=9)
-        btn(GLYPH_COLOR, lambda: "便签颜色", self.open_colors).pack(side="right", padx=(8, 5), pady=9)
+        btn("trash", lambda: "删除便签", self.delete_self).pack(side="right", padx=5, pady=9)
         for w in (self.toolbar, spacer):
             w.bind("<Button-1>", self._drag_press)
             w.bind("<B1-Motion>", self._drag_move)
@@ -290,23 +307,25 @@ class NoteWindow(tk.Toplevel):
 
         # -- 正文 --
         self.done_font = tkfont.Font(family="Microsoft YaHei UI",
-                                     size=app.data["settings"]["fontSize"], overstrike=True)
+                                     size=app.data["settings"]["fontSize"])
         self.text = tk.Text(self, bg=self._bg, fg="#2B2F36", bd=0, highlightthickness=0,
                             padx=12, pady=10, wrap="word", spacing1=5, spacing3=6,
+                            selectbackground=self._bg, inactiveselectbackground=self._bg,
+                            selectforeground="#2B2F36", selectborderwidth=0,
                             font=app.base_font, insertbackground="#2B2F36", cursor="xterm")
-        self.text.tag_config("boxoff", font=(app.icon_font, 12), foreground="#B8BEC6")
-        self.text.tag_config("boxon", font=(app.icon_font, 12), foreground="#6F7780")
+        self._make_check_images()
         self.text.tag_config("done", font=self.done_font)  # 只加删除线，不改字色
+        self.text.tag_config("selection_fill", background="#DCE7F3", foreground="#2B2F36")
+        self.text.tag_raise("selection_fill", "sel")
+        self.text.bind("<<Selection>>", self._paint_selection)
 
         # -- 底部状态栏 + 添加条 --
         self.bar = tk.Frame(self, bg=self._bg)
         self.status = tk.Label(self.bar, text="", bg=self._bg, fg=QUIET,
-                               font=("Microsoft YaHei UI", 9))
-        self.status.pack(side="left")
+                               font=("Microsoft YaHei UI", 9), padx=0, bd=0)
         self.clear_btn = tk.Label(self.bar, text="清除已完成", bg=self._bg,
                                   fg="#A9AFB6", font=("Microsoft YaHei UI", 9),
-                                  padx=6, cursor="hand2")
-        self.clear_btn.pack(side="right")
+                                  padx=0, bd=0, cursor="hand2")
         self.clear_btn.bind("<Enter>", lambda e: self.clear_btn.config(fg="#454B52"))
         self.clear_btn.bind("<Leave>", lambda e: self.update_status())
         self.clear_btn.bind("<Button-1>", lambda e: self.clear_done())
@@ -314,8 +333,10 @@ class NoteWindow(tk.Toplevel):
         self.add_pill = tk.Canvas(self, bg=self._bg, highlightthickness=0, cursor="hand2")
         self.add_pill.bind("<Button-1>", self._pill_press)
         Tooltip(self.add_pill, lambda: "添加待办")
-        self._bg_widgets = [self.toolbar, spacer, self.bar, self.status,
-                            self.clear_btn, self.add_pill]
+        self._strike_widgets = []
+        self.text.configure(yscrollcommand=lambda *args: self._queue_strikes())
+        self.text.bind("<Configure>", lambda e: self._queue_strikes())
+        self._bind_ime(self.text)
         self._draw_chip()
 
         self.bind("<Configure>", lambda e: self._relayout())
@@ -329,8 +350,8 @@ class NoteWindow(tk.Toplevel):
         t.bind("<KeyPress-BackSpace>", self._on_backspace)
         t.bind("<Button-1>", self._on_click)
         t.bind("<Button-3>", self._on_rightclick)
-        t.bind("<FocusIn>", lambda e: self._set_boost(True))
-        t.bind("<FocusOut>", lambda e: self._set_boost(False))
+        t.bind("<FocusIn>", lambda e: self._set_boost(True), add="+")
+        t.bind("<FocusOut>", lambda e: self._set_boost(False), add="+")
         t.bind("<Control-MouseWheel>", self._ctrl_wheel)
         self.bind("<FocusOut>", lambda e: self.sink_if_bottom())
 
@@ -338,6 +359,8 @@ class NoteWindow(tk.Toplevel):
         self.update_idletasks()
         self._relayout()
         self.hwnd = user32.GetParent(self.winfo_id()) or self.winfo_id()
+        self._round_window()
+        self._install_inline_ime()
         self.apply_z()
         self._restyle()
         if not (data.get("visible", True) and app.show_notes):
@@ -348,23 +371,301 @@ class NoteWindow(tk.Toplevel):
         if w < 50 or h < 50 or (w, h) == getattr(self, "_last_sz", None):
             return  # 尺寸没变（纯移动触发的 Configure）不重画
         self._last_sz = (w, h)
+        self._draw_chip()
         self.cv.delete("all")
-        round_rect(self.cv, 1, 1, w - 2, h - 2, RADIUS,
-                   fill=self._bg, outline=self._border)
+        self.cv.create_rectangle(0, 0, w - 1, h - 1, fill=self._bg, outline=self._border)
         ix = RADIUS + 4
         self.toolbar.place(x=ix, y=6, width=w - 2 * ix, height=44)
         self.text.place(x=ix, y=56, width=w - 2 * ix, height=max(20, h - 56 - 86))
-        self.bar.place(x=ix + 6, y=h - 78, width=w - 2 * ix - 12, height=26)
-        self.add_pill.place(x=ix + 4, y=h - 46, width=w - 2 * ix - 8, height=36)
-        self._draw_pill(w - 2 * ix - 8)
+        self._layout_footer()
+        self._queue_strikes()
+
+    def _layout_footer(self):
+        w, h = self.winfo_width(), self.winfo_height()
+        if w < 50 or h < 50:
+            return
+        edge = max(12, min(24, round(w * .06)))
+        available = w - 2 * edge
+        self.clear_btn.config(text="清除已完成")
+        label_width = max(self.status.winfo_reqwidth(), self.clear_btn.winfo_reqwidth())
+        if available - 2 * label_width - 20 < 64:
+            self.clear_btn.config(text="清除完成")
+            label_width = max(self.status.winfo_reqwidth(), self.clear_btn.winfo_reqwidth())
+        gap = min(10, max(6, (available - 2 * label_width - 36) // 2))
+        pill_width = min(112, max(36, available - 2 * label_width - 2 * gap))
+        pill_x = (w - pill_width) // 2
+        self.bar.place(x=0, y=h - 41, width=w, height=26)
+        self.status.place(x=pill_x / 2, y=13, anchor="center")
+        self.clear_btn.place(x=(pill_x + pill_width + w) / 2, y=13, anchor="center")
+        self.add_pill.place(x=pill_x, y=h - 46, width=pill_width, height=36)
+        self._draw_pill(pill_width)
+
+    def destroy(self):
+        if hasattr(self, "_ime_pump_job"):
+            self.after_cancel(self._ime_pump_job)
+            user32.SetWindowLongPtrW(self.winfo_id(), -4, self._ime_old_proc)
+        super().destroy()
+
+    def _round_window(self):
+        # 由 DWM 抗锯齿裁切外框，避免透明色键的硬像素边缘。
+        preference = ctypes.c_int(2)  # DWMWCP_ROUND
+        dwmapi.DwmSetWindowAttribute(self.hwnd, 33, ctypes.byref(preference), ctypes.sizeof(preference))
+
+    def _make_check_images(self):
+        size = max(14, round(self.app.base_font.metrics("ascent") * 0.8))
+        scale = 4
+        self._check_images = {}
+        for checked in (False, True):
+            img = Image.new("RGBA", (size * scale, size * scale))
+            draw = ImageDraw.Draw(img)
+            color = "#6F7780" if checked else "#B8BEC6"
+            draw.ellipse((scale, scale, (size - 1) * scale, (size - 1) * scale),
+                         outline=color, width=max(4, round(size * 0.065 * scale)))
+            if checked:
+                draw.line([(size * .27 * scale, size * .51 * scale),
+                           (size * .44 * scale, size * .68 * scale),
+                           (size * .75 * scale, size * .34 * scale)],
+                          fill=color, width=max(5, round(size * .09 * scale)), joint="curve")
+            self._check_images[checked] = ImageTk.PhotoImage(
+                img.resize((size, size), Image.Resampling.LANCZOS), master=self.text)
 
     def _restyle(self):
         for b in self._tool_btns:
             b.set_bg(self._bg)
-        self.b_pin.set_active(self.d["z"] == "bottom")
+        self.b_pin.set_active(self.d["z"] == "top")
 
     def toggle_pin(self):
         self.set_z("top" if self.d["z"] == "bottom" else "bottom")
+
+    def _ime_composing(self, widget):
+        if getattr(self, "_ime_native_widget", None) == widget:
+            return True
+        if hasattr(self, "_ime_pending") and not self._ime_pending.empty():
+            return True
+        if getattr(self, "_ime_active", False) and self._ime_widget == widget:
+            return True
+        hwnd = widget.winfo_id()
+        context = imm32.ImmGetContext(hwnd)
+        if not context:
+            return False
+        try:
+            return imm32.ImmGetCompositionStringW(context, 8, None, 0) > 0
+        finally:
+            imm32.ImmReleaseContext(hwnd, context)
+
+    def _install_inline_ime(self):
+        self._ime_active = False
+        self._ime_widget = self._ime_target = self._ime_native_widget = None
+        self._ime_pending = queue.SimpleQueue()
+        self.text.tag_configure("ime_preedit", underline=True)
+        hwnd = self.winfo_id()  # Tk 将原生输入焦点保留在顶层客户窗口。
+
+        @_WNDPROC
+        def window_proc(handle, message, wparam, lparam):
+            # 原生消息可能嵌套在 Tcl 调用中；这里只读 IMM 数据，不能调用 Tk。
+            try:
+                if message == 0x0281:  # WM_IME_SETCONTEXT：只隐藏默认预编辑浮层。
+                    lparam &= ~0x80000000
+                elif message == 0x010D and self._ime_target is not None:
+                    self._ime_native_widget = self._ime_target
+                    self._ime_pending.put(("start", self._ime_target, None, None))
+                    return 0
+                elif message == 0x010F and self._ime_native_widget is not None:
+                    widget = self._ime_native_widget
+                    context = imm32.ImmGetContext(handle)
+                    try:
+                        if lparam & 0x0800:  # GCS_RESULTSTR
+                            self._ime_pending.put(("result", widget, self._ime_string(context, 0x0800), None))
+                        if lparam & 0x0008:  # GCS_COMPSTR
+                            value = self._ime_string(context, 0x0008)
+                            cursor = imm32.ImmGetCompositionStringW(context, 0x0080, None, 0)
+                            self._ime_pending.put(("update", widget, value, cursor))
+                        elif not lparam:
+                            self._ime_pending.put(("end", widget, None, None))
+                    finally:
+                        imm32.ImmReleaseContext(handle, context)
+                    return 0
+                elif message == 0x010E and self._ime_native_widget is not None:
+                    self._ime_pending.put(("end", self._ime_native_widget, None, None))
+                    self._ime_native_widget = None
+                    return 0
+                elif message == 0x0082:  # WM_NCDESTROY
+                    user32.SetWindowLongPtrW(handle, -4, self._ime_old_proc)
+            except Exception:
+                self._ime_pending.put(("error", None, sys.exc_info(), None))
+            return user32.CallWindowProcW(self._ime_old_proc, handle, message, wparam, lparam)
+
+        self._ime_proc = window_proc  # ctypes 回调必须与窗口保持相同生命周期。
+        self._ime_old_proc = user32.SetWindowLongPtrW(hwnd, -4, ctypes.cast(window_proc, ctypes.c_void_p))
+        self._ime_pump_job = self.after(8, self._pump_inline_ime)
+
+    def _pump_inline_ime(self):
+        while not self._ime_pending.empty():
+            kind, widget, value, cursor = self._ime_pending.get()
+            if kind == "error":
+                self.app.root.report_callback_exception(*value)
+                continue
+            if not widget.winfo_exists():
+                continue
+            if kind == "start":
+                self._begin_preedit(widget)
+            elif kind == "update":
+                if value or self._ime_active:
+                    self._begin_preedit(widget)
+                    self._replace_preedit(value, cursor)
+            elif kind == "result":
+                self._begin_preedit(widget)
+                self._finish_preedit(value)
+            elif kind == "end":
+                self._finish_preedit()
+        self._ime_pump_job = self.after(8, self._pump_inline_ime)
+
+    @staticmethod
+    def _ime_string(context, flag):
+        size = imm32.ImmGetCompositionStringW(context, flag, None, 0)
+        if size <= 0:
+            return ""
+        buffer = ctypes.create_string_buffer(size)
+        imm32.ImmGetCompositionStringW(context, flag, buffer, size)
+        return buffer.raw.decode("utf-16-le")
+
+    def _begin_preedit(self, widget=None):
+        widget = widget or self.focus_get()
+        if widget != self.text and not isinstance(widget, tk.Entry):
+            return False
+        if self._ime_active:
+            return True
+        self._ime_widget = widget
+        self._ime_selected = ""
+        self._ime_selected_images = []
+        if widget == self.text:
+            selection = widget.tag_ranges("sel")
+            if selection:
+                widget.mark_set("insert", selection[0])
+                self._ime_selected = widget.get(*selection)
+                for kind, name, index in widget.dump(*selection, image=True):
+                    distance = widget.count(selection[0], index, "indices")
+                    self._ime_selected_images.append((distance[0] if distance else 0,
+                                                      widget.image_cget(index, "image")))
+                widget.delete(*selection)
+            self._ime_start = widget.index("insert")
+        else:
+            if widget.selection_present():
+                start, end = widget.index("sel.first"), widget.index("sel.last")
+                self._ime_selected = widget.get()[start:end]
+                widget.delete(start, end)
+                widget.icursor(start)
+            self._ime_start = widget.index("insert")
+        self._ime_length = 0
+        self._ime_active = True
+        return True
+
+    def _replace_preedit(self, value, cursor=None):
+        widget, start = self._ime_widget, self._ime_start
+        length = int(widget.tk.call("string", "length", value))
+        cursor = length if cursor is None else max(0, min(cursor, length))
+        if widget == self.text:
+            widget.delete(start, f"{start}+{self._ime_length}c")
+            widget.insert(start, value, ("ime_preedit",))
+            widget.mark_set("insert", f"{start}+{cursor}c")
+            widget.see("insert")
+            self._queue_strikes()
+        else:
+            widget.delete(start, start + self._ime_length)
+            widget.insert(start, value)
+            widget.icursor(start + cursor)
+            self._draw_chip()
+        self._ime_length = length
+        widget.after_idle(self._sync_ime, widget)
+
+    def _finish_preedit(self, result=None):
+        if not self._ime_active:
+            return
+        widget = self._ime_widget
+        self._replace_preedit(self._ime_selected if result is None else result)
+        if widget == self.text:
+            if result is None:
+                for offset, image in self._ime_selected_images:
+                    widget.image_create(f"{self._ime_start}+{offset}c", image=image, align="center")
+                widget.mark_set("insert", f"{self._ime_start}+{self._ime_length + len(self._ime_selected_images)}c")
+            widget.tag_remove("ime_preedit", "1.0", "end")
+        self._ime_active = False
+        self._ime_widget = None
+        if widget == self.text:
+            self.after_idle(self._on_keyrelease, None)
+        elif self.focus_get() != widget:
+            self.after_idle(lambda: widget.event_generate("<FocusOut>") if widget.winfo_exists() else None)
+
+    def _sync_ime(self, widget):
+        if not widget.winfo_exists():
+            return
+        hwnd = widget.winfo_id()
+        context = imm32.ImmGetContext(hwnd)
+        if not context:
+            return
+        try:
+            box = widget.bbox("insert")
+            if box:
+                point = _POINT(box[0], box[1])
+                focus = user32.GetFocus() or hwnd
+                user32.MapWindowPoints(hwnd, focus, ctypes.byref(point), 1)
+                area = wintypes.RECT(point.x, point.y, point.x + box[2], point.y + box[3])
+                form = _CANDIDATEFORM(0, 0x0040, _POINT(point.x, area.bottom + 6), area)
+                imm32.ImmSetCandidateWindow(context, ctypes.byref(form))
+        finally:
+            imm32.ImmReleaseContext(hwnd, context)
+
+    def _bind_ime(self, widget):
+        # 焦点状态由 Tk 事件更新，原生输入法回调不进入 Tcl。
+        def focus_in(_event):
+            self._ime_target = widget
+            widget.after_idle(self._sync_ime, widget)
+        def focus_out(_event):
+            if self._ime_target == widget:
+                self._ime_target = None
+        widget.bind("<FocusIn>", focus_in, add="+")
+        widget.bind("<FocusOut>", focus_out, add="+")
+        widget.bind("<Destroy>", focus_out, add="+")
+        for event in ("<KeyPress>", "<ButtonRelease-1>"):
+            widget.bind(event, lambda e: widget.after_idle(self._sync_ime, widget), add="+")
+
+    def _queue_strikes(self):
+        if getattr(self, "_strike_job", None):
+            self.after_cancel(self._strike_job)
+        self._strike_job = self.after_idle(self._draw_strikes)
+
+    def _draw_strikes(self):
+        self._strike_job = None
+        for widget in self._strike_widgets:
+            widget.destroy()
+        self._strike_widgets.clear()
+        for row, line in enumerate(self.d["lines"], 1):
+            if line["type"] != "todo" or not line["checked"]:
+                continue
+            start = f"{row}.{self._prefix_len(line)}"
+            end = f"{row}.end"
+            while self.text.compare(start, "<", end):
+                stop = self.text.index(f"{start} display lineend")
+                if self.text.compare(stop, ">", end):
+                    stop = self.text.index(end)
+                first = self.text.bbox(start)
+                last = self.text.bbox(f"{stop}-1c") if self.text.compare(stop, ">", start) else None
+                if first and last:
+                    bar = tk.Frame(self.text, bg="#606873", height=2, cursor="xterm")
+                    display = self.text.dlineinfo(start)
+                    baseline = display[1] + display[4]
+                    middle = baseline - round(self.done_font.metrics("ascent") * 0.33)
+                    bar.place(x=first[0], y=middle - 1,
+                              width=max(1, last[0] + last[2] - first[0]), height=2, bordermode="ignore")
+                    for event in ("<Button-1>", "<B1-Motion>", "<ButtonRelease-1>"):
+                        bar.bind(event, lambda e, sequence=event: self.text.event_generate(
+                            sequence, x=e.x_root - self.text.winfo_rootx(),
+                            y=e.y_root - self.text.winfo_rooty(), time=e.time, state=e.state))
+                    self._strike_widgets.append(bar)
+                next_start = self.text.index(f"{start} +1 display lines display linestart")
+                if self.text.compare(next_start, "<=", start):
+                    break
+                start = next_start
 
     # ---- 底部添加条 ----
     def add_todo(self):
@@ -378,57 +679,96 @@ class NoteWindow(tk.Toplevel):
 
     def _pill_press(self, _e):
         # 按压态：短暂加深再回弹
-        self.add_pill.itemconfig("pill", fill="#EFF1F3")
-        self.add_pill.after(120, lambda: self.add_pill.itemconfig("pill", fill="#FFFFFF"))
+        self._draw_pill(pressed=True)
+        self.add_pill.after(120, self._draw_pill)
         self.add_todo()
 
-    def _draw_pill(self, width=None):
+    def _draw_pill(self, width=None, pressed=False):
         c = self.add_pill
         w = width or c.winfo_width()
         if w < 40:
             return
+        # 放大绘制再缩小，让细边框和两端半圆都有抗锯齿。
+        scale = 4
+        img = Image.new("RGB", (w * scale, 36 * scale), self._bg)
+        draw = ImageDraw.Draw(img)
+        draw.rounded_rectangle((scale, scale, (w - 2) * scale, 35 * scale),
+                               radius=17 * scale,
+                               fill="#EFF1F3" if pressed else "#FFFFFF",
+                               outline="#D9DCE1", width=scale)
+        self._pill_image = ImageTk.PhotoImage(
+            img.resize((w, 36), Image.Resampling.LANCZOS), master=c)
         c.delete("all")
-        round_rect(c, 1, 1, w - 2, 35, 14, fill="#FFFFFF",
-                   outline="#D9DCE1", tags="pill")
-        c.create_text(w / 2, 18, text=GLYPH_NEW, font=(self.app.icon_font, 12), fill=INK)
+        c.create_image(0, 0, anchor="nw", image=self._pill_image)
+        self._add_icon = load_icon(c, "plus", size=20)
+        c.create_image(w / 2, 18, image=self._add_icon)
 
     # ---- 标题胶囊 ----
+    def _title_max_width(self):
+        reserved = 8  # 标题两侧间距和与操作按钮之间的留白。
+        for button in self._tool_btns:
+            padding = button.pack_info()["padx"]
+            padding = (padding, padding) if isinstance(padding, int) else self.tk.splitlist(padding)
+            reserved += button.winfo_reqwidth() + sum(int(value) for value in padding)
+        return max(44, self.winfo_width() - 2 * (RADIUS + 4) - reserved)
+
     def _draw_chip(self):
         c = self.title_chip
         c.delete("all")
-        title = self.d.get("title", "")
+        editing = self._title_editor is not None and self._title_editor.winfo_exists()
+        title = self._title_var.get() if editing else self.d.get("title", "")
         text = title or "无标题"
-        while self._chip_font.measure(text) > 140 and len(text) > 2:
-            text = text[:-2] + "…"
-        w = self._chip_font.measure(text) + 26
+        font = self._title_edit_font if editing else self._chip_font
+        natural_width = font.measure(text) + 26
+        w = min(self._title_max_width(), max(44, natural_width))
         c.config(width=w, height=28)
         round_rect(c, 1, 2, w - 1, 26, 11, fill="#FFFFFF", outline="#E2E4E8")
+        if editing:
+            e = self._title_editor
+            e.place(x=9, y=5, width=max(20, w - 18), height=19)
+            if natural_width <= w:
+                e.xview_moveto(0)
+            elif e.index("insert") == e.index("end"):
+                e.xview_moveto(1)
+            return
+        if self._chip_font.measure(text) > w - 26:
+            while text and self._chip_font.measure(text + "…") > w - 26:
+                text = text[:-1]
+            text += "…"
         c.create_text(w / 2, 14, text=text, font=self._chip_font,
                       fill="#1F2328" if title else "#A9AFB6")
 
     def edit_title(self):
+        if any(isinstance(child, tk.Entry) for child in self.title_chip.winfo_children()):
+            return
+        Tooltip._hide()
         self.title_chip.pack_forget()
-        e = tk.Entry(self.title_box, bd=0, width=12,
-                     highlightthickness=2,
-                     highlightbackground="#E2DFD8",
-                     highlightcolor="#8C867C",
-                     bg="#FFFFFF", fg="#3A362F",
-                     font=self._chip_font, justify="center")
-        e.pack(ipady=3, pady=1)
-        e.insert(0, self.d.get("title", ""))
+        self._title_var = tk.StringVar(master=self, value=self.d.get("title", ""))
+        e = tk.Entry(self.title_chip, bd=0, relief="flat",
+                     highlightthickness=0, bg="#FFFFFF", fg="#1F2328",
+                     insertbackground="#1F2328", selectbackground="#E2E8F0",
+                     selectforeground="#1F2328", font=self._title_edit_font, justify="center",
+                     textvariable=self._title_var)
+        self._title_editor = e
+        self._title_var.trace_add("write", lambda *_: self._draw_chip())
+        self.title_chip.pack(pady=8)
+        self._draw_chip()
+        self._bind_ime(e)
         e.focus_set()
         e.select_range(0, "end")
 
         def commit(_e=None):
+            if not e.winfo_exists() or self._ime_composing(e):
+                return
             self.d["title"] = e.get().strip()
             self.app.schedule_save()
             e.destroy()
-            self.title_chip.pack()
+            self._title_editor = None
             self._draw_chip()
 
         e.bind("<Return>", commit)
         e.bind("<Escape>", commit)
-        e.bind("<FocusOut>", commit)
+        e.bind("<FocusOut>", commit, add="+")
 
     # ---- 渲染 ----
     def render(self, keep_cursor=True):
@@ -438,14 +778,12 @@ class NoteWindow(tk.Toplevel):
         self.d["lines"] = lines
         for i, ln in enumerate(lines):
             row = i + 1
-            prefix = (BOX_ON if ln["checked"] else BOX_OFF) + PREFIX_PAD \
-                if ln["type"] == "todo" else ""
-            self.text.insert("end", prefix + ln["text"])
             if ln["type"] == "todo":
-                self.text.tag_add("boxon" if ln["checked"] else "boxoff",
-                                  f"{row}.0", f"{row}.{len(prefix)}")
-                if ln["checked"]:
-                    self.text.tag_add("done", f"{row}.{len(prefix)}", f"{row}.end")
+                self.text.image_create("end", image=self._check_images[ln["checked"]], align="center")
+                self.text.insert("end", PREFIX_PAD)
+            self.text.insert("end", ln["text"])
+            if ln["type"] == "todo" and ln["checked"]:
+                self.text.tag_add("done", f"{row}.{self._prefix_len(ln)}", f"{row}.end")
             if i < len(lines) - 1:
                 self.text.insert("end", "\n")
         if keep_cursor:
@@ -454,10 +792,11 @@ class NoteWindow(tk.Toplevel):
                 cur = end
             self.text.mark_set("insert", cur)
         self.update_status()
+        self._queue_strikes()
 
     @staticmethod
     def _prefix_len(ln):
-        return len(BOX_OFF) + len(PREFIX_PAD) if ln["type"] == "todo" else 0
+        return 1 + len(PREFIX_PAD) if ln["type"] == "todo" else 0
 
     def _row_col(self, index):
         r, c = index.split(".")
@@ -468,36 +807,60 @@ class NoteWindow(tk.Toplevel):
         done = sum(1 for l in todos if l["checked"])
         self.status.config(text=f"待办 {done}/{len(todos)}" if todos else "")
         self.clear_btn.config(fg="#6F7780" if done else "#A9AFB6")
+        self._layout_footer()
 
     # ---- 编辑事件 ----
-    def _on_keyrelease(self, _e):
-        lines = self.d["lines"]
-        row, col = self._row_col(self.text.index("insert"))
-        if row >= len(lines):
+    def _paint_selection(self, _event=None):
+        # 原生选区保留复制/删除语义；只给实际字符上色，不填满换行后的空白。
+        t = self.text
+        t.tag_remove("selection_fill", "1.0", "end")
+        selected = t.tag_ranges("sel")
+        if not selected:
             return
-        ln = lines[row]
-        pre = self._prefix_len(ln)
-        if col < pre:
-            self.text.mark_set("insert", f"{row+1}.0+{pre}c")
-            return
-        content = self.text.get(f"{row+1}.0+{pre}c", f"{row+1}.end")
-        if "\n" in content:  # 多行粘贴：拆成多条
-            parts = content.split("\n")
-            new = []
-            for j, p in enumerate(parts):
-                if j == 0:
-                    ln["text"] = p
-                    new.append(ln)
-                else:
-                    new.append({"type": "text", "text": p, "checked": False})
-            lines[row:row+1] = new
-            self.render(keep_cursor=False)
-            self.text.mark_set("insert", "end-1c lineend")
+        first, last = selected
+        for row in range(int(str(first).split(".")[0]), int(str(last).split(".")[0]) + 1):
+            start = first if t.compare(first, ">", f"{row}.0") else f"{row}.0"
+            end = last if t.compare(last, "<", f"{row}.end") else f"{row}.end"
+            if t.compare(start, "<", end):
+                t.tag_add("selection_fill", start, end)
+
+    def _sync_lines_from_text(self):
+        # 选区删除和粘贴都可能改变多行，不能只保存光标所在行。
+        t = self.text
+        images = {index: t.image_cget(index, "image")
+                  for kind, name, index in t.dump("1.0", "end-1c", image=True)}
+        checkbox_images = {str(image) for image in self._check_images.values()}
+        lines = []
+        for row in range(1, int(t.index("end-1c").split(".")[0]) + 1):
+            image = images.get(f"{row}.0")
+            todo = image in checkbox_images
+            content = t.get(f"{row}.0", f"{row}.end")
+            if todo and content.startswith(PREFIX_PAD):
+                content = content[len(PREFIX_PAD):]
+            lines.append({"type": "todo" if todo else "text", "text": content,
+                          "checked": todo and image == str(self._check_images[True])})
+        old = self.d["lines"]
+        self.d["lines"] = lines
+        structure_changed = (len(old) != len(lines) or
+                             any(a["type"] != b["type"] for a, b in zip(old, lines)))
+        if structure_changed:
+            self.render()
         else:
-            ln["text"] = content
+            self.update_status()
+
+    def _on_keyrelease(self, _e):
+        if self._ime_composing(self.text):
+            return
+        self._queue_strikes()
+        self._sync_lines_from_text()
         self.app.schedule_save()
 
     def _on_enter(self, _e):
+        if self._ime_composing(self.text):
+            return
+        if self.text.tag_ranges("sel"):
+            self.text.delete("sel.first", "sel.last")
+        self._sync_lines_from_text()
         row, col = self._row_col(self.text.index("insert"))
         lines = self.d["lines"]
         ln = lines[row]
@@ -514,6 +877,10 @@ class NoteWindow(tk.Toplevel):
         return "break"
 
     def _on_backspace(self, _e):
+        if self._ime_composing(self.text):
+            return
+        if self.text.tag_ranges("sel"):
+            return None  # 交给 Text 默认绑定删除选区，随后统一同步所有行。
         row, col = self._row_col(self.text.index("insert"))
         lines = self.d["lines"]
         ln = lines[row]
@@ -539,7 +906,7 @@ class NoteWindow(tk.Toplevel):
             return None
         ln = lines[row]
         pre = self._prefix_len(ln)
-        if pre and col <= len(BOX_OFF) + 1:  # 点在勾选框上
+        if pre and col < pre:  # 点在勾选框上
             self.toggle_done(row)
             return "break"
         if col < pre:
@@ -569,22 +936,7 @@ class NoteWindow(tk.Toplevel):
     def toggle_done(self, row):
         ln = self.d["lines"][row]
         ln["checked"] = not ln["checked"]
-        pre = self._prefix_len(ln)
-        self.text.delete(f"{row+1}.0", f"{row+1}.{pre}")
-        self.text.insert(f"{row+1}.0", (BOX_ON if ln["checked"] else BOX_OFF) + PREFIX_PAD)
-        tag = "boxon" if ln["checked"] else "boxoff"
-        self.text.tag_add(tag, f"{row+1}.0", f"{row+1}.{pre}")
-        if ln["checked"]:
-            self.text.tag_add("done", f"{row+1}.{pre}", f"{row+1}.end")
-        else:
-            self.text.tag_remove("done", f"{row+1}.0", f"{row+1}.end")
-        self.text.mark_set("insert", f"{row+1}.0+{pre}c")
-        # Q弹：只把这一行的勾选框放大一下再弹回
-        pop = f"pop{row}-{uuid.uuid4().hex[:6]}"
-        self.text.tag_add(pop, f"{row+1}.0", f"{row+1}.{pre}")
-        self.text.tag_config(pop, font=(self.app.icon_font, 16))
-        self.text.after(90, lambda: self.text.tag_delete(pop))
-        self.update_status()
+        self.render()
         self.app.schedule_save()
 
     def convert(self, row, to):
@@ -722,57 +1074,6 @@ class NoteWindow(tk.Toplevel):
             self._boosted = False
             self.attributes("-alpha", self.d["opacity"])
 
-    # ---- 弹出层（圆角） ----
-    def _popup(self, w, h, builder):
-        p = tk.Toplevel(self)
-        p.overrideredirect(True)
-        p.configure(bg=T_COLOR)
-        p.attributes("-transparentcolor", T_COLOR)
-        p.geometry(f"{w}x{h}")
-        cv = tk.Canvas(p, bg=T_COLOR, highlightthickness=0, bd=0)
-        cv.pack(fill="both", expand=True)
-        round_rect(cv, 1, 1, w - 2, h - 2, 12, fill="#FFFFFF", outline="#DDD8D0")
-        inner = tk.Frame(p, bg="#FFFFFF")
-        inner.place(x=10, y=8, width=w - 20, height=h - 16)
-        builder(inner)
-        p.update_idletasks()
-        x = self.winfo_rootx() + self.winfo_width() - w - 16
-        y = self.winfo_rooty() + 40
-        p.geometry(f"+{max(0, x)}+{y}")
-        p.grab_set(); p.focus_set()
-        p.bind("<FocusOut>", lambda e: p.destroy())
-        return p
-
-    def open_colors(self):
-        p = None
-
-        def build(f):
-            nonlocal p
-            row = tk.Frame(f, bg="#FFFFFF")
-            row.pack(anchor="w")
-            for name, (bg, _bd) in PALETTE.items():
-                c = tk.Canvas(row, width=26, height=26, bg="#FFFFFF",
-                              highlightthickness=0, cursor="hand2")
-                c.create_oval(3, 3, 23, 23, fill=bg, width=2,
-                              outline="#4A453D" if name == self.d["color"] else "#D8D3CA")
-                c.pack(side="left", padx=1, pady=1)
-                c.bind("<Button-1>", lambda e, n=name: (self.set_color(n), p.destroy()))
-            tk.Label(f, text="点击选择便签颜色", bg="#FFFFFF", fg="#A8A39A",
-                     font=("Microsoft YaHei UI", 8)).pack(anchor="w", padx=2)
-        p = self._popup(260, 72, build)
-
-    def set_color(self, name):
-        self.d["color"] = name
-        self._bg, self._border = PALETTE[name]
-        self.text.config(bg=self._bg)
-        for w in self._bg_widgets:
-            w.config(bg=self._bg)
-        self._draw_chip()
-        self._restyle()
-        self._relayout()
-        self.update_status()
-        self.app.schedule_save()
-
     def hide(self):
         self.d["visible"] = False
         self.withdraw()
@@ -782,6 +1083,7 @@ class NoteWindow(tk.Toplevel):
         self.d["visible"] = True
         self.deiconify()
         self.overrideredirect(True)
+        self._round_window()
         self.apply_z()
 
     def delete_self(self):
@@ -855,16 +1157,6 @@ class SettingsWindow(tk.Toplevel):
         s.set(int(app.data["settings"]["opacity"] * 100))
         s.pack(side="right")
 
-        row2 = tk.Frame(f, bg="#FAFAF8"); row2.pack(fill="x", pady=2)
-        tk.Label(row2, text="新便签默认颜色", bg="#FAFAF8").pack(anchor="w")
-        cs = tk.Frame(row2, bg="#FAFAF8"); cs.pack(anchor="w", pady=4)
-        for name, (bg, _bd) in PALETTE.items():
-            c = tk.Canvas(cs, width=22, height=22, bg="#FAFAF8",
-                          highlightthickness=0, cursor="hand2")
-            c.create_oval(2, 2, 20, 20, fill=bg, outline="#C9C4BB")
-            c.pack(side="left", padx=3)
-            c.bind("<Button-1>", lambda e, n=name: self._color(n))
-
         row3 = tk.Frame(f, bg="#FAFAF8"); row3.pack(fill="x", pady=(8, 0))
         tk.Label(row3, text="字号", bg="#FAFAF8").pack(side="left")
         s2 = tk.Scale(row3, from_=9, to=16, orient="horizontal", length=150,
@@ -887,10 +1179,6 @@ class SettingsWindow(tk.Toplevel):
 
     def _op(self, v):
         self.app.data["settings"]["opacity"] = int(v) / 100
-        self._save()
-
-    def _color(self, n):
-        self.app.data["settings"]["color"] = n
         self._save()
 
     def _font(self, v):
@@ -927,8 +1215,6 @@ class App:
 
         self.base_font = tkfont.Font(family="Microsoft YaHei UI",
                                      size=self.data["settings"]["fontSize"])
-        fams = tkfont.families(self.root)
-        self.icon_font = ICON_FONT if ICON_FONT in fams else ICON_FONT_FALLBACK
 
         self._restore_notes()
         self._start_tray()
@@ -967,6 +1253,8 @@ class App:
         self.base_font.config(size=self.data["settings"]["fontSize"])
         for w in self.notes.values():
             w.done_font.config(size=self.data["settings"]["fontSize"])
+            w._make_check_images()
+            w.render()
 
     def new_note(self):
         cx, cy = cursor_pos()
