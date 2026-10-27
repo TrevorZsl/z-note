@@ -322,7 +322,7 @@ class NoteWindow(tk.Toplevel):
 
         # -- 底部状态栏 + 添加条 --
         self.bar = tk.Frame(self, bg=self._bg)
-        self.status = tk.Label(self.bar, text="", bg=self._bg, fg=QUIET,
+        self.status = tk.Label(self, text="", bg=self._bg, fg=QUIET,
                                font=(UI_FONT, 9), padx=0, bd=0)
         self.clear_btn = tk.Label(self.bar, text="清除已完成", bg=self._bg,
                                   fg="#A9AFB6", font=(UI_FONT, 9),
@@ -330,7 +330,6 @@ class NoteWindow(tk.Toplevel):
         self.clear_btn.bind("<Enter>", lambda e: self.clear_btn.config(fg="#454B52"))
         self.clear_btn.bind("<Leave>", lambda e: self.update_status())
         self.clear_btn.bind("<Button-1>", lambda e: self.clear_done())
-        Tooltip(self.clear_btn, lambda: "清除已完成")
         self.add_pill = tk.Canvas(self, bg=self._bg, highlightthickness=0, cursor="hand2")
         self.add_pill.bind("<Button-1>", self._pill_press)
         Tooltip(self.add_pill, lambda: "添加待办")
@@ -379,12 +378,10 @@ class NoteWindow(tk.Toplevel):
         toolbar_h = max(48, self.title_chip.winfo_reqheight())
         text_y = toolbar_h + 12
         self.toolbar.place(x=ix, y=6, width=w - 2 * ix, height=toolbar_h)
-        self.text.place(x=ix, y=text_y, width=w - 2 * ix,
-                        height=max(20, h - text_y - 86))
-        self._layout_footer()
+        self._layout_footer(text_y)
         self._queue_strikes()
 
-    def _layout_footer(self):
+    def _layout_footer(self, text_y=None):
         w, h = self.winfo_width(), self.winfo_height()
         if w < 50 or h < 50:
             return
@@ -400,8 +397,12 @@ class NoteWindow(tk.Toplevel):
         pill_height = min(max(36, self.title_chip.winfo_reqheight()), pill_width - 4)
         pill_x = (w - pill_width) // 2
         center_y = h - 10 - pill_height / 2
-        self.bar.place(x=0, y=round(center_y - 13), width=w, height=26)
-        self.status.place(x=pill_x / 2, y=13, anchor="center")
+        bar_y = round(center_y - 13)
+        if text_y is not None:
+            self.text.place(x=RADIUS + 4, y=text_y, width=w - 2 * (RADIUS + 4),
+                            height=max(20, bar_y - text_y - 8))
+        self.bar.place(x=0, y=bar_y, width=w, height=26)
+        self.status.place(x=pill_x / 2, y=bar_y + 13, anchor="center", height=26)
         self.clear_btn.place(x=(pill_x + pill_width + w) / 2, y=13, anchor="center")
         self.add_pill.place(x=pill_x, y=h - 10 - pill_height,
                             width=pill_width, height=pill_height)
@@ -684,10 +685,19 @@ class NoteWindow(tk.Toplevel):
                         self._selection_masks.append(mask)
                 size = self._check_images[False].width()
                 count = self.text.count(f"{row}.0", f"{row}.end", "displaylines")
-                middle = (self.text.dlineinfo(f"{row}.0 +{(count[0] + 1) // 2} display lines")
-                          if count else self.text.dlineinfo(f"{row}.0"))
-                y = (middle[1] + (0 if count and count[0] % 2 else middle[3] // 2) - size // 2
-                     if middle else None)
+                middle_index = (f"{row}.0 +{(count[0] + 1) // 2} display lines"
+                                if count else f"{row}.0")
+                middle = self.text.dlineinfo(middle_index)
+                middle_y = middle[1] if middle else None
+                if middle_y is None:
+                    previous_index = f"{middle_index} -1 display lines"
+                    previous = self.text.dlineinfo(previous_index)
+                    if previous:
+                        middle_y = previous[1] + self.text.count(previous_index, middle_index, "ypixels")[0]
+                full_height = (self.text.count(middle_index, f"{middle_index} +1 display lines", "ypixels")[0]
+                               if middle_y is not None else 0)
+                y = (middle_y + (0 if count and count[0] % 2 else full_height // 2) - size // 2
+                     if middle_y is not None else None)
                 if y is not None and -size < y < self.text.winfo_height():
                     box = tk.Label(self.text, image=self._check_images[line["checked"]],
                                    bg=self._bg, bd=0, cursor="hand2")
@@ -701,9 +711,8 @@ class NoteWindow(tk.Toplevel):
             start = f"{row}.{self._prefix_len(line)}"
             end = f"{row}.end"
             while self.text.compare(start, "<", end):
-                stop = self.text.index(f"{start} display lineend")
-                if self.text.compare(stop, ">", end):
-                    stop = self.text.index(end)
+                next_start = self.text.index(f"{start} +1 display lines display linestart")
+                stop = next_start if self.text.compare(next_start, "<", end) else end
                 first = self.text.bbox(start)
                 last = self.text.bbox(f"{stop}-1c") if self.text.compare(stop, ">", start) else None
                 if first and last:
@@ -720,7 +729,6 @@ class NoteWindow(tk.Toplevel):
                             sequence, x=e.x_root - self.text.winfo_rootx(),
                             y=e.y_root - self.text.winfo_rooty(), time=e.time, state=e.state))
                     self._strike_widgets.append(bar)
-                next_start = self.text.index(f"{start} +1 display lines display linestart")
                 if self.text.compare(next_start, "<=", start):
                     break
                 start = next_start

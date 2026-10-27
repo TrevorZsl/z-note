@@ -270,6 +270,27 @@ class NoteEditingTests(unittest.TestCase):
         self.assertEqual(self.note._checkbox_widgets[0].cget("bg"), self.note._bg)
         self.assertFalse(self.note._selection_masks)
 
+    def test_checkbox_does_not_move_as_its_line_is_clipped_at_bottom(self):
+        self.note.geometry("300x500")
+        self.app.base_font.configure(size=16)
+        self.note.d["lines"] = [{"type": "todo", "text": "啊" * 40, "checked": False}]
+        self.note.render()
+        self.app.root.update()
+        count = self.text.count("1.0", "1.end", "displaylines")[0]
+        self.assertEqual(count % 2, 0)
+        middle = f"1.0 +{(count + 1) // 2} display lines"
+        info = self.text.dlineinfo(middle)
+        original_y = self.note._checkbox_widgets[0].winfo_y()
+        self.text.place_configure(height=info[1] + info[3] - 5)
+        self.app.root.update()
+        self.assertEqual(self.note._checkbox_widgets[0].winfo_y(), original_y)
+        self.text.place_configure(height=original_y + 3)
+        self.app.root.update()
+        self.assertEqual(self.note._checkbox_widgets[0].winfo_y(), original_y)
+        self.text.place_configure(height=original_y)
+        self.app.root.update()
+        self.assertFalse(self.note._checkbox_widgets)
+
     def test_add_button_border_is_visibly_thick(self):
         image = main.ImageTk.getimage(self.note._pill_image).convert("RGB")
         middle = image.width // 2
@@ -301,6 +322,16 @@ class NoteEditingTests(unittest.TestCase):
         self.note.toggle_done(1)
         self.app.root.update()
         self.assertFalse(self.note._strike_widgets)
+
+    def test_completed_wrapped_todo_strikes_every_display_line(self):
+        self.note.geometry("300x500")
+        self.note.d["lines"] = [{"type": "todo", "text": "啊" * 55, "checked": True}]
+        self.note.render()
+        self.app.root.update()
+        bars = self.note._strike_widgets
+        self.assertGreater(len(bars), 1)
+        for bar in bars[:-1]:
+            self.assertGreater(bar.winfo_width(), self.text.winfo_width() // 2)
 
     def test_selecting_newline_does_not_paint_the_empty_row_tail(self):
         self.text.tag_add("sel", "2.end", "3.0")
@@ -356,12 +387,36 @@ class NoteEditingTests(unittest.TestCase):
         self.app.root.update()
         center = self.note.add_pill.winfo_y() + self.note.add_pill.winfo_height() / 2
         for label in (self.note.status, self.note.clear_btn):
-            label_center = (self.note.bar.winfo_y() + label.winfo_y() + label.winfo_height() / 2)
+            label_center = label.winfo_rooty() - self.note.winfo_rooty() + label.winfo_height() / 2
             self.assertLessEqual(abs(label_center - center), 1)
+        self.assertIs(self.note.status.master, self.note)
+        self.assertEqual(self.note.status.winfo_height(), self.note.bar.winfo_height())
         self.assertLess(self.note.bar.winfo_x() + self.note.status.winfo_width(),
                         self.note.add_pill.winfo_x())
         self.assertGreater(self.note.bar.winfo_x() + self.note.clear_btn.winfo_x(),
                            self.note.add_pill.winfo_x() + self.note.add_pill.winfo_width())
+
+    def test_body_uses_space_above_footer_when_resized(self):
+        for height in (230, 340, 500):
+            self.note.geometry(f"300x{height}")
+            self.app.root.update()
+            gap = self.note.bar.winfo_y() - (self.text.winfo_y() + self.text.winfo_height())
+            self.assertEqual(gap, 8)
+
+    def test_body_shrinks_before_footer_moves_up(self):
+        self.note.geometry("300x500")
+        self.app.root.update()
+        body_heights_at_footer_move = []
+        place_bar = self.note.bar.place
+
+        def record_body_height(**kwargs):
+            body_heights_at_footer_move.append(int(self.text.place_info()["height"]))
+            return place_bar(**kwargs)
+
+        with patch.object(self.note.bar, "place", side_effect=record_body_height):
+            self.note.geometry("300x230")
+            self.app.root.update()
+        self.assertEqual(body_heights_at_footer_move[-1], self.text.winfo_height())
 
     def test_title_grows_and_shrinks_while_editing_without_hiding_buttons(self):
         self.note.d["title"] = "日"
