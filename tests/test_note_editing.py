@@ -75,6 +75,102 @@ class NoteEditingTests(unittest.TestCase):
         self.app.root.update()
         self.assertEqual(self.note.d["title"], "新名称")
 
+    def test_opacity_slider_updates_existing_and_new_notes_in_five_percent_steps(self):
+        settings = main.SettingsWindow(self.app)
+        self.app.root.update()
+        self.app.opacity_scale.set(73)
+        self.app.root.update()
+        self.assertEqual(self.app.opacity_scale.get(), 75)
+        settings._op(self.app.opacity_scale.get())
+        self.assertEqual(self.app.data["settings"]["opacity"], 0.75)
+        self.assertEqual(self.note.d["opacity"], 0.75)
+        self.assertAlmostEqual(float(self.note.attributes("-alpha")), 0.75, places=2)
+        other = self.app.new_note()
+        self.assertEqual(other.d["opacity"], 0.75)
+        self.note._ctrl_wheel(type("Wheel", (), {"delta": 120})())
+        self.assertEqual(other.d["opacity"], 0.8)
+        self.assertEqual(self.app.opacity_scale.get(), 80)
+        settings.destroy()
+
+    def test_old_opacity_values_are_reset_once(self):
+        old = {"schemaVersion": 1,
+               "settings": dict(main.DEFAULT_SETTINGS, opacity=0.6),
+               "notes": [dict(self.note.d, opacity=0.7)]}
+        with patch.object(main, "load_data", return_value=old), \
+             patch.object(main, "save_data") as save:
+            app = main.App()
+            try:
+                self.assertEqual(app.data["schemaVersion"], 2)
+                self.assertEqual(app.data["settings"]["opacity"], 1.0)
+                self.assertEqual(app.data["notes"][0]["opacity"], 1.0)
+                save.assert_called()
+            finally:
+                for job in app.root.tk.call("after", "info"):
+                    app.root.tk.call("after", "cancel", job)
+                app.root.destroy()
+
+    def test_delete_dialog_keeps_message_above_buttons(self):
+        original_scaling = self.app.root.tk.call("tk", "scaling")
+        try:
+            for scaling in (1.0, 2.0):
+                self.app.root.tk.call("tk", "scaling", scaling)
+                self.note.delete_self()
+                self.app.root.update()
+                popup = next(child for child in self.note.winfo_children()
+                             if isinstance(child, main.tk.Toplevel))
+                canvas = next(child for child in popup.winfo_children()
+                              if isinstance(child, main.tk.Canvas))
+                self.assertLess(canvas.bbox("message")[3], canvas.bbox("confirm")[1])
+                self.assertLess(canvas.bbox("message")[2], popup.winfo_width())
+                popup.grab_release()
+                popup.destroy()
+        finally:
+            self.app.root.tk.call("tk", "scaling", original_scaling)
+
+    def test_large_title_stays_inside_toolbar_above_body(self):
+        self.note._chip_font.configure(size=20)
+        self.note._draw_chip()
+        self.note._last_sz = None
+        self.note._relayout()
+        self.app.root.update()
+        self.assertGreaterEqual(self.note.text.winfo_y(),
+                                self.note.toolbar.winfo_y() + self.note.toolbar.winfo_height())
+        self.assertGreaterEqual(self.note.title_chip.winfo_height(),
+                                self.note._chip_font.metrics("linespace") + 12)
+
+    def test_title_is_slightly_heavier_than_body(self):
+        for font in (self.app.base_font, self.note.done_font, self.note._chip_font,
+                     main.tkfont.nametofont("TkDefaultFont", root=self.app.root),
+                     main.tkfont.nametofont("TkMenuFont", root=self.app.root)):
+            self.assertEqual(font.actual("family"), main.UI_FONT)
+        self.assertEqual(self.app.base_font.actual("weight"), "normal")
+        self.assertEqual(self.note._chip_font.actual("weight"), "bold")
+
+    def test_title_text_is_visually_centered_in_chip(self):
+        self.note.d["title"] = "10.27"
+        self.note._draw_chip()
+        self.app.root.update()
+        canvas = self.note.title_chip
+        border = next(item for item in canvas.find_all() if canvas.type(item) == "polygon")
+        text = next(item for item in canvas.find_all() if canvas.type(item) == "text")
+        box = canvas.bbox(border)
+        label = canvas.bbox(text)
+        self.assertLessEqual(abs(box[0] + box[2] - label[0] - label[2] - 2), 1)
+        self.assertLessEqual(abs(box[1] + box[3] - label[1] - label[3] - 4), 1)
+
+    def test_todo_checkbox_has_rounded_square_outline(self):
+        image = main.ImageTk.getimage(self.note._check_images[False])
+        size = image.width
+        self.assertGreaterEqual(size, 18)
+        self.assertEqual(image.getpixel((0, 0))[3], 0)
+        self.assertGreater(image.getpixel((size // 4, 1))[3], 0)
+
+    def test_add_button_border_is_visibly_thick(self):
+        image = main.ImageTk.getimage(self.note._pill_image).convert("RGB")
+        middle = image.width // 2
+        self.assertLess(max(image.getpixel((middle, 1))), 100)
+        self.assertLess(max(image.getpixel((middle, 2))), 100)
+
     def test_queued_result_replaces_pinyin_once(self):
         self.text.mark_set("insert", "2.end")
         original = self.note.d["lines"][1]["text"]
@@ -216,11 +312,24 @@ class NoteEditingTests(unittest.TestCase):
         self.assertEqual(entry.get(), "日")
         self.assertEqual(self.note.title_chip.winfo_width(), old_width)
 
+    def test_title_entry_keeps_chinese_text_and_saves(self):
+        self.note.edit_title()
+        self.app.root.update()
+        entry = self.note._title_editor
+        entry.delete(0, "end")
+        entry.insert(0, "中文标题")
+        self.app.root.update()
+        self.assertEqual(entry.get(), "中文标题")
+        self.assertNotEqual(self.note._ime_target, entry)
+        entry.event_generate("<Return>")
+        self.app.root.update()
+        self.assertEqual(self.note.d["title"], "中文标题")
+
     def test_footer_labels_center_in_their_own_side_regions_at_different_widths(self):
-        self.note.status.config(font=("Microsoft YaHei UI", 14))
-        self.note.clear_btn.config(font=("Microsoft YaHei UI", 14))
-        for width in (280, 320, 460):
-            self.note.geometry(f"{width}x340")
+        self.note.status.config(font=(main.UI_FONT, 14))
+        self.note.clear_btn.config(font=(main.UI_FONT, 14))
+        for width, height in ((280, 230), (320, 340), (460, 500)):
+            self.note.geometry(f"{width}x{height}")
             self.app.root.update()
             pill = self.note.add_pill
             left = self.note.bar.winfo_x() + self.note.status.winfo_x()
@@ -234,6 +343,8 @@ class NoteEditingTests(unittest.TestCase):
             self.assertGreaterEqual(left, 12)
             self.assertLessEqual(right + self.note.clear_btn.winfo_width(), width - 12)
             self.assertLessEqual(abs(pill.winfo_x() + pill.winfo_width() / 2 - width / 2), .5)
+            self.assertGreaterEqual(pill.winfo_width(), pill.winfo_height() + 4)
+            self.assertEqual(height - pill.winfo_y() - pill.winfo_height(), 10)
             if width == 280:
                 self.assertEqual(self.note.clear_btn.cget("text"), "清除完成")
         self.assertEqual(self.note.clear_btn.cget("text"), "清除已完成")

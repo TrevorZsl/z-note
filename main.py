@@ -11,6 +11,7 @@ import pystray
 from PIL import Image, ImageDraw, ImageFont, ImageTk
 
 APP_NAME = "z-note"
+UI_FONT = "Times New Roman"
 DATA_DIR = os.path.join(os.environ.get("APPDATA", "."), "z-note")
 DATA_FILE = os.path.join(DATA_DIR, "notes.json")
 BACKUP_DIR = os.path.join(DATA_DIR, "backup")
@@ -96,17 +97,17 @@ def round_rect(cv, x1, y1, x2, y2, r, **kw):
 
 # ---------- 数据 ----------
 DEFAULT_SETTINGS = {"autostart": False, "showOnStartup": True,
-                    "opacity": 0.95, "color": "白", "fontSize": 11}
+                    "opacity": 1.0, "color": "白", "fontSize": 11}
 
 def load_data():
     if not os.path.exists(DATA_FILE):
-        return {"schemaVersion": 1, "settings": dict(DEFAULT_SETTINGS), "notes": []}
+        return {"schemaVersion": 2, "settings": dict(DEFAULT_SETTINGS), "notes": []}
     _rotate_backups()
     try:
         with open(DATA_FILE, "r", encoding="utf-8") as f:
             return json.load(f)
     except Exception:
-        return {"schemaVersion": 1, "settings": dict(DEFAULT_SETTINGS), "notes": []}
+        return {"schemaVersion": 2, "settings": dict(DEFAULT_SETTINGS), "notes": []}
 
 def _rotate_backups():
     try:
@@ -186,7 +187,7 @@ class Tooltip:
         if not text:
             return
         if Tooltip._font is None:
-            Tooltip._font = tkfont.Font(family="Microsoft YaHei UI", size=9, root=self._w)
+            Tooltip._font = tkfont.Font(family=UI_FONT, size=9, root=self._w)
         w, h = Tooltip._font.measure(text) + 24, 30
         tw = tk.Toplevel(self._w)
         tw.overrideredirect(True)
@@ -196,7 +197,7 @@ class Tooltip:
         cv.pack()
         round_rect(cv, 1, 1, w - 2, h - 2, 8, fill="#FFFFFF", outline="#D9DCE1")
         cv.create_text(w / 2, h / 2, text=text, fill="#3A3F46",
-                       font=("Microsoft YaHei UI", 9))
+                       font=(UI_FONT, 9))
         x = max(4, self._w.winfo_rootx() + self._w.winfo_width() // 2 - w // 2)
         y = self._w.winfo_rooty() - h - 6
         if y < 0:
@@ -205,7 +206,7 @@ class Tooltip:
         Tooltip._cur = tw
 
 # ---------- 工具栏圆形按钮 ----------
-def load_icon(master, name, size=18, active=False):
+def load_icon(master, name, size=22, active=False):
     state = "active" if active else "normal"
     with Image.open(os.path.join(ICON_DIR, f"{name}-{state}.png")) as image:
         return ImageTk.PhotoImage(image.resize((size, size), Image.Resampling.LANCZOS),
@@ -215,13 +216,13 @@ def load_icon(master, name, size=18, active=False):
 class ToolButton(tk.Canvas):
     """圆形悬浮底 + Lucide 图标的扁平按钮；active 态仅加深图标。"""
 
-    def __init__(self, master, icon, get_tip, cmd, bg, size=26):
+    def __init__(self, master, icon, get_tip, cmd, bg, size=30):
         super().__init__(master, width=size, height=size, bg=bg,
                          highlightthickness=0, bd=0, cursor="hand2")
         self._bg, self._active, self._cmd = bg, False, cmd
         self._image = load_icon(self, icon)
         self._active_image = load_icon(self, icon, active=True) if icon == "pin" else self._image
-        r = 11
+        r = 13
         self._pill = self.create_oval(size/2 - r, size/2 - r, size/2 + r, size/2 + r,
                                       state="hidden", outline="")
         self._icon = self.create_image(size/2, size/2 + 1, image=self._image)
@@ -255,7 +256,6 @@ class NoteWindow(tk.Toplevel):
     def __init__(self, app, data):
         super().__init__(app.root)
         self.app, self.d = app, data
-        self._boosted = False
         self._bg, self._border = NOTE_BG, NOTE_BORDER
         self.d["color"] = "白"
         self.configure(bg=self._bg)
@@ -270,8 +270,8 @@ class NoteWindow(tk.Toplevel):
         # -- 工具栏 --
         self.toolbar = tk.Frame(self, bg=self._bg)
         self._tool_btns = []
-        self._chip_font = tkfont.Font(family="Microsoft YaHei UI", size=10, weight="bold")
-        self._title_edit_font = tkfont.Font(family="Microsoft YaHei UI", size=10)
+        self._chip_font = tkfont.Font(family=UI_FONT, size=10, weight="bold")
+        self._title_edit_font = self._chip_font
 
         def btn(icon, get_tip, cmd):
             b = ToolButton(self.toolbar, icon, get_tip, cmd, self._bg)
@@ -287,10 +287,10 @@ class NoteWindow(tk.Toplevel):
         # 标题胶囊：悬停有提示，点击改名
         self.title_box = tk.Frame(self.toolbar, bg=self._bg)
         self.title_box.pack(side="left", padx=2)
-        self.title_chip = tk.Canvas(self.title_box, height=28, bg=self._bg,
+        self.title_chip = tk.Canvas(self.title_box, bg=self._bg,
                                     highlightthickness=0, cursor="hand2")
         self._title_editor = None
-        self.title_chip.pack(pady=8)
+        self.title_chip.pack()
         self.title_chip.bind("<Button-1>", lambda e: self.edit_title())
         Tooltip(self.title_chip, lambda: "点击修改标题")
 
@@ -306,7 +306,7 @@ class NoteWindow(tk.Toplevel):
             w.bind("<ButtonRelease-1>", self._drag_release)
 
         # -- 正文 --
-        self.done_font = tkfont.Font(family="Microsoft YaHei UI",
+        self.done_font = tkfont.Font(family=UI_FONT,
                                      size=app.data["settings"]["fontSize"])
         self.text = tk.Text(self, bg=self._bg, fg="#2B2F36", bd=0, highlightthickness=0,
                             padx=12, pady=10, wrap="word", spacing1=5, spacing3=6,
@@ -322,9 +322,9 @@ class NoteWindow(tk.Toplevel):
         # -- 底部状态栏 + 添加条 --
         self.bar = tk.Frame(self, bg=self._bg)
         self.status = tk.Label(self.bar, text="", bg=self._bg, fg=QUIET,
-                               font=("Microsoft YaHei UI", 9), padx=0, bd=0)
+                               font=(UI_FONT, 9), padx=0, bd=0)
         self.clear_btn = tk.Label(self.bar, text="清除已完成", bg=self._bg,
-                                  fg="#A9AFB6", font=("Microsoft YaHei UI", 9),
+                                  fg="#A9AFB6", font=(UI_FONT, 9),
                                   padx=0, bd=0, cursor="hand2")
         self.clear_btn.bind("<Enter>", lambda e: self.clear_btn.config(fg="#454B52"))
         self.clear_btn.bind("<Leave>", lambda e: self.update_status())
@@ -350,8 +350,6 @@ class NoteWindow(tk.Toplevel):
         t.bind("<KeyPress-BackSpace>", self._on_backspace)
         t.bind("<Button-1>", self._on_click)
         t.bind("<Button-3>", self._on_rightclick)
-        t.bind("<FocusIn>", lambda e: self._set_boost(True), add="+")
-        t.bind("<FocusOut>", lambda e: self._set_boost(False), add="+")
         t.bind("<Control-MouseWheel>", self._ctrl_wheel)
         self.bind("<FocusOut>", lambda e: self.sink_if_bottom())
 
@@ -375,8 +373,11 @@ class NoteWindow(tk.Toplevel):
         self.cv.delete("all")
         self.cv.create_rectangle(0, 0, w - 1, h - 1, fill=self._bg, outline=self._border)
         ix = RADIUS + 4
-        self.toolbar.place(x=ix, y=6, width=w - 2 * ix, height=44)
-        self.text.place(x=ix, y=56, width=w - 2 * ix, height=max(20, h - 56 - 86))
+        toolbar_h = max(48, self.title_chip.winfo_reqheight())
+        text_y = toolbar_h + 12
+        self.toolbar.place(x=ix, y=6, width=w - 2 * ix, height=toolbar_h)
+        self.text.place(x=ix, y=text_y, width=w - 2 * ix,
+                        height=max(20, h - text_y - 86))
         self._layout_footer()
         self._queue_strikes()
 
@@ -393,12 +394,15 @@ class NoteWindow(tk.Toplevel):
             label_width = max(self.status.winfo_reqwidth(), self.clear_btn.winfo_reqwidth())
         gap = min(10, max(6, (available - 2 * label_width - 36) // 2))
         pill_width = min(112, max(36, available - 2 * label_width - 2 * gap))
+        pill_height = min(max(36, self.title_chip.winfo_reqheight()), pill_width - 4)
         pill_x = (w - pill_width) // 2
-        self.bar.place(x=0, y=h - 41, width=w, height=26)
+        center_y = h - 10 - pill_height / 2
+        self.bar.place(x=0, y=round(center_y - 13), width=w, height=26)
         self.status.place(x=pill_x / 2, y=13, anchor="center")
         self.clear_btn.place(x=(pill_x + pill_width + w) / 2, y=13, anchor="center")
-        self.add_pill.place(x=pill_x, y=h - 46, width=pill_width, height=36)
-        self._draw_pill(pill_width)
+        self.add_pill.place(x=pill_x, y=h - 10 - pill_height,
+                            width=pill_width, height=pill_height)
+        self._draw_pill(pill_width, pill_height)
 
     def destroy(self):
         if hasattr(self, "_ime_pump_job"):
@@ -412,15 +416,16 @@ class NoteWindow(tk.Toplevel):
         dwmapi.DwmSetWindowAttribute(self.hwnd, 33, ctypes.byref(preference), ctypes.sizeof(preference))
 
     def _make_check_images(self):
-        size = max(14, round(self.app.base_font.metrics("ascent") * 0.8))
+        size = max(18, round(self.app.base_font.metrics("ascent") * 1.1))
         scale = 4
         self._check_images = {}
         for checked in (False, True):
             img = Image.new("RGBA", (size * scale, size * scale))
             draw = ImageDraw.Draw(img)
-            color = "#6F7780" if checked else "#B8BEC6"
-            draw.ellipse((scale, scale, (size - 1) * scale, (size - 1) * scale),
-                         outline=color, width=max(4, round(size * 0.065 * scale)))
+            color = "#596575" if checked else "#9EA8B5"
+            draw.rounded_rectangle((scale, scale, (size - 1) * scale, (size - 1) * scale),
+                                   radius=round(size * .25 * scale), outline=color,
+                                   width=max(5, round(size * .09 * scale)))
             if checked:
                 draw.line([(size * .27 * scale, size * .51 * scale),
                            (size * .44 * scale, size * .68 * scale),
@@ -440,7 +445,7 @@ class NoteWindow(tk.Toplevel):
     def _ime_composing(self, widget):
         if getattr(self, "_ime_native_widget", None) == widget:
             return True
-        if hasattr(self, "_ime_pending") and not self._ime_pending.empty():
+        if widget == self.text and hasattr(self, "_ime_pending") and not self._ime_pending.empty():
             return True
         if getattr(self, "_ime_active", False) and self._ime_widget == widget:
             return True
@@ -464,7 +469,7 @@ class NoteWindow(tk.Toplevel):
         def window_proc(handle, message, wparam, lparam):
             # 原生消息可能嵌套在 Tcl 调用中；这里只读 IMM 数据，不能调用 Tk。
             try:
-                if message == 0x0281:  # WM_IME_SETCONTEXT：只隐藏默认预编辑浮层。
+                if message == 0x0281 and self._ime_target == self.text:  # 正文使用行内预编辑。
                     lparam &= ~0x80000000
                 elif message == 0x010D and self._ime_target is not None:
                     self._ime_native_widget = self._ime_target
@@ -651,12 +656,14 @@ class NoteWindow(tk.Toplevel):
                 first = self.text.bbox(start)
                 last = self.text.bbox(f"{stop}-1c") if self.text.compare(stop, ">", start) else None
                 if first and last:
-                    bar = tk.Frame(self.text, bg="#606873", height=2, cursor="xterm")
+                    thickness = max(2, round(self.done_font.metrics("ascent") * 0.12))
+                    bar = tk.Frame(self.text, bg="#505761", height=thickness, cursor="xterm")
                     display = self.text.dlineinfo(start)
                     baseline = display[1] + display[4]
                     middle = baseline - round(self.done_font.metrics("ascent") * 0.33)
-                    bar.place(x=first[0], y=middle - 1,
-                              width=max(1, last[0] + last[2] - first[0]), height=2, bordermode="ignore")
+                    bar.place(x=first[0], y=middle - thickness // 2,
+                              width=max(1, last[0] + last[2] - first[0]),
+                              height=thickness, bordermode="ignore")
                     for event in ("<Button-1>", "<B1-Motion>", "<ButtonRelease-1>"):
                         bar.bind(event, lambda e, sequence=event: self.text.event_generate(
                             sequence, x=e.x_root - self.text.winfo_rootx(),
@@ -683,25 +690,26 @@ class NoteWindow(tk.Toplevel):
         self.add_pill.after(120, self._draw_pill)
         self.add_todo()
 
-    def _draw_pill(self, width=None, pressed=False):
+    def _draw_pill(self, width=None, height=None, pressed=False):
         c = self.add_pill
         w = width or c.winfo_width()
-        if w < 40:
+        h = height or c.winfo_height()
+        if w < 30 or h < 30:
             return
-        # 放大绘制再缩小，让细边框和两端半圆都有抗锯齿。
+        # 放大绘制再缩小，让边框和圆角都有抗锯齿。
         scale = 4
-        img = Image.new("RGB", (w * scale, 36 * scale), self._bg)
+        img = Image.new("RGB", (w * scale, h * scale), self._bg)
         draw = ImageDraw.Draw(img)
-        draw.rounded_rectangle((scale, scale, (w - 2) * scale, 35 * scale),
-                               radius=17 * scale,
+        draw.rounded_rectangle((scale, scale, (w - 2) * scale, (h - 1) * scale),
+                               radius=11 * scale,
                                fill="#EFF1F3" if pressed else "#FFFFFF",
-                               outline="#D9DCE1", width=scale)
+                               outline="#2B2F36", width=round(2.5 * scale))
         self._pill_image = ImageTk.PhotoImage(
-            img.resize((w, 36), Image.Resampling.LANCZOS), master=c)
+            img.resize((w, h), Image.Resampling.LANCZOS), master=c)
         c.delete("all")
         c.create_image(0, 0, anchor="nw", image=self._pill_image)
-        self._add_icon = load_icon(c, "plus", size=20)
-        c.create_image(w / 2, 18, image=self._add_icon)
+        self._add_icon = load_icon(c, "plus", size=26)
+        c.create_image(w / 2, h / 2, image=self._add_icon)
 
     # ---- 标题胶囊 ----
     def _title_max_width(self):
@@ -719,24 +727,32 @@ class NoteWindow(tk.Toplevel):
         title = self._title_var.get() if editing else self.d.get("title", "")
         text = title or "无标题"
         font = self._title_edit_font if editing else self._chip_font
-        natural_width = font.measure(text) + 26
+        natural_width = font.measure(text) + 36
         w = min(self._title_max_width(), max(44, natural_width))
-        c.config(width=w, height=28)
-        round_rect(c, 1, 2, w - 1, 26, 11, fill="#FFFFFF", outline="#E2E4E8")
+        h = max(28, font.metrics("linespace") + 12)
+        c.config(width=w, height=h)
+        self.title_chip.pack_configure(pady=max(0, (44 - h) // 2))
+        border = round_rect(c, 1, 3, w - 1, h - 1, min(11, h // 2),
+                            fill="#FFFFFF", outline="#E2E4E8")
         if editing:
             e = self._title_editor
-            e.place(x=9, y=5, width=max(20, w - 18), height=19)
+            e.place(x=14, y=5, width=max(20, w - 28), height=h - 10)
             if natural_width <= w:
                 e.xview_moveto(0)
             elif e.index("insert") == e.index("end"):
                 e.xview_moveto(1)
             return
-        if self._chip_font.measure(text) > w - 26:
-            while text and self._chip_font.measure(text + "…") > w - 26:
+        if self._chip_font.measure(text) > w - 36:
+            while text and self._chip_font.measure(text + "…") > w - 36:
                 text = text[:-1]
             text += "…"
-        c.create_text(w / 2, 14, text=text, font=self._chip_font,
-                      fill="#1F2328" if title else "#A9AFB6")
+        label = c.create_text(w / 2, h / 2, text=text, font=self._chip_font,
+                              fill="#1F2328" if title else "#A9AFB6")
+        left, top, right, bottom = c.bbox(border)
+        text_left, text_top, text_right, text_bottom = c.bbox(label)
+        # Tk 的文字包围盒含字形留白；按截图里的可见笔画再向左、向上校正。
+        c.move(label, (left + right - text_left - text_right) / 2 - 1,
+               (top + bottom - text_top - text_bottom) / 2 - 2)
 
     def edit_title(self):
         if any(isinstance(child, tk.Entry) for child in self.title_chip.winfo_children()):
@@ -751,10 +767,9 @@ class NoteWindow(tk.Toplevel):
                      textvariable=self._title_var)
         self._title_editor = e
         self._title_var.trace_add("write", lambda *_: self._draw_chip())
-        self.title_chip.pack(pady=8)
+        self.title_chip.pack()
         self._draw_chip()
-        self._bind_ime(e)
-        e.focus_set()
+        e.focus_force()
         e.select_range(0, "end")
 
         def commit(_e=None):
@@ -973,12 +988,9 @@ class NoteWindow(tk.Toplevel):
         self.app.schedule_save()
 
     def _ctrl_wheel(self, e):
-        step = 0.05 if e.delta > 0 else -0.05
-        v = min(1.0, max(0.1, self.d["opacity"] + step))
-        self.d["opacity"] = v
-        if not self._boosted:
-            self.attributes("-alpha", v)
-        self.app.schedule_save()
+        step = 5 if e.delta > 0 else -5
+        percent = round(self.app.data["settings"]["opacity"] * 100)
+        self.app.set_opacity(min(100, max(10, percent + step)))
         return "break"
 
     # ---- 窗口操作 ----
@@ -1067,13 +1079,6 @@ class NoteWindow(tk.Toplevel):
                 user32.SetWindowPos(self.hwnd, HWND_BOTTOM, 0, 0, 0, 0,
                                     SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE)
 
-    def _set_boost(self, on):
-        if on and self.d["opacity"] < 0.8:
-            self.attributes("-alpha", 0.8); self._boosted = True
-        else:
-            self._boosted = False
-            self.attributes("-alpha", self.d["opacity"])
-
     def hide(self):
         self.d["visible"] = False
         self.withdraw()
@@ -1089,26 +1094,36 @@ class NoteWindow(tk.Toplevel):
     def delete_self(self):
         # 不用原生 messagebox：overrideredirect 父窗口会让原生模态框收不到点击
         p = tk.Toplevel(self)
+        p.withdraw()
         p.overrideredirect(True)
         p.configure(bg=T_COLOR)
         p.attributes("-transparentcolor", T_COLOR)
         p.attributes("-topmost", True)
-        W, H = 268, 118
+        title_font = tkfont.Font(family=UI_FONT, size=10)
+        body_font = tkfont.Font(family=UI_FONT, size=9)
+        W = max(268, title_font.measure("删除便签") + 40)
         cv = tk.Canvas(p, bg=T_COLOR, highlightthickness=0, bd=0)
         cv.pack(fill="both", expand=True)
-        round_rect(cv, 1, 1, W - 2, H - 2, 12, fill="#FFFFFF", outline="#D9DCE1")
-        cv.create_text(W / 2, 30, text="删除便签", fill="#1F2328",
-                       font=("Microsoft YaHei UI", 10, "bold"))
-        cv.create_text(W / 2, 56, text="删除后无法恢复，确定删除这张便签吗？",
-                       fill="#666D75", font=("Microsoft YaHei UI", 9))
-        bx, by = W - 16, H - 14
-        b_del = round_rect(cv, bx - 76, by - 30, bx, by, 8, fill="#E5484D", outline="")
-        cv.create_text(bx - 38, by - 15, text="删除", fill="#FFFFFF",
-                       font=("Microsoft YaHei UI", 9, "bold"))
-        b_cancel = round_rect(cv, bx - 164, by - 30, bx - 88, by, 8,
-                              fill="#F2F3F5", outline="#D9DCE1")
-        cv.create_text(bx - 126, by - 15, text="取消", fill="#3A3F46",
-                       font=("Microsoft YaHei UI", 9))
+        title = cv.create_text(W / 2, 16, anchor="n", text="删除便签", fill="#1F2328",
+                               font=title_font)
+        body = cv.create_text(W / 2, cv.bbox(title)[3] + 12, anchor="n", width=W - 32,
+                              justify="center", text="删除后无法恢复，确定删除这张便签吗？",
+                              fill="#666D75", font=body_font, tags="message")
+        button_h = max(30, body_font.metrics("linespace") + 10)
+        H = cv.bbox(body)[3] + 16 + button_h + 16
+        cv.config(width=W, height=H)
+        background = round_rect(cv, 1, 1, W - 2, H - 2, 12,
+                                fill="#FFFFFF", outline="#D9DCE1")
+        cv.tag_lower(background)
+        bx, by = W - 16, H - 16
+        round_rect(cv, bx - 76, by - button_h, bx, by, 8,
+                   fill="#E5484D", outline="", tags="confirm")
+        cv.create_text(bx - 38, by - button_h / 2, text="删除", fill="#FFFFFF",
+                       font=(UI_FONT, 9), tags="confirm")
+        round_rect(cv, bx - 164, by - button_h, bx - 88, by, 8,
+                   fill="#F2F3F5", outline="#D9DCE1", tags="cancel")
+        cv.create_text(bx - 126, by - button_h / 2, text="取消", fill="#3A3F46",
+                       font=body_font, tags="cancel")
 
         def cancel(_e=None):
             p.grab_release()
@@ -1118,13 +1133,14 @@ class NoteWindow(tk.Toplevel):
             cancel()
             self.app.remove_note(self)
 
-        cv.tag_bind(b_del, "<Button-1>", confirm)
-        cv.tag_bind(b_cancel, "<Button-1>", cancel)
+        cv.tag_bind("confirm", "<Button-1>", confirm)
+        cv.tag_bind("cancel", "<Button-1>", cancel)
         p.bind("<Escape>", cancel)
         p.update_idletasks()
         x = max(0, self.winfo_rootx() + (self.winfo_width() - W) // 2)
         y = max(0, self.winfo_rooty() + (self.winfo_height() - H) // 2)
-        p.geometry(f"+{x}+{y}")
+        p.geometry(f"{W}x{H}+{x}+{y}")
+        p.deiconify()
         p.grab_set()
         p.focus_set()
         p.bind("<FocusOut>", cancel)
@@ -1150,10 +1166,11 @@ class SettingsWindow(tk.Toplevel):
                        bg="#FAFAF8", activebackground="#FAFAF8", command=self._save).pack(anchor="w", pady=2)
 
         row = tk.Frame(f, bg="#FAFAF8"); row.pack(fill="x", pady=(10, 2))
-        tk.Label(row, text="新便签默认透明度", bg="#FAFAF8").pack(side="left")
-        s = tk.Scale(row, from_=10, to=100, orient="horizontal", length=150,
+        tk.Label(row, text="所有便签不透明度", bg="#FAFAF8").pack(side="left")
+        s = tk.Scale(row, from_=10, to=100, resolution=5, orient="horizontal", length=150,
                      bg="#FAFAF8", highlightthickness=0, troughcolor="#E8E4DD",
                      command=self._op)
+        app.opacity_scale = s
         s.set(int(app.data["settings"]["opacity"] * 100))
         s.pack(side="right")
 
@@ -1167,7 +1184,7 @@ class SettingsWindow(tk.Toplevel):
 
         tk.Label(f, text="全局快捷键：Ctrl+Alt+N 新建便签 · Ctrl+Alt+H 显示/隐藏全部\n数据：%s"
                  % DATA_FILE, bg="#FAFAF8", fg="#999",
-                 font=("Microsoft YaHei UI", 9), justify="left").pack(anchor="w", pady=(14, 0))
+                 font=(UI_FONT, 9), justify="left").pack(anchor="w", pady=(14, 0))
 
     def _toggle_boot(self):
         if set_autostart(self.v_boot.get()):
@@ -1178,8 +1195,7 @@ class SettingsWindow(tk.Toplevel):
         self._save()
 
     def _op(self, v):
-        self.app.data["settings"]["opacity"] = int(v) / 100
-        self._save()
+        self.app.set_opacity(int(float(v)))
 
     def _font(self, v):
         self.app.data["settings"]["fontSize"] = int(v)
@@ -1195,28 +1211,41 @@ def _make_tray_icon():
     d = ImageDraw.Draw(img)
     d.rounded_rectangle([1, 1, 30, 30], 7, fill=(255, 213, 79, 255))
     try:
-        font = ImageFont.load_default(20)
-    except TypeError:
-        font = ImageFont.load_default()
+        font = ImageFont.truetype("times.ttf", 20)
+    except OSError:
+        try:
+            font = ImageFont.load_default(20)
+        except TypeError:
+            font = ImageFont.load_default()
     d.text((16, 15), "Z", fill=(70, 58, 20, 255), font=font, anchor="mm")
     return img
 
 class App:
     def __init__(self):
         self.data = load_data()
+        migrate_opacity = self.data.get("schemaVersion", 1) < 2
+        if migrate_opacity:
+            self.data["schemaVersion"] = 2
+            self.data["settings"]["opacity"] = 1.0
+            for note in self.data["notes"]:
+                note["opacity"] = 1.0
         self.q = queue.Queue()
         self.root = tk.Tk()
         self.root.withdraw()
+        for name in ("TkDefaultFont", "TkMenuFont"):
+            tkfont.nametofont(name, root=self.root).configure(family=UI_FONT)
         self.notes = {}
         self._save_job = None
         self._cascade = 0
         self.settings_win = None
         self.show_notes = self.data["settings"]["showOnStartup"]
 
-        self.base_font = tkfont.Font(family="Microsoft YaHei UI",
+        self.base_font = tkfont.Font(family=UI_FONT,
                                      size=self.data["settings"]["fontSize"])
 
         self._restore_notes()
+        if migrate_opacity:
+            self.save_now()
         self._start_tray()
         self._start_hotkeys()
         self.root.after(120, self._pump)
@@ -1255,6 +1284,17 @@ class App:
             w.done_font.config(size=self.data["settings"]["fontSize"])
             w._make_check_images()
             w.render()
+
+    def set_opacity(self, percent):
+        value = percent / 100
+        self.data["settings"]["opacity"] = value
+        for note in self.notes.values():
+            note.d["opacity"] = value
+            note.attributes("-alpha", value)
+        scale = getattr(self, "opacity_scale", None)
+        if scale is not None and scale.winfo_exists() and scale.get() != percent:
+            scale.set(percent)
+        self.schedule_save()
 
     def new_note(self):
         cx, cy = cursor_pos()
