@@ -40,6 +40,10 @@ user32.SetWindowPos.argtypes = [wintypes.HWND, wintypes.HWND, ctypes.c_int, ctyp
 user32.SetWindowPos.restype = wintypes.BOOL
 user32.GetParent.argtypes = [wintypes.HWND]
 user32.GetParent.restype = wintypes.HWND
+user32.RegisterHotKey.argtypes = [wintypes.HWND, ctypes.c_int, wintypes.UINT, wintypes.UINT]
+user32.RegisterHotKey.restype = wintypes.BOOL
+user32.UnregisterHotKey.argtypes = [wintypes.HWND, ctypes.c_int]
+user32.UnregisterHotKey.restype = wintypes.BOOL
 user32.GetForegroundWindow.restype = wintypes.HWND
 user32.GetFocus.restype = wintypes.HWND
 
@@ -49,7 +53,20 @@ dwmapi.DwmSetWindowAttribute.restype = ctypes.c_long
 
 HWND_BOTTOM = wintypes.HWND(1)
 SWP_NOSIZE, SWP_NOMOVE, SWP_NOACTIVATE = 0x0001, 0x0002, 0x0010
-WM_HOTKEY, MOD_ALT, MOD_CONTROL = 0x0312, 0x0001, 0x0002
+WM_HOTKEY = 0x0312
+HOTKEY_ACTIONS = {"new": (1, "newHotkey", "Ctrl+Alt+N"),
+                  "toggle": (2, "toggleHotkey", "Ctrl+Alt+H")}
+HOTKEY_KEYS = {**{chr(k): k for k in range(65, 91)},
+               **{str(k): 48 + k for k in range(10)},
+               **{f"F{k}": 111 + k for k in range(1, 25)},
+               "Space": 32, "Tab": 9, "Enter": 13, "Backspace": 8,
+               "Insert": 45, "Delete": 46, "Home": 36, "End": 35,
+               "PgUp": 33, "PgDn": 34, "Left": 37, "Up": 38, "Right": 39, "Down": 40}
+
+def parse_hotkey(value):
+    parts = value.split("+")
+    modifiers = sum({"Ctrl": 2, "Alt": 1, "Shift": 4}[part] for part in parts[:-1])
+    return modifiers, HOTKEY_KEYS[parts[-1]]
 
 class _POINT(ctypes.Structure):
     _fields_ = [("x", wintypes.LONG), ("y", wintypes.LONG)]
@@ -332,7 +349,7 @@ class NoteWindow(tk.Toplevel):
         spacer = tk.Label(self.toolbar, text="", bg=self._bg, cursor="fleur")
         spacer.pack(side="left", fill="both", expand=True)
         btn("minus", lambda: "隐藏这张便签", self.hide).pack(side="right", padx=(2, 8), pady=9)
-        btn("plus", lambda: "新建便签（Ctrl+Alt+N）",
+        btn("plus", lambda: f"新建便签（{self.app.hotkey_text('new')}）",
             lambda: self.app.new_note()).pack(side="right", padx=5, pady=9)
         btn("trash", lambda: "删除便签", self.delete_self).pack(side="right", padx=5, pady=9)
         for w in (self.toolbar, spacer):
@@ -1153,7 +1170,7 @@ class NoteWindow(tk.Toplevel):
     def _ctrl_wheel(self, e):
         step = 5 if e.delta > 0 else -5
         percent = round(self.app.data["settings"]["opacity"] * 100)
-        self.app.set_opacity(min(100, max(10, percent + step)))
+        self.app.set_opacity(percent + step)
         return "break"
 
     # ---- 窗口操作 ----
@@ -1311,7 +1328,7 @@ class NoteWindow(tk.Toplevel):
 # ---------- 设置窗口 ----------
 class SettingsScale(tk.Canvas):
     def __init__(self, master, minimum, maximum, step, command):
-        super().__init__(master, width=150, height=28, bg=NOTE_BG,
+        super().__init__(master, width=180, height=42, bg=NOTE_BG,
                          highlightthickness=0, bd=0, cursor="hand2", takefocus=1)
         self.minimum, self.maximum, self.step = minimum, maximum, step
         self.command, self.value = command, minimum
@@ -1319,6 +1336,8 @@ class SettingsScale(tk.Canvas):
         self.bind("<B1-Motion>", self._pick)
         self.bind("<Left>", lambda _e: self.set(self.value - self.step))
         self.bind("<Right>", lambda _e: self.set(self.value + self.step))
+        self.bind("<FocusIn>", lambda _e: self._draw())
+        self.bind("<FocusOut>", lambda _e: self._draw())
         self._draw()
 
     def get(self):
@@ -1334,15 +1353,36 @@ class SettingsScale(tk.Canvas):
 
     def _pick(self, event):
         self.focus_set()
-        self.set(self.minimum + (event.x - 8) * (self.maximum - self.minimum) / 134)
+        self.set(self.minimum + (event.x - 12) * (self.maximum - self.minimum) / 156)
+        return "break"
 
     def _draw(self):
+        # 超采样绘制刻度和握柄，保持圆角与线条平滑。
+        scale = 4
+        img = Image.new("RGBA", (180 * scale, 42 * scale), NOTE_BG)
+        draw = ImageDraw.Draw(img)
+        def box(bounds, radius, **kw):
+            draw.rounded_rectangle(tuple(int(v * scale) for v in bounds),
+                                   radius=radius * scale, **kw)
+        x = 12 + 156 * (self.value - self.minimum) / (self.maximum - self.minimum)
+        box((12, 11, 168, 17), 3, fill="#E9EDF1")
+        if x > 12:
+            box((12, 11, x, 17), 3, fill="#7D8C9D")
+        count = (self.maximum - self.minimum) // self.step
+        for index in range(count + 1):
+            tick_x = (12 + 156 * index / count) * scale
+            draw.line((tick_x, 31 * scale, tick_x, 35 * scale),
+                      fill="#8E9CAC" if 12 + 156 * index / count <= x else "#D8DEE5",
+                      width=scale)
+        box((x - 9, 3, x + 9, 27), 6, fill="#E6EAF0")
+        box((x - 9, 1, x + 9, 25), 6, fill="#FFFFFF",
+            outline="#64748B" if self.focus_get() == self else "#9CA9B8", width=scale)
+        for offset in (-2, 2):
+            draw.line(((x + offset) * scale, 9 * scale,
+                       (x + offset) * scale, 17 * scale), fill="#7D8C9D", width=scale)
+        self._image = ImageTk.PhotoImage(img.resize((180, 42), Image.Resampling.LANCZOS), master=self)
         self.delete("all")
-        x = 8 + 134 * (self.value - self.minimum) / (self.maximum - self.minimum)
-        round_rect(self, 8, 11, 142, 17, 3, fill="#EFF1F3", outline="")
-        round_rect(self, 8, 11, x, 17, 3, fill="#9EA8B5", outline="")
-        self.create_oval(x - 7, 7, x + 7, 21, fill=NOTE_BG,
-                         outline="#596575", width=2)
+        self.create_image(0, 0, image=self._image, anchor="nw")
 
 
 class SettingsWindow(tk.Toplevel):
@@ -1351,12 +1391,12 @@ class SettingsWindow(tk.Toplevel):
         self.app = app
         self.overrideredirect(True)
         self.resizable(False, False)
-        self.configure(bg=T_COLOR)
-        self.attributes("-transparentcolor", T_COLOR)
-        cv = tk.Canvas(self, bg=T_COLOR, highlightthickness=0, bd=0)
+        self.configure(bg=NOTE_BG)
+        cv = tk.Canvas(self, bg=NOTE_BG, highlightthickness=0, bd=0)
         cv.pack(fill="both", expand=True)
-        f = tk.Frame(self, bg=NOTE_BG, padx=4, pady=2)
-        f.place(x=RADIUS, y=RADIUS, width=400)
+        body = tk.Canvas(self, bg=NOTE_BG, highlightthickness=0, bd=0)
+        f = tk.Frame(body, bg=NOTE_BG, padx=4, pady=2)
+        content = body.create_window(0, 0, window=f, anchor="nw")
 
         header = tk.Frame(f, bg=NOTE_BG)
         header.pack(fill="x", pady=(0, 12))
@@ -1368,9 +1408,11 @@ class SettingsWindow(tk.Toplevel):
         close.pack(side="right", padx=(8, 2))
         close.bind("<Button-1>", lambda _e: self.destroy())
         self.bind("<Escape>", lambda _e: self.destroy())
-        for widget in (header, title):
-            widget.bind("<Button-1>", self._drag_press)
-            widget.bind("<B1-Motion>", self._drag_move)
+        self._drag = None
+        self._close_button = close
+        self.bind("<Button-1>", self._drag_press)
+        self.bind("<B1-Motion>", self._drag_move)
+        self.bind("<ButtonRelease-1>", lambda _e: setattr(self, "_drag", None))
 
         def section(title):
             tk.Frame(f, bg=NOTE_BORDER, height=1).pack(fill="x", pady=(14, 14))
@@ -1390,13 +1432,14 @@ class SettingsWindow(tk.Toplevel):
                        command=self._toggle_boot).pack(anchor="w", pady=4)
 
         self.v_show = tk.BooleanVar(value=app.data["settings"]["showOnStartup"])
-        tk.Checkbutton(f, text="启动时显示便签（关闭=仅驻留托盘）", variable=self.v_show,
+        startup = tk.Checkbutton(f, text="启动时显示便签（关闭=仅驻留托盘）", variable=self.v_show,
                        bg=NOTE_BG, fg="#2B2F36", activebackground=NOTE_BG,
                        selectcolor=NOTE_BG, font=(UI_FONT, 10),
                        image=self._check_images[False], selectimage=self._check_images[True],
                        compound="left", indicatoron=False, relief="flat", offrelief="flat",
                        bd=0, highlightthickness=0, cursor="hand2",
-                       command=self._save).pack(anchor="w", pady=4)
+                       command=self._save, justify="left", anchor="w")
+        startup.pack(anchor="w", pady=4)
 
         section("外观")
         row = tk.Frame(f, bg=NOTE_BG); row.pack(fill="x", pady=(0, 4))
@@ -1408,10 +1451,12 @@ class SettingsWindow(tk.Toplevel):
         def update_opacity(v):
             opacity_value.config(text=f"{v}%")
             self._op(v)
-        s = SettingsScale(row, 10, 100, 5, update_opacity)
+        s = SettingsScale(row, 50, 100, 5, update_opacity)
         app.opacity_scale = s
         s.set(int(app.data["settings"]["opacity"] * 100))
         opacity_value.config(text=f"{s.get()}%")
+        if app.data["settings"]["opacity"] != s.get() / 100:
+            self._op(s.get())
         s.pack(side="right")
 
         row3 = tk.Frame(f, bg=NOTE_BG); row3.pack(fill="x", pady=(4, 0))
@@ -1423,35 +1468,144 @@ class SettingsWindow(tk.Toplevel):
         def update_font(v):
             font_value.config(text=str(v))
             self._font(v)
-        s2 = SettingsScale(row3, 9, 16, 1, update_font)
+        s2 = SettingsScale(row3, 10, 15, 1, update_font)
         s2.set(app.data["settings"]["fontSize"])
         font_value.config(text=str(s2.get()))
+        if app.data["settings"]["fontSize"] != s2.get():
+            self._font(s2.get())
         s2.pack(side="right")
 
-        section("快捷键与数据")
-        tk.Label(f, text="Ctrl+Alt+N  新建便签     Ctrl+Alt+H  显示/隐藏全部",
-                 bg=NOTE_BG, fg=QUIET, font=(UI_FONT, 9)).pack(anchor="w")
-        tk.Label(f, text=DATA_FILE, bg=NOTE_BG, fg="#A9AFB6",
-                 font=(UI_FONT, 9), wraplength=380, justify="left").pack(anchor="w", pady=(8, 0))
+        section("快捷键")
+        self._hotkey_font = tkfont.Font(root=self, family=UI_FONT, size=9)
+        hotkey_width = math.ceil(self._hotkey_font.measure("Ctrl+Alt+Shift+Backspace") /
+                                 self._hotkey_font.measure("0")) + 2
+        self.hotkey_entries = {}
+        self._hotkey_vars = {}
+        hotkey_rows = []
+        for action, name in (("new", "新建便签"), ("toggle", "显示/隐藏全部便签")):
+            hotkey_row = tk.Frame(f, bg=NOTE_BG)
+            hotkey_row.pack(fill="x", pady=5)
+            hotkey_row.columnconfigure(0, weight=1)
+            label = tk.Label(hotkey_row, text=name, bg=NOTE_BG, fg="#2B2F36",
+                             font=(UI_FONT, 10), justify="left", anchor="w")
+            label.grid(row=0, column=0, sticky="w", padx=(0, 12))
+            entry = tk.Entry(hotkey_row, font=self._hotkey_font, width=hotkey_width, justify="center",
+                             state="readonly", readonlybackground=NOTE_BG, fg="#475569",
+                             relief="flat", highlightthickness=1, highlightbackground=NOTE_BORDER,
+                             highlightcolor="#94A3B8", cursor="hand2")
+            entry.grid(row=0, column=1, sticky="e", ipady=6)
+            self._hotkey_vars[action] = tk.StringVar(master=self, value=app.hotkey_text(action))
+            entry.configure(textvariable=self._hotkey_vars[action])
+            entry.bind("<KeyPress>", lambda e, action=action: self._capture_hotkey(e, action))
+            entry.bind("<Button-1>", lambda e: e.widget.focus_set())
+            entry.bind("<FocusIn>", lambda _e, action=action:
+                       setattr(app, "_hotkey_capture", (self, action)))
+            entry.bind("<FocusOut>", lambda _e: setattr(app, "_hotkey_capture", None))
+            self.hotkey_entries[action] = entry
+            hotkey_rows.append((hotkey_row, label, entry))
+        hotkey_hint = tk.Label(f, text="点击方框后按下组合键，自动保存。Esc 取消。",
+                              bg=NOTE_BG, fg=QUIET, font=(UI_FONT, 9), justify="left",
+                              anchor="nw", height=3)
+        hotkey_hint.pack(fill="x", pady=(6, 0))
+        self._hotkey_hint = hotkey_hint
+        self.bind("<Destroy>", lambda e: e.widget == self and setattr(app, "_hotkey_capture", None))
+        section("数据")
+        path = tk.Label(f, text=DATA_FILE, bg=NOTE_BG, fg="#A9AFB6",
+                        font=(UI_FONT, 9), wraplength=460, justify="left")
+        path.pack(anchor="w", pady=(8, 0))
         self.update_idletasks()
-        width, height = 440, f.winfo_reqheight() + 2 * RADIUS
+        work = wintypes.RECT()
+        user32.SystemParametersInfoW(48, 0, ctypes.byref(work), 0)  # SPI_GETWORKAREA
+        available_w, available_h = work.right - work.left - 32, work.bottom - work.top - 32
+        width = min(max(500, f.winfo_reqwidth() + 2 * RADIUS), available_w)
+        content_width = width - 2 * RADIUS
+        # 文本按实际可用宽度换行，窗口高度在换行完成后再计算。
+        startup.configure(wraplength=max(1, content_width - self._check_images[False].width() - 16))
+        for label in (hotkey_hint, path):
+            label.configure(wraplength=max(1, content_width - 16))
+        for hotkey_row, label, entry in hotkey_rows:
+            label.configure(wraplength=max(1, content_width - entry.winfo_reqwidth() - 28))
+        body.itemconfigure(content, width=content_width)
+        for appearance_row in (row, row3):
+            label = appearance_row.winfo_children()[0]
+            label.configure(wraplength=max(1, content_width - 16), justify="left")
+            if appearance_row.winfo_reqwidth() > content_width - 8:
+                label.pack_configure(side="top", anchor="w")
+        self.update_idletasks()
+        content_height = f.winfo_reqheight()
+        height = min(content_height + 2 * RADIUS, available_h)
+        viewport_height = height - 2 * RADIUS
+        if content_height > viewport_height:
+            scrollbar = tk.Scrollbar(self, orient="vertical", command=body.yview)
+            scrollbar_width = scrollbar.winfo_reqwidth()
+            content_width -= scrollbar_width + 4
+            scrollbar.place(x=width - RADIUS - scrollbar_width, y=RADIUS,
+                            width=scrollbar_width, height=viewport_height)
+            body.configure(yscrollcommand=scrollbar.set)
+            startup.configure(wraplength=max(1, content_width - self._check_images[False].width() - 16))
+            for label in (hotkey_hint, path):
+                label.configure(wraplength=max(1, content_width - 16))
+            for hotkey_row, label, entry in hotkey_rows:
+                label.configure(wraplength=max(1, content_width - entry.winfo_reqwidth() - 28))
+            body.itemconfigure(content, width=content_width)
+            for appearance_row in (row, row3):
+                label = appearance_row.winfo_children()[0]
+                label.configure(wraplength=max(1, content_width - 16))
+                if appearance_row.winfo_reqwidth() > content_width - 8:
+                    label.pack_configure(side="top", anchor="w")
+            self.update_idletasks()
+            content_height = f.winfo_reqheight()
+            self.bind("<MouseWheel>", lambda e: body.yview_scroll(-int(e.delta / 120), "units"))
+        body.place(x=RADIUS, y=RADIUS, width=content_width, height=viewport_height)
+        body.configure(scrollregion=(0, 0, content_width, content_height))
         cv.configure(width=width, height=height)
-        round_rect(cv, 1, 1, width - 2, height - 2, RADIUS,
-                   fill=NOTE_BG, outline=NOTE_BORDER)
+        # 与便签窗口一致，由 DWM 抗锯齿裁切矩形底板。
+        cv.create_rectangle(0, 0, width - 1, height - 1,
+                            fill=NOTE_BG, outline=NOTE_BORDER)
         self.geometry("%dx%d+%d+%d" % (width, height,
-                       (self.winfo_screenwidth() - width) // 2,
-                       (self.winfo_screenheight() - height) // 2))
+                       work.left + (work.right - work.left - width) // 2,
+                       work.top + (work.bottom - work.top - height) // 2))
         self.update_idletasks()
         hwnd = user32.GetParent(self.winfo_id()) or self.winfo_id()
         preference = ctypes.c_int(2)
         dwmapi.DwmSetWindowAttribute(hwnd, 33, ctypes.byref(preference), ctypes.sizeof(preference))
 
     def _drag_press(self, event):
+        if (event.widget == self._close_button or
+                isinstance(event.widget, (SettingsScale, tk.Checkbutton, tk.Scrollbar, tk.Entry))):
+            self._drag = None
+            return
         self._drag = (event.x_root - self.winfo_x(), event.y_root - self.winfo_y())
 
     def _drag_move(self, event):
+        if self._drag is None:
+            return
         self.geometry("+%d+%d" % (event.x_root - self._drag[0],
                                    event.y_root - self._drag[1]))
+        self.update_idletasks()
+
+    def _capture_hotkey(self, event, action):
+        if event.keysym == "Escape":
+            self.focus_set()
+            return "break"
+        key = next((name for name, code in HOTKEY_KEYS.items() if code == event.keycode), None)
+        if key is None:
+            return "break"
+        parts = [name for mask, name in ((4, "Ctrl"), (0x20000, "Alt"), (1, "Shift"))
+                 if event.state & mask]
+        if not (event.state & (4 | 0x20000)) and not 112 <= event.keycode <= 135:
+            self._hotkey_hint.configure(text="请使用 Ctrl / Alt 组合键，或 F1–F24 功能键。", fg="#A44A42")
+            return "break"
+        self._apply_hotkey(action, "+".join(parts + [key]))
+        return "break"
+
+    def _apply_hotkey(self, action, value):
+        error = self.app.update_hotkey(action, value)
+        if error:
+            self._hotkey_hint.configure(text=error, fg="#A44A42")
+        else:
+            self._hotkey_vars[action].set(value)
+            self._hotkey_hint.configure(text="快捷键已保存并生效。", fg=QUIET)
 
     def _toggle_boot(self):
         if set_autostart(self.v_boot.get()):
@@ -1563,6 +1717,7 @@ class App:
             w.render()
 
     def set_opacity(self, percent):
+        percent = min(100, max(50, 5 * round(percent / 5)))
         value = percent / 100
         self.data["settings"]["opacity"] = value
         for note in self.notes.values():
@@ -1607,8 +1762,8 @@ class App:
     # 托盘
     def _start_tray(self):
         menu = pystray.Menu(
-            pystray.MenuItem("新建便签  Ctrl+Alt+N", lambda: self.q.put("new"), default=True),
-            pystray.MenuItem("显示/隐藏全部便签  Ctrl+Alt+H", lambda: self.q.put("toggle")),
+            pystray.MenuItem(lambda _item: f"新建便签  {self.hotkey_text('new')}", lambda: self.q.put("new")),
+            pystray.MenuItem(lambda _item: f"显示/隐藏全部便签  {self.hotkey_text('toggle')}", lambda: self.q.put("toggle")),
             pystray.Menu.SEPARATOR,
             pystray.MenuItem("设置…", lambda: self.q.put("settings")),
             pystray.MenuItem("退出", lambda: self.q.put("quit")),
@@ -1616,16 +1771,61 @@ class App:
         self.icon = pystray.Icon(APP_NAME, _make_tray_icon(), "z-note 便签", menu)
         self.icon.run_detached()
 
-    # 全局快捷键（线程消息循环）
+    def hotkey_text(self, action):
+        _, setting, default = HOTKEY_ACTIONS[action]
+        return self.data["settings"].get(setting, default)
+
+    # 在 Tk 所在线程注册，编辑时可立即检查占用并替换绑定。
     def _start_hotkeys(self):
-        def loop():
-            user32.RegisterHotKey(None, 1, MOD_CONTROL | MOD_ALT, 0x4E)  # N
-            user32.RegisterHotKey(None, 2, MOD_CONTROL | MOD_ALT, 0x48)  # H
-            msg = wintypes.MSG()
-            while user32.GetMessageW(ctypes.byref(msg), None, 0, 0) > 0:
-                if msg.message == WM_HOTKEY:
-                    self.q.put("new" if msg.wParam == 1 else "toggle")
-        threading.Thread(target=loop, daemon=True).start()
+        self._hotkey_hwnd = self.root.winfo_id()
+        self._active_hotkeys = {}
+        self._hotkey_ids = {action: identity for action, (identity, _, _) in HOTKEY_ACTIONS.items()}
+        @_WNDPROC
+        def window_proc(hwnd, message, wparam, lparam):
+            if message == WM_HOTKEY:
+                action = next((action for action, identity in self._hotkey_ids.items()
+                               if identity == wparam), None)
+                if action:
+                    capture = getattr(self, "_hotkey_capture", None)
+                    if capture:
+                        self.q.put(("capture_hotkey", *capture, self.hotkey_text(action)))
+                    else:
+                        self.q.put(action)
+                return 0
+            if message == 0x0082:  # WM_NCDESTROY
+                for identity in self._hotkey_ids.values():
+                    user32.UnregisterHotKey(hwnd, identity)
+                user32.SetWindowLongPtrW(hwnd, -4, self._hotkey_old_proc)
+            return user32.CallWindowProcW(self._hotkey_old_proc, hwnd, message, wparam, lparam)
+        self._hotkey_proc = window_proc
+        self._hotkey_old_proc = user32.SetWindowLongPtrW(
+            self._hotkey_hwnd, -4, ctypes.cast(window_proc, ctypes.c_void_p))
+        for action, (identity, _, _) in HOTKEY_ACTIONS.items():
+            value = self.hotkey_text(action)
+            modifiers, key = parse_hotkey(value)
+            if user32.RegisterHotKey(self._hotkey_hwnd, identity, modifiers | 0x4000, key):
+                self._active_hotkeys[action] = value
+
+    def update_hotkey(self, action, value):
+        if any(other != action and self.hotkey_text(other) == value for other in HOTKEY_ACTIONS):
+            return "此快捷键已用于另一项功能，请换一个组合键。"
+        if self._active_hotkeys.get(action) == value:
+            return None
+        modifiers, key = parse_hotkey(value)
+        # 新组合注册成功后才释放旧组合，冲突时原绑定继续有效。
+        identity, setting, _ = HOTKEY_ACTIONS[action]
+        old_identity = self._hotkey_ids[action]
+        new_identity = identity + 100 if old_identity == identity else identity
+        if not user32.RegisterHotKey(self._hotkey_hwnd, new_identity, modifiers | 0x4000, key):
+            return "此快捷键已被系统或其他应用占用，请换一个组合键。"
+        user32.UnregisterHotKey(self._hotkey_hwnd, old_identity)
+        self._hotkey_ids[action] = new_identity
+        self._active_hotkeys[action] = value
+        self.data["settings"][setting] = value
+        self.save_now()
+        if hasattr(self, "icon"):
+            self.icon.update_menu()
+        return None
 
     def _pump(self):
         if self._takeover_event and kernel32.WaitForSingleObject(self._takeover_event, 0) == 0:
@@ -1635,7 +1835,11 @@ class App:
         try:
             while True:
                 act = self.q.get_nowait()
-                if act == "new":
+                if isinstance(act, tuple) and act[0] == "capture_hotkey":
+                    _, window, action, value = act
+                    if window.winfo_exists():
+                        window._apply_hotkey(action, value)
+                elif act == "new":
                     self.new_note()
                 elif act == "toggle":
                     self.toggle_all()

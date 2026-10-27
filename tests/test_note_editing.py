@@ -7,6 +7,7 @@ import main
 
 class NoteEditingTests(unittest.TestCase):
     def setUp(self):
+        self._start_hotkeys_impl = main.App._start_hotkeys
         self.patches = [
             patch.object(main, "load_data", return_value={
                 "settings": dict(main.DEFAULT_SETTINGS), "notes": []}),
@@ -112,15 +113,170 @@ class NoteEditingTests(unittest.TestCase):
         self.app.root.update()
         scale = self.app.opacity_scale
         scale.event_generate("<Button-1>", x=8, y=14)
-        self.assertEqual(scale.get(), 10)
+        self.assertEqual(scale.get(), 50)
+        scale.focus_force()
+        self.app.root.update()
         scale.event_generate("<Right>")
-        self.assertEqual(scale.get(), 15)
-        self.assertEqual(self.note.d["opacity"], 0.15)
+        self.assertEqual(scale.get(), 55)
+        self.assertEqual(self.note.d["opacity"], 0.55)
         x, y = settings.winfo_x(), settings.winfo_y()
-        settings._drag_press(type("Event", (), {"x_root": x + 20, "y_root": y + 20})())
+        settings._drag_press(type("Event", (), {"widget": settings, "x_root": x + 20, "y_root": y + 20})())
         settings._drag_move(type("Event", (), {"x_root": x + 35, "y_root": y + 30})())
         self.assertEqual((settings.winfo_x(), settings.winfo_y()), (x + 15, y + 10))
         settings.destroy()
+
+    def test_settings_sliders_snap_to_requested_ranges(self):
+        settings = main.SettingsWindow(self.app)
+        self.app.root.update()
+        pending, scales = list(settings.winfo_children()), []
+        while pending:
+            widget = pending.pop()
+            pending.extend(widget.winfo_children())
+            if isinstance(widget, main.SettingsScale):
+                scales.append(widget)
+        opacity = self.app.opacity_scale
+        font = next(scale for scale in scales if scale != opacity)
+        for x in range(0, 181):
+            opacity.event_generate("<B1-Motion>", x=x, y=14)
+            self.assertIn(opacity.get(), range(50, 101, 5))
+            font.event_generate("<B1-Motion>", x=x, y=14)
+            self.assertIn(font.get(), range(10, 16))
+        self.assertEqual(self.app.data["settings"]["fontSize"], 15)
+        opacity.set(0)
+        self.assertEqual(opacity.get(), 50)
+        self.note._ctrl_wheel(type("Wheel", (), {"delta": -120})())
+        self.assertEqual(self.app.data["settings"]["opacity"], 0.5)
+        font.set(0)
+        self.assertEqual(self.app.data["settings"]["fontSize"], 10)
+        settings.destroy()
+
+    def test_settings_background_and_text_drag_without_moving_on_slider(self):
+        settings = main.SettingsWindow(self.app)
+        self.app.root.update()
+        pending, labels = list(settings.winfo_children()), []
+        while pending:
+            widget = pending.pop()
+            pending.extend(widget.winfo_children())
+            if isinstance(widget, main.tk.Label) and widget.cget("text") == "外观":
+                labels.append(widget)
+        for widget in (settings, labels[0]):
+            x, y = settings.winfo_x(), settings.winfo_y()
+            widget.event_generate("<Button-1>", x=5, y=5)
+            widget.event_generate("<B1-Motion>", x=35, y=25)
+            self.app.root.update()
+            self.assertEqual((settings.winfo_x(), settings.winfo_y()), (x + 30, y + 20))
+            widget.event_generate("<ButtonRelease-1>", x=35, y=25)
+        x, y = settings.winfo_x(), settings.winfo_y()
+        scale = self.app.opacity_scale
+        scale.event_generate("<Button-1>", x=12, y=14)
+        scale.event_generate("<B1-Motion>", x=168, y=14)
+        self.app.root.update()
+        self.assertEqual((settings.winfo_x(), settings.winfo_y()), (x, y))
+        self.assertEqual(scale.get(), 100)
+        settings.destroy()
+
+    def test_hotkey_capture_updates_box_and_esc_does_not_close_settings(self):
+        settings = main.SettingsWindow(self.app)
+        self.app.root.update()
+        entry = settings.hotkey_entries["new"]
+        entry.focus_force()
+        self.app.root.update()
+        with patch.object(self.app, "update_hotkey", return_value=None) as update:
+            entry.event_generate("<KeyPress>", keycode=75, state=5)
+            update.assert_called_once_with("new", "Ctrl+Shift+K")
+            self.assertEqual(entry.get(), "Ctrl+Shift+K")
+            entry.event_generate("<KeyPress-Escape>")
+            self.app.root.update()
+            self.assertTrue(settings.winfo_exists())
+        entry.focus_force()
+        self.app.root.update()
+        with patch.object(self.app, "update_hotkey", return_value="快捷键已占用"):
+            entry.event_generate("<KeyPress>", keycode=76, state=4)
+            self.assertEqual(entry.get(), "Ctrl+Shift+K")
+            self.assertEqual(settings._hotkey_hint.cget("text"), "快捷键已占用")
+        x, y = settings.winfo_x(), settings.winfo_y()
+        entry.event_generate("<Button-1>", x=5, y=5)
+        entry.event_generate("<B1-Motion>", x=40, y=25)
+        self.app.root.update()
+        self.assertEqual((settings.winfo_x(), settings.winfo_y()), (x, y))
+        settings.destroy()
+
+    def test_hotkey_replacement_preserves_old_binding_on_conflict_and_saves_success(self):
+        with patch.object(main.user32, "RegisterHotKey", return_value=True), patch.object(
+                main.user32, "UnregisterHotKey"):
+            self._start_hotkeys_impl(self.app)
+        with patch.object(main.user32, "RegisterHotKey", return_value=False), patch.object(
+                main.user32, "UnregisterHotKey") as unregister:
+            error = self.app.update_hotkey("new", "Ctrl+Shift+K")
+            self.assertIn("占用", error)
+            unregister.assert_not_called()
+            self.assertEqual(self.app.hotkey_text("new"), "Ctrl+Alt+N")
+        with patch.object(main.user32, "RegisterHotKey", return_value=True) as register, patch.object(
+                main.user32, "UnregisterHotKey") as unregister, patch.object(main, "save_data") as save:
+            self.assertIsNone(self.app.update_hotkey("new", "Ctrl+Shift+K"))
+            register.assert_called_once_with(self.app._hotkey_hwnd, 101, 2 | 4 | 0x4000, 75)
+            unregister.assert_called_once_with(self.app._hotkey_hwnd, 1)
+            self.assertEqual(self.app.data["settings"]["newHotkey"], "Ctrl+Shift+K")
+            save.assert_called_once_with(self.app.data)
+            self.assertIn("另一项", self.app.update_hotkey("toggle", "Ctrl+Shift+K"))
+        self.app._hotkey_proc(self.app._hotkey_hwnd, main.WM_HOTKEY, 101, 0)
+        self.assertEqual(self.app.q.get_nowait(), "new")
+        self.app._hotkey_proc(self.app._hotkey_hwnd, main.WM_HOTKEY, 2, 0)
+        self.assertEqual(self.app.q.get_nowait(), "toggle")
+        settings = main.SettingsWindow(self.app)
+        self.app._hotkey_capture = (settings, "new")
+        self.app._hotkey_proc(self.app._hotkey_hwnd, main.WM_HOTKEY, 2, 0)
+        with patch.object(self.app, "toggle_all") as toggle:
+            self.app._pump()
+            toggle.assert_not_called()
+        self.assertIn("另一项", settings._hotkey_hint.cget("text"))
+        settings.destroy()
+
+    def test_settings_text_fits_at_different_scales_and_long_paths(self):
+        original_scaling = self.app.root.tk.call("tk", "scaling")
+        try:
+            for scale, screen_w, screen_h in ((scale, w, h)
+                    for w, h in ((1280, 900), (800, 600))
+                    for scale in (1, 1.25, 1.5, 2, 2.5, 3, 4)):
+                def work_area(_action, _param, rect, _flags):
+                    rect._obj.left, rect._obj.top = 0, 0
+                    rect._obj.right, rect._obj.bottom = screen_w, screen_h
+                    return True
+                with self.subTest(scale=scale, screen=(screen_w, screen_h)), patch.object(
+                        main.user32, "SystemParametersInfoW", side_effect=work_area), patch.object(
+                        main, "DATA_FILE", "C:/" + "很长的用户目录/" * 20 + "notes.json"):
+                    self.app.root.tk.call("tk", "scaling", scale * 96 / 72)
+                    settings = main.SettingsWindow(self.app)
+                    try:
+                        self.app.root.update()
+                        self.assertGreaterEqual(settings.winfo_width(), 500)
+                        self.assertLessEqual(settings.winfo_width(), screen_w - 32)
+                        self.assertLessEqual(settings.winfo_height(), screen_h - 32)
+                        for entry in settings.hotkey_entries.values():
+                            font = main.tkfont.Font(font=entry.cget("font"))
+                            self.assertGreaterEqual(entry.winfo_width() - 6,
+                                                    font.measure("Ctrl+Alt+Shift+Backspace"))
+                        pending = list(settings.winfo_children())
+                        while pending:
+                            widget = pending.pop()
+                            pending.extend(widget.winfo_children())
+                            if isinstance(widget, (main.tk.Label, main.tk.Checkbutton)):
+                                self.assertGreaterEqual(widget.winfo_width(), widget.winfo_reqwidth(),
+                                                        str(widget.cget("text")))
+                                self.assertGreaterEqual(widget.winfo_height(), widget.winfo_reqheight(),
+                                                        str(widget.cget("text")))
+                        body = next(w for w in settings.winfo_children()
+                                    if isinstance(w, main.tk.Canvas) and w.find_all()
+                                    and w.type(w.find_all()[0]) == "window")
+                        if scale == 4:
+                            self.assertLess(body.yview()[1], 1)
+                            body.yview_moveto(1)
+                            self.app.root.update()
+                            self.assertAlmostEqual(body.yview()[1], 1)
+                    finally:
+                        settings.destroy()
+        finally:
+            self.app.root.tk.call("tk", "scaling", original_scaling)
 
     def test_old_opacity_values_are_reset_once(self):
         old = {"schemaVersion": 1,
