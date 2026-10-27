@@ -155,8 +155,9 @@ class NoteEditingTests(unittest.TestCase):
         text = next(item for item in canvas.find_all() if canvas.type(item) == "text")
         box = canvas.bbox(border)
         label = canvas.bbox(text)
-        self.assertLessEqual(abs(box[0] + box[2] - label[0] - label[2] - 2), 1)
-        self.assertLessEqual(abs(box[1] + box[3] - label[1] - label[3] - 4), 1)
+        # 奇数宽度下几何中心落在 x.5，Tk 取整允许 1 物理像素误差
+        self.assertLessEqual(abs(box[0] + box[2] - label[0] - label[2]), 2)
+        self.assertLessEqual(abs(box[1] + box[3] - label[1] - label[3]), 2)
 
     def test_todo_checkbox_has_rounded_square_outline(self):
         image = main.ImageTk.getimage(self.note._check_images[False])

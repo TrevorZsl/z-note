@@ -309,7 +309,7 @@ class NoteWindow(tk.Toplevel):
         self.done_font = tkfont.Font(family=UI_FONT,
                                      size=app.data["settings"]["fontSize"])
         self.text = tk.Text(self, bg=self._bg, fg="#2B2F36", bd=0, highlightthickness=0,
-                            padx=12, pady=10, wrap="word", spacing1=5, spacing3=6,
+                            padx=12, pady=10, wrap="word", spacing1=9, spacing3=10,
                             selectbackground=self._bg, inactiveselectbackground=self._bg,
                             selectforeground="#2B2F36", selectborderwidth=0,
                             font=app.base_font, insertbackground="#2B2F36", cursor="xterm")
@@ -732,8 +732,8 @@ class NoteWindow(tk.Toplevel):
         h = max(28, font.metrics("linespace") + 12)
         c.config(width=w, height=h)
         self.title_chip.pack_configure(pady=max(0, (44 - h) // 2))
-        border = round_rect(c, 1, 3, w - 1, h - 1, min(11, h // 2),
-                            fill="#FFFFFF", outline="#E2E4E8")
+        round_rect(c, 1, 1, w - 1, h - 1, min(11, h // 2),
+                   fill="#FFFFFF", outline="#E2E4E8")
         if editing:
             e = self._title_editor
             e.place(x=14, y=5, width=max(20, w - 28), height=h - 10)
@@ -746,13 +746,10 @@ class NoteWindow(tk.Toplevel):
             while text and self._chip_font.measure(text + "…") > w - 36:
                 text = text[:-1]
             text += "…"
-        label = c.create_text(w / 2, h / 2, text=text, font=self._chip_font,
-                              fill="#1F2328" if title else "#A9AFB6")
-        left, top, right, bottom = c.bbox(border)
-        text_left, text_top, text_right, text_bottom = c.bbox(label)
-        # Tk 的文字包围盒含字形留白；按截图里的可见笔画再向左、向上校正。
-        c.move(label, (left + right - text_left - text_right) / 2 - 1,
-               (top + bottom - text_top - text_bottom) / 2 - 2)
+        # 边框对称内缩、文字落在几何中心；不要再按字形留白手工偏移，
+        # 旧字体时代的 -1/-2 校正在 Times New Roman 下会把文字顶出上边。
+        c.create_text(w / 2, h / 2, text=text, font=self._chip_font,
+                      fill="#1F2328" if title else "#A9AFB6")
 
     def edit_title(self):
         if any(isinstance(child, tk.Entry) for child in self.title_chip.winfo_children()):
