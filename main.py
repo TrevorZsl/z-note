@@ -309,11 +309,12 @@ class NoteWindow(tk.Toplevel):
         self.done_font = tkfont.Font(family=UI_FONT,
                                      size=app.data["settings"]["fontSize"])
         self.text = tk.Text(self, bg=self._bg, fg="#2B2F36", bd=0, highlightthickness=0,
-                            padx=12, pady=10, wrap="word", spacing1=9, spacing3=10,
+                            padx=12, pady=10, wrap="char", spacing1=9, spacing3=10,
                             selectbackground=self._bg, inactiveselectbackground=self._bg,
                             selectforeground="#2B2F36", selectborderwidth=0,
                             font=app.base_font, insertbackground="#2B2F36", cursor="xterm")
         self._make_check_images()
+        self.text.tag_config("todo_indent", lmargin2=self._check_images[False].width() + app.base_font.measure(PREFIX_PAD))
         self.text.tag_config("done", font=self.done_font)  # 只加删除线，不改字色
         self.text.tag_config("selection_fill", background="#DCE7F3", foreground="#2B2F36")
         self.text.tag_raise("selection_fill", "sel")
@@ -334,6 +335,8 @@ class NoteWindow(tk.Toplevel):
         self.add_pill.bind("<Button-1>", self._pill_press)
         Tooltip(self.add_pill, lambda: "添加待办")
         self._strike_widgets = []
+        self._selection_masks = []
+        self._checkbox_widgets = []
         self.text.configure(yscrollcommand=lambda *args: self._queue_strikes())
         self.text.bind("<Configure>", lambda e: self._queue_strikes())
         self._bind_ime(self.text)
@@ -433,6 +436,10 @@ class NoteWindow(tk.Toplevel):
                           fill=color, width=max(5, round(size * .09 * scale)), joint="curve")
             self._check_images[checked] = ImageTk.PhotoImage(
                 img.resize((size, size), Image.Resampling.LANCZOS), master=self.text)
+        self._check_slots = {checked: ImageTk.PhotoImage(Image.new("RGBA", (size, size)), master=self.text)
+                             for checked in (False, True)}
+        if hasattr(self, "_checkbox_widgets"):
+            self.text.tag_config("todo_indent", lmargin2=size + self.app.base_font.measure(PREFIX_PAD))
 
     def _restyle(self):
         for b in self._tool_btns:
@@ -644,7 +651,51 @@ class NoteWindow(tk.Toplevel):
         for widget in self._strike_widgets:
             widget.destroy()
         self._strike_widgets.clear()
+        for widget in self._selection_masks:
+            widget.destroy()
+        self._selection_masks.clear()
+        for widget in self._checkbox_widgets:
+            widget.destroy()
+        self._checkbox_widgets.clear()
         for row, line in enumerate(self.d["lines"], 1):
+            if line["type"] == "todo":
+                # Tk 会把软换行的选区背景画进左边距，盖回勾选框旁的留白。
+                if self.text.tag_nextrange("selection_fill", f"{row}.0", f"{row}.end"):
+                    start, top, bottom = f"{row}.0", None, None
+                    while self.text.compare(start, "<=", f"{row}.end"):
+                        info = self.text.dlineinfo(start)
+                        if info:
+                            top = info[1] if top is None else min(top, info[1])
+                            bottom = info[1] + info[3] if bottom is None else max(bottom, info[1] + info[3])
+                        next_start = self.text.index(f"{start} +1 display lines display linestart")
+                        if self.text.compare(next_start, "<=", start):
+                            break
+                        start = next_start
+                    if top is not None:
+                        mask = tk.Frame(self.text, bg=self._bg)
+                        mask.place(x=int(self.text.cget("padx")), y=top,
+                                   width=int(self.text.tag_cget("todo_indent", "lmargin2")),
+                                   height=bottom - top, bordermode="ignore")
+                        mask.lift()
+                        for event in ("<Button-1>", "<B1-Motion>", "<ButtonRelease-1>"):
+                            mask.bind(event, lambda e, sequence=event: self.text.event_generate(
+                                sequence, x=e.x_root - self.text.winfo_rootx(),
+                                y=e.y_root - self.text.winfo_rooty(), time=e.time, state=e.state))
+                        self._selection_masks.append(mask)
+                size = self._check_images[False].width()
+                count = self.text.count(f"{row}.0", f"{row}.end", "displaylines")
+                middle = (self.text.dlineinfo(f"{row}.0 +{(count[0] + 1) // 2} display lines")
+                          if count else self.text.dlineinfo(f"{row}.0"))
+                y = (middle[1] + (0 if count and count[0] % 2 else middle[3] // 2) - size // 2
+                     if middle else None)
+                if y is not None and -size < y < self.text.winfo_height():
+                    box = tk.Label(self.text, image=self._check_images[line["checked"]],
+                                   bg=self._bg, bd=0, cursor="hand2")
+                    box.place(x=int(self.text.cget("padx")), y=y, width=size, height=size,
+                              bordermode="ignore")
+                    box.lift()
+                    box.bind("<Button-1>", lambda _e, r=row-1: self.toggle_done(r))
+                    self._checkbox_widgets.append(box)
             if line["type"] != "todo" or not line["checked"]:
                 continue
             start = f"{row}.{self._prefix_len(line)}"
@@ -673,6 +724,10 @@ class NoteWindow(tk.Toplevel):
                 if self.text.compare(next_start, "<=", start):
                     break
                 start = next_start
+
+        if self._selection_masks:
+            self.after_idle(lambda: [w.lift() for w in self._selection_masks + self._checkbox_widgets
+                                     if w.winfo_exists()])
 
     # ---- 底部添加条 ----
     def add_todo(self):
@@ -791,9 +846,11 @@ class NoteWindow(tk.Toplevel):
         for i, ln in enumerate(lines):
             row = i + 1
             if ln["type"] == "todo":
-                self.text.image_create("end", image=self._check_images[ln["checked"]], align="center")
+                self.text.image_create("end", image=self._check_slots[ln["checked"]], align="center")
                 self.text.insert("end", PREFIX_PAD)
             self.text.insert("end", ln["text"])
+            if ln["type"] == "todo":
+                self.text.tag_add("todo_indent", f"{row}.0", f"{row}.end")
             if ln["type"] == "todo" and ln["checked"]:
                 self.text.tag_add("done", f"{row}.{self._prefix_len(ln)}", f"{row}.end")
             if i < len(lines) - 1:
@@ -823,15 +880,20 @@ class NoteWindow(tk.Toplevel):
 
     # ---- 编辑事件 ----
     def _paint_selection(self, _event=None):
-        # 原生选区保留复制/删除语义；只给实际字符上色，不填满换行后的空白。
+        # 原生选区保留复制/删除语义；背景只画文字，避开勾选框和换行后的空白。
         t = self.text
         t.tag_remove("selection_fill", "1.0", "end")
         selected = t.tag_ranges("sel")
+        self._queue_strikes()
         if not selected:
             return
         first, last = selected
         for row in range(int(str(first).split(".")[0]), int(str(last).split(".")[0]) + 1):
             start = first if t.compare(first, ">", f"{row}.0") else f"{row}.0"
+            if row <= len(self.d["lines"]) and self.d["lines"][row-1]["type"] == "todo":
+                text_start = f"{row}.{self._prefix_len(self.d['lines'][row-1])}"
+                if t.compare(start, "<", text_start):
+                    start = text_start
             end = last if t.compare(last, "<", f"{row}.end") else f"{row}.end"
             if t.compare(start, "<", end):
                 t.tag_add("selection_fill", start, end)
@@ -841,7 +903,7 @@ class NoteWindow(tk.Toplevel):
         t = self.text
         images = {index: t.image_cget(index, "image")
                   for kind, name, index in t.dump("1.0", "end-1c", image=True)}
-        checkbox_images = {str(image) for image in self._check_images.values()}
+        checkbox_images = {str(image) for image in self._check_slots.values()}
         lines = []
         for row in range(1, int(t.index("end-1c").split(".")[0]) + 1):
             image = images.get(f"{row}.0")
@@ -850,7 +912,7 @@ class NoteWindow(tk.Toplevel):
             if todo and content.startswith(PREFIX_PAD):
                 content = content[len(PREFIX_PAD):]
             lines.append({"type": "todo" if todo else "text", "text": content,
-                          "checked": todo and image == str(self._check_images[True])})
+                          "checked": todo and image == str(self._check_slots[True])})
         old = self.d["lines"]
         self.d["lines"] = lines
         structure_changed = (len(old) != len(lines) or
@@ -858,6 +920,9 @@ class NoteWindow(tk.Toplevel):
         if structure_changed:
             self.render()
         else:
+            for row, line in enumerate(lines, 1):
+                if line["type"] == "todo":
+                    t.tag_add("todo_indent", f"{row}.0", f"{row}.end")
             self.update_status()
 
     def _on_keyrelease(self, _e):

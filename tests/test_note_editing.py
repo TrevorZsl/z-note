@@ -166,6 +166,110 @@ class NoteEditingTests(unittest.TestCase):
         self.assertEqual(image.getpixel((0, 0))[3], 0)
         self.assertGreater(image.getpixel((size // 4, 1))[3], 0)
 
+    def test_todo_wraps_beside_checkbox_and_centers_one_checkbox_for_long_text(self):
+        self.note.geometry("300x500")
+        self.note.d["lines"] = [{"type": "todo", "text": "对话发出终止后可以重新编辑" * 2, "checked": False}]
+        self.note.render()
+        self.app.root.update()
+        first = self.text.dlineinfo("1.3")
+        last = self.text.dlineinfo("1.end")
+        self.assertEqual(first[1], self.text.dlineinfo("1.0")[1])
+        self.assertGreater(last[1], first[1])
+        self.assertEqual(len(self.note._checkbox_widgets), 1)
+
+        long_text = "啊" * 75
+        self.note.d["lines"][0]["text"] = long_text
+        self.note.render()
+        self.app.root.update()
+        first = self.text.dlineinfo("1.0")
+        last = self.text.dlineinfo("1.end")
+        box = self.note._checkbox_widgets[0]
+        self.assertEqual(len(self.note._checkbox_widgets), 1)
+        self.assertLessEqual(abs(box.winfo_y() + box.winfo_height() / 2 -
+                                 (first[1] + last[1] + last[3]) / 2), 1)
+        next_line = self.text.index("1.3 +1 display lines display linestart")
+        self.assertGreaterEqual(self.text.bbox(next_line)[0], self.text.bbox("1.3")[0])
+        self.assertEqual(self.text.get("1.3", "1.end"), long_text)
+        self.note._sync_lines_from_text()
+        self.assertEqual(self.note.d["lines"], [{"type": "todo", "text": long_text, "checked": False}])
+        box.event_generate("<Button-1>")
+        self.assertTrue(self.note.d["lines"][0]["checked"])
+
+    def test_todo_keeps_every_wrapped_line_indented_while_typing(self):
+        self.note.geometry("300x500")
+        self.note.d["lines"] = [{"type": "todo", "text": "对话发出终止后可以重新编辑", "checked": False}]
+        self.note.render()
+        self.text.insert("1.end", "啊" * 55)
+        self.note._on_keyrelease(None)
+        self.app.root.update()
+        starts = ["1.3"]
+        while True:
+            next_start = self.text.index(f"{starts[-1]} +1 display lines display linestart")
+            if self.text.compare(next_start, "<=", starts[-1]) or self.text.compare(next_start, ">=", "1.end"):
+                break
+            starts.append(next_start)
+        self.assertGreaterEqual(len(starts), 3)
+        self.assertEqual([self.text.bbox(index)[0] for index in starts],
+                         [self.text.bbox("1.3")[0]] * len(starts))
+        self.assertEqual(len(self.note._checkbox_widgets), 1)
+        self.assertEqual(len(self.note.d["lines"]), 1)
+        first = self.text.dlineinfo("1.0")
+        last = self.text.dlineinfo("1.end")
+        box = self.note._checkbox_widgets[0]
+        self.assertLessEqual(abs(box.winfo_y() + box.winfo_height() / 2 -
+                                 (first[1] + last[1] + last[3]) / 2), 1)
+
+    def test_checkbox_stays_visible_when_first_line_scrolls_offscreen(self):
+        self.note.geometry("300x300")
+        self.note.d["lines"] = [{"type": "todo", "text": "啊" * 140, "checked": False}]
+        self.note.render()
+        self.app.root.update()
+        self.text.yview_scroll(4, "units")
+        self.app.root.update()
+        count = self.text.count("1.0", "1.end", "displaylines")[0]
+        middle = self.text.index(f"1.0 +{count // 2} display lines display linestart")
+        self.assertIsNone(self.text.dlineinfo("1.0"))
+        self.assertEqual(len(self.note._checkbox_widgets), 1)
+        box = self.note._checkbox_widgets[0]
+        info = self.text.dlineinfo(middle)
+        self.assertLessEqual(abs(box.winfo_y() + box.winfo_height() / 2 -
+                                 (info[1] + info[3] / 2)), 1)
+        box.event_generate("<Button-1>")
+        self.assertTrue(self.note.d["lines"][0]["checked"])
+
+    def test_checkbox_position_follows_fixed_middle_line_and_selection_skips_it(self):
+        self.note.geometry("300x300")
+        self.note.d["lines"] = [{"type": "todo", "text": "啊" * 140, "checked": False}]
+        self.note.render()
+        self.app.root.update()
+        count = self.text.count("1.0", "1.end", "displaylines")[0]
+        middle = self.text.index(f"1.0 +{(count + 1) // 2} display lines")
+        for scroll in (3, 1, -2):
+            self.text.yview_scroll(scroll, "units")
+            self.app.root.update()
+            info = self.text.dlineinfo(middle)
+            self.assertIsNotNone(info)
+            self.assertEqual(len(self.note._checkbox_widgets), 1)
+            box = self.note._checkbox_widgets[0]
+            expected = info[1] + (0 if count % 2 else info[3] // 2)
+            self.assertLessEqual(abs(box.winfo_y() + box.winfo_height() / 2 - expected), 1)
+        self.text.tag_add("sel", "1.0", "1.end")
+        self.app.root.update()
+        self.assertEqual(self.note._checkbox_widgets[0].cget("bg"), self.note._bg)
+        self.assertEqual(len(self.note._selection_masks), 1)
+        mask = self.note._selection_masks[0]
+        self.assertEqual(mask.winfo_x() + mask.winfo_width(), self.text.bbox(middle)[0])
+        self.assertLessEqual(mask.winfo_y(), self.note._checkbox_widgets[0].winfo_y())
+        self.assertGreaterEqual(mask.winfo_y() + mask.winfo_height(),
+                                self.note._checkbox_widgets[0].winfo_y() +
+                                self.note._checkbox_widgets[0].winfo_height())
+        self.assertFalse(self.text.tag_nextrange("selection_fill", "1.0", "1.3"))
+        self.assertTrue(self.text.tag_nextrange("selection_fill", "1.3", "1.end"))
+        self.text.tag_remove("sel", "1.0", "1.end")
+        self.app.root.update()
+        self.assertEqual(self.note._checkbox_widgets[0].cget("bg"), self.note._bg)
+        self.assertFalse(self.note._selection_masks)
+
     def test_add_button_border_is_visibly_thick(self):
         image = main.ImageTk.getimage(self.note._pill_image).convert("RGB")
         middle = image.width // 2
