@@ -12,6 +12,7 @@ from PIL import Image, ImageDraw, ImageFont, ImageTk
 
 APP_NAME = "z-note"
 UI_FONT = "Times New Roman"
+DEV_TAKEOVER_EVENT = "z-note-dev-takeover"
 DATA_DIR = os.path.join(os.environ.get("APPDATA", "."), "z-note")
 DATA_FILE = os.path.join(DATA_DIR, "notes.json")
 BACKUP_DIR = os.path.join(DATA_DIR, "backup")
@@ -27,6 +28,14 @@ INK, QUIET = "#6B7280", "#666D75"      # 图标与状态栏的墨色（冷灰单
 # ---------- Win32 ----------
 user32 = ctypes.WinDLL("user32")
 kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+kernel32.CreateEventW.argtypes = [ctypes.c_void_p, wintypes.BOOL, wintypes.BOOL, wintypes.LPCWSTR]
+kernel32.CreateEventW.restype = wintypes.HANDLE
+kernel32.OpenEventW.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.LPCWSTR]
+kernel32.OpenEventW.restype = wintypes.HANDLE
+kernel32.SetEvent.argtypes = [wintypes.HANDLE]
+kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+kernel32.WaitForSingleObject.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+kernel32.WaitForSingleObject.restype = wintypes.DWORD
 user32.SetWindowPos.argtypes = [wintypes.HWND, wintypes.HWND, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int, wintypes.UINT]
 user32.SetWindowPos.restype = wintypes.BOOL
 user32.GetParent.argtypes = [wintypes.HWND]
@@ -75,6 +84,12 @@ def cursor_pos():
 def ensure_single_instance():
     kernel32.CreateMutexW(None, wintypes.BOOL(False), "z-note-singleton-mutex")
     if ctypes.get_last_error() == 183:  # ERROR_ALREADY_EXISTS
+        if os.getenv("Z_NOTE_DEV"):
+            event = kernel32.OpenEventW(0x0002, False, DEV_TAKEOVER_EVENT)
+            if event:
+                kernel32.SetEvent(event)
+                kernel32.CloseHandle(event)
+            os._exit(75 if event else 76)
         r = tk.Tk(); r.withdraw()
         messagebox.showinfo(APP_NAME, "z-note 已经在运行了（看系统托盘）。")
         os._exit(0)
@@ -1008,15 +1023,84 @@ class NoteWindow(tk.Toplevel):
         lines = self.d["lines"]
         if row >= len(lines):
             return
-        m = tk.Menu(self, tearoff=0)
-        if lines[row]["type"] == "todo":
-            m.add_command(label="转为文本行", command=lambda: self.convert(row, "text"))
-        else:
-            m.add_command(label="转为待办行", command=lambda: self.convert(row, "todo"))
-        m.add_command(label="在下方插入新行", command=lambda: self.insert_line(row))
-        m.add_separator()
-        m.add_command(label="删除此行", command=lambda: self.delete_line(row))
-        m.tk_popup(e.x_root, e.y_root)
+        target = "text" if lines[row]["type"] == "todo" else "todo"
+        actions = [
+            ("转为文本行" if target == "text" else "转为待办行",
+             lambda: self.convert(row, target)),
+            ("在下方插入新行", lambda: self.insert_line(row)),
+            ("删除此行", lambda: self.delete_line(row)),
+        ]
+        self._show_context_menu(e.x_root, e.y_root, actions)
+
+    def _show_context_menu(self, x, y, actions):
+        old = getattr(self, "_context_menu", None)
+        if old and old.winfo_exists():
+            old.destroy()
+        p = tk.Toplevel(self)
+        self._context_menu = p
+        p.withdraw()
+        p.overrideredirect(True)
+        p.configure(bg=T_COLOR)
+        p.attributes("-transparentcolor", T_COLOR)
+        p.attributes("-topmost", True)
+        font = tkfont.Font(family=UI_FONT, size=10)
+        width = max(184, max(font.measure(label) for label, _ in actions) + 44)
+        row_h = max(34, font.metrics("linespace") + 12)
+        height = 16 + row_h * len(actions) + 9
+        cv = tk.Canvas(p, width=width, height=height, bg=T_COLOR,
+                       highlightthickness=0, bd=0)
+        cv.pack()
+        round_rect(cv, 1, 1, width - 2, height - 2, 11,
+                   fill="#FFFFFF", outline="#D9DCE1")
+        highlights = []
+        for i, (label, _) in enumerate(actions):
+            top = 8 + i * row_h + (9 if i == 2 else 0)
+            highlight = round_rect(cv, 5, top, width - 5, top + row_h, 7,
+                                   fill="#F2F3F5", outline="", state="hidden")
+            highlights.append(highlight)
+            cv.create_text(18, top + row_h / 2, anchor="w", text=label,
+                           fill="#2B2F36", font=font, tags=(f"item{i}",))
+            cv.tag_bind(f"item{i}", "<Enter>", lambda _e, n=i: select(n))
+            cv.tag_bind(f"item{i}", "<Button-1>", lambda _e, n=i: activate(n))
+            cv.tag_bind(highlight, "<Enter>", lambda _e, n=i: select(n))
+            cv.tag_bind(highlight, "<Button-1>", lambda _e, n=i: activate(n))
+        sep_y = 8 + 2 * row_h + 4
+        cv.create_line(14, sep_y, width - 14, sep_y, fill="#E2E4E8")
+
+        selected = [None]
+
+        def select(n):
+            if selected[0] is not None:
+                cv.itemconfigure(highlights[selected[0]], state="hidden")
+            selected[0] = n
+            cv.itemconfigure(highlights[n], state="normal")
+            cv.tag_lower(highlights[n], f"item{n}")
+
+        def close(_e=None):
+            if p.winfo_exists():
+                p.grab_release()
+                p.destroy()
+
+        def activate(n):
+            close()
+            actions[n][1]()
+
+        def key(e):
+            if e.keysym in ("Down", "Up"):
+                select((selected[0] + (1 if e.keysym == "Down" else -1)) % len(actions)
+                       if selected[0] is not None else (0 if e.keysym == "Down" else len(actions) - 1))
+            elif e.keysym in ("Return", "space"):
+                activate(selected[0] if selected[0] is not None else 0)
+            elif e.keysym == "Escape":
+                close()
+
+        p.bind("<Key>", key)
+        p.bind("<FocusOut>", close)
+        p.bind("<Button-1>", close)
+        p.geometry(f"{width}x{height}+{min(x, p.winfo_screenwidth() - width)}+{min(y, p.winfo_screenheight() - height)}")
+        p.deiconify()
+        p.grab_set()
+        p.focus_set()
 
     def toggle_done(self, row):
         ln = self.d["lines"][row]
@@ -1314,6 +1398,8 @@ class App:
             tkfont.nametofont(name, root=self.root).configure(family=UI_FONT)
         self.notes = {}
         self._save_job = None
+        self._dev_mtime = os.path.getmtime(__file__) if os.getenv("Z_NOTE_DEV") else None
+        self._takeover_event = kernel32.CreateEventW(None, False, False, DEV_TAKEOVER_EVENT)
         self._cascade = 0
         self.settings_win = None
         self.show_notes = self.data["settings"]["showOnStartup"]
@@ -1429,6 +1515,10 @@ class App:
         threading.Thread(target=loop, daemon=True).start()
 
     def _pump(self):
+        if self._takeover_event and kernel32.WaitForSingleObject(self._takeover_event, 0) == 0:
+            self.quit()
+        if self._dev_mtime is not None and os.path.getmtime(__file__) != self._dev_mtime:
+            self.quit(75)
         try:
             while True:
                 act = self.q.get_nowait()
@@ -1469,7 +1559,7 @@ class App:
         except Exception:
             pass
 
-    def quit(self):
+    def quit(self, exit_code=0):
         for w in self.notes.values():
             w.d["x"], w.d["y"] = w.winfo_x(), w.winfo_y()
         self.save_now()
@@ -1478,7 +1568,7 @@ class App:
         except Exception:
             pass
         self.root.destroy()
-        os._exit(0)
+        os._exit(exit_code)
 
 def main():
     ensure_single_instance()

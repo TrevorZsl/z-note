@@ -146,6 +146,26 @@ class NoteEditingTests(unittest.TestCase):
         self.assertEqual(self.app.base_font.actual("weight"), "normal")
         self.assertEqual(self.note._chip_font.actual("weight"), "bold")
 
+    def test_context_menu_uses_note_style_and_activates_row_action(self):
+        self.note._show_context_menu(100, 100,
+                                     [("转为文本行", lambda: self.note.convert(0, "text")),
+                                      ("在下方插入新行", lambda: self.note.insert_line(0)),
+                                      ("删除此行", lambda: self.note.delete_line(0))])
+        self.app.root.update()
+        popup = self.note._context_menu
+        canvas = next(child for child in popup.winfo_children()
+                      if isinstance(child, main.tk.Canvas))
+        self.assertEqual(canvas.cget("bg"), main.T_COLOR)
+        self.assertEqual([canvas.itemcget(item, "text") for item in canvas.find_all()
+                          if canvas.type(item) == "text"],
+                         ["转为文本行", "在下方插入新行", "删除此行"])
+        first = canvas.bbox("item0")
+        canvas.event_generate("<Button-1>", x=(first[0] + first[2]) // 2,
+                              y=(first[1] + first[3]) // 2)
+        self.app.root.update()
+        self.assertFalse(popup.winfo_exists())
+        self.assertEqual(self.note.d["lines"][0]["type"], "text")
+
     def test_title_text_is_visually_centered_in_chip(self):
         self.note.d["title"] = "10.27"
         self.note._draw_chip()
