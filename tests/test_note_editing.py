@@ -92,6 +92,36 @@ class NoteEditingTests(unittest.TestCase):
         self.assertEqual(self.app.opacity_scale.get(), 80)
         settings.destroy()
 
+    def test_settings_open_in_front_then_return_to_normal_z_order(self):
+        self.app.q.put("settings")
+        self.app._pump()
+        self.app.root.update()
+        settings = self.app.settings_win
+        self.assertEqual(settings.state(), "normal")
+        self.assertEqual(settings.attributes("-topmost"), 1)
+        self.app.q.put("settings")
+        self.app._pump()
+        self.assertIs(self.app.settings_win, settings)
+        self.app.root.after(350, self.app.root.quit)
+        self.app.root.mainloop()
+        self.assertEqual(settings.attributes("-topmost"), 0)
+        settings.destroy()
+
+    def test_settings_slider_and_window_drag(self):
+        settings = main.SettingsWindow(self.app)
+        self.app.root.update()
+        scale = self.app.opacity_scale
+        scale.event_generate("<Button-1>", x=8, y=14)
+        self.assertEqual(scale.get(), 10)
+        scale.event_generate("<Right>")
+        self.assertEqual(scale.get(), 15)
+        self.assertEqual(self.note.d["opacity"], 0.15)
+        x, y = settings.winfo_x(), settings.winfo_y()
+        settings._drag_press(type("Event", (), {"x_root": x + 20, "y_root": y + 20})())
+        settings._drag_move(type("Event", (), {"x_root": x + 35, "y_root": y + 30})())
+        self.assertEqual((settings.winfo_x(), settings.winfo_y()), (x + 15, y + 10))
+        settings.destroy()
+
     def test_old_opacity_values_are_reset_once(self):
         old = {"schemaVersion": 1,
                "settings": dict(main.DEFAULT_SETTINGS, opacity=0.6),

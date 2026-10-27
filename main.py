@@ -110,6 +110,26 @@ def round_rect(cv, x1, y1, x2, y2, r, **kw):
             pts += [cx + r * math.cos(a), cy + r * math.sin(a)]
     return cv.create_polygon(pts, **kw)
 
+
+def check_images(master, size):
+    images = {}
+    scale = 4
+    for checked in (False, True):
+        img = Image.new("RGBA", (size * scale, size * scale))
+        draw = ImageDraw.Draw(img)
+        color = "#596575" if checked else "#9EA8B5"
+        draw.rounded_rectangle((scale, scale, (size - 1) * scale, (size - 1) * scale),
+                               radius=round(size * .25 * scale), outline=color,
+                               width=max(5, round(size * .09 * scale)))
+        if checked:
+            draw.line([(size * .27 * scale, size * .51 * scale),
+                       (size * .44 * scale, size * .68 * scale),
+                       (size * .75 * scale, size * .34 * scale)],
+                      fill=color, width=max(5, round(size * .09 * scale)), joint="curve")
+        images[checked] = ImageTk.PhotoImage(
+            img.resize((size, size), Image.Resampling.LANCZOS), master=master)
+    return images
+
 # ---------- 数据 ----------
 DEFAULT_SETTINGS = {"autostart": False, "showOnStartup": True,
                     "opacity": 1.0, "color": "白", "fontSize": 11}
@@ -436,22 +456,7 @@ class NoteWindow(tk.Toplevel):
 
     def _make_check_images(self):
         size = max(18, round(self.app.base_font.metrics("ascent") * 1.1))
-        scale = 4
-        self._check_images = {}
-        for checked in (False, True):
-            img = Image.new("RGBA", (size * scale, size * scale))
-            draw = ImageDraw.Draw(img)
-            color = "#596575" if checked else "#9EA8B5"
-            draw.rounded_rectangle((scale, scale, (size - 1) * scale, (size - 1) * scale),
-                                   radius=round(size * .25 * scale), outline=color,
-                                   width=max(5, round(size * .09 * scale)))
-            if checked:
-                draw.line([(size * .27 * scale, size * .51 * scale),
-                           (size * .44 * scale, size * .68 * scale),
-                           (size * .75 * scale, size * .34 * scale)],
-                          fill=color, width=max(5, round(size * .09 * scale)), joint="curve")
-            self._check_images[checked] = ImageTk.PhotoImage(
-                img.resize((size, size), Image.Resampling.LANCZOS), master=self.text)
+        self._check_images = check_images(self.text, size)
         self._check_slots = {checked: ImageTk.PhotoImage(Image.new("RGBA", (size, size)), master=self.text)
                              for checked in (False, True)}
         if hasattr(self, "_checkbox_widgets"):
@@ -1304,45 +1309,149 @@ class NoteWindow(tk.Toplevel):
         p.bind("<FocusOut>", cancel)
 
 # ---------- 设置窗口 ----------
+class SettingsScale(tk.Canvas):
+    def __init__(self, master, minimum, maximum, step, command):
+        super().__init__(master, width=150, height=28, bg=NOTE_BG,
+                         highlightthickness=0, bd=0, cursor="hand2", takefocus=1)
+        self.minimum, self.maximum, self.step = minimum, maximum, step
+        self.command, self.value = command, minimum
+        self.bind("<Button-1>", self._pick)
+        self.bind("<B1-Motion>", self._pick)
+        self.bind("<Left>", lambda _e: self.set(self.value - self.step))
+        self.bind("<Right>", lambda _e: self.set(self.value + self.step))
+        self._draw()
+
+    def get(self):
+        return self.value
+
+    def set(self, value):
+        value = min(self.maximum, max(self.minimum,
+                    self.minimum + round((float(value) - self.minimum) / self.step) * self.step))
+        if value != self.value:
+            self.value = value
+            self._draw()
+            self.command(value)
+
+    def _pick(self, event):
+        self.focus_set()
+        self.set(self.minimum + (event.x - 8) * (self.maximum - self.minimum) / 134)
+
+    def _draw(self):
+        self.delete("all")
+        x = 8 + 134 * (self.value - self.minimum) / (self.maximum - self.minimum)
+        round_rect(self, 8, 11, 142, 17, 3, fill="#EFF1F3", outline="")
+        round_rect(self, 8, 11, x, 17, 3, fill="#9EA8B5", outline="")
+        self.create_oval(x - 7, 7, x + 7, 21, fill=NOTE_BG,
+                         outline="#596575", width=2)
+
+
 class SettingsWindow(tk.Toplevel):
     def __init__(self, app):
         super().__init__(app.root)
         self.app = app
-        self.title("z-note 设置")
-        # 不能 transient 到常驻隐藏的 root：Windows 上宿主隐藏时 transient 窗口永远不显示
+        self.overrideredirect(True)
         self.resizable(False, False)
-        self.configure(bg="#FAFAF8")
-        f = tk.Frame(self, bg="#FAFAF8", padx=20, pady=16)
-        f.pack(fill="both", expand=True)
+        self.configure(bg=T_COLOR)
+        self.attributes("-transparentcolor", T_COLOR)
+        cv = tk.Canvas(self, bg=T_COLOR, highlightthickness=0, bd=0)
+        cv.pack(fill="both", expand=True)
+        f = tk.Frame(self, bg=NOTE_BG, padx=4, pady=2)
+        f.place(x=RADIUS, y=RADIUS, width=400)
 
+        header = tk.Frame(f, bg=NOTE_BG)
+        header.pack(fill="x", pady=(0, 12))
+        title = tk.Label(header, text="设置", bg=NOTE_BG, fg="#1F2328",
+                         font=(UI_FONT, 12, "bold"), cursor="fleur")
+        title.pack(side="left")
+        close = tk.Label(header, text="×", bg=NOTE_BG, fg=INK,
+                         font=(UI_FONT, 17), cursor="hand2")
+        close.pack(side="right", padx=(8, 2))
+        close.bind("<Button-1>", lambda _e: self.destroy())
+        self.bind("<Escape>", lambda _e: self.destroy())
+        for widget in (header, title):
+            widget.bind("<Button-1>", self._drag_press)
+            widget.bind("<B1-Motion>", self._drag_move)
+
+        def section(title):
+            tk.Frame(f, bg=NOTE_BORDER, height=1).pack(fill="x", pady=(14, 14))
+            tk.Label(f, text=title, bg=NOTE_BG, fg="#1F2328",
+                     font=(UI_FONT, 11, "bold")).pack(anchor="w", pady=(0, 8))
+
+        section("常规")
+
+        self._check_images = check_images(self, 18)
         self.v_boot = tk.BooleanVar(value=app.data["settings"]["autostart"])
-        tk.Checkbutton(f, text="开机自启", variable=self.v_boot, bg="#FAFAF8",
-                       activebackground="#FAFAF8", command=self._toggle_boot).pack(anchor="w", pady=2)
+        tk.Checkbutton(f, text="开机自启", variable=self.v_boot, bg=NOTE_BG,
+                       fg="#2B2F36", activebackground=NOTE_BG, selectcolor=NOTE_BG,
+                       font=(UI_FONT, 10), image=self._check_images[False],
+                       selectimage=self._check_images[True], compound="left",
+                       indicatoron=False, relief="flat", offrelief="flat",
+                       bd=0, highlightthickness=0, cursor="hand2",
+                       command=self._toggle_boot).pack(anchor="w", pady=4)
 
         self.v_show = tk.BooleanVar(value=app.data["settings"]["showOnStartup"])
         tk.Checkbutton(f, text="启动时显示便签（关闭=仅驻留托盘）", variable=self.v_show,
-                       bg="#FAFAF8", activebackground="#FAFAF8", command=self._save).pack(anchor="w", pady=2)
+                       bg=NOTE_BG, fg="#2B2F36", activebackground=NOTE_BG,
+                       selectcolor=NOTE_BG, font=(UI_FONT, 10),
+                       image=self._check_images[False], selectimage=self._check_images[True],
+                       compound="left", indicatoron=False, relief="flat", offrelief="flat",
+                       bd=0, highlightthickness=0, cursor="hand2",
+                       command=self._save).pack(anchor="w", pady=4)
 
-        row = tk.Frame(f, bg="#FAFAF8"); row.pack(fill="x", pady=(10, 2))
-        tk.Label(row, text="所有便签不透明度", bg="#FAFAF8").pack(side="left")
-        s = tk.Scale(row, from_=10, to=100, resolution=5, orient="horizontal", length=150,
-                     bg="#FAFAF8", highlightthickness=0, troughcolor="#E8E4DD",
-                     command=self._op)
+        section("外观")
+        row = tk.Frame(f, bg=NOTE_BG); row.pack(fill="x", pady=(0, 4))
+        tk.Label(row, text="所有便签不透明度", bg=NOTE_BG, fg="#2B2F36",
+                 font=(UI_FONT, 10)).pack(side="left")
+        opacity_value = tk.Label(row, bg=NOTE_BG, fg=QUIET,
+                                 font=(UI_FONT, 9), width=4, anchor="e")
+        opacity_value.pack(side="right")
+        def update_opacity(v):
+            opacity_value.config(text=f"{v}%")
+            self._op(v)
+        s = SettingsScale(row, 10, 100, 5, update_opacity)
         app.opacity_scale = s
         s.set(int(app.data["settings"]["opacity"] * 100))
+        opacity_value.config(text=f"{s.get()}%")
         s.pack(side="right")
 
-        row3 = tk.Frame(f, bg="#FAFAF8"); row3.pack(fill="x", pady=(8, 0))
-        tk.Label(row3, text="字号", bg="#FAFAF8").pack(side="left")
-        s2 = tk.Scale(row3, from_=9, to=16, orient="horizontal", length=150,
-                      bg="#FAFAF8", highlightthickness=0, troughcolor="#E8E4DD",
-                      command=self._font)
+        row3 = tk.Frame(f, bg=NOTE_BG); row3.pack(fill="x", pady=(4, 0))
+        tk.Label(row3, text="字号", bg=NOTE_BG, fg="#2B2F36",
+                 font=(UI_FONT, 10)).pack(side="left")
+        font_value = tk.Label(row3, bg=NOTE_BG, fg=QUIET,
+                              font=(UI_FONT, 9), width=4, anchor="e")
+        font_value.pack(side="right")
+        def update_font(v):
+            font_value.config(text=str(v))
+            self._font(v)
+        s2 = SettingsScale(row3, 9, 16, 1, update_font)
         s2.set(app.data["settings"]["fontSize"])
+        font_value.config(text=str(s2.get()))
         s2.pack(side="right")
 
-        tk.Label(f, text="全局快捷键：Ctrl+Alt+N 新建便签 · Ctrl+Alt+H 显示/隐藏全部\n数据：%s"
-                 % DATA_FILE, bg="#FAFAF8", fg="#999",
-                 font=(UI_FONT, 9), justify="left").pack(anchor="w", pady=(14, 0))
+        section("快捷键与数据")
+        tk.Label(f, text="Ctrl+Alt+N  新建便签     Ctrl+Alt+H  显示/隐藏全部",
+                 bg=NOTE_BG, fg=QUIET, font=(UI_FONT, 9)).pack(anchor="w")
+        tk.Label(f, text=DATA_FILE, bg=NOTE_BG, fg="#A9AFB6",
+                 font=(UI_FONT, 9), wraplength=380, justify="left").pack(anchor="w", pady=(8, 0))
+        self.update_idletasks()
+        width, height = 440, f.winfo_reqheight() + 2 * RADIUS
+        cv.configure(width=width, height=height)
+        round_rect(cv, 1, 1, width - 2, height - 2, RADIUS,
+                   fill=NOTE_BG, outline=NOTE_BORDER)
+        self.geometry("%dx%d+%d+%d" % (width, height,
+                       (self.winfo_screenwidth() - width) // 2,
+                       (self.winfo_screenheight() - height) // 2))
+        self.update_idletasks()
+        hwnd = user32.GetParent(self.winfo_id()) or self.winfo_id()
+        preference = ctypes.c_int(2)
+        dwmapi.DwmSetWindowAttribute(hwnd, 33, ctypes.byref(preference), ctypes.sizeof(preference))
+
+    def _drag_press(self, event):
+        self._drag = (event.x_root - self.winfo_x(), event.y_root - self.winfo_y())
+
+    def _drag_move(self, event):
+        self.geometry("+%d+%d" % (event.x_root - self._drag[0],
+                                   event.y_root - self._drag[1]))
 
     def _toggle_boot(self):
         if set_autostart(self.v_boot.get()):
@@ -1533,9 +1642,12 @@ class App:
                 elif act == "settings":
                     if self.settings_win is None or not self.settings_win.winfo_exists():
                         self.settings_win = SettingsWindow(self)
-                    else:
-                        self.settings_win.deiconify()
-                        self.settings_win.lift(); self.settings_win.focus_set()
+                    win = self.settings_win
+                    win.attributes("-topmost", True)
+                    win.deiconify()
+                    win.lift()
+                    win.focus_force()
+                    self.root.after(300, lambda: win.winfo_exists() and win.attributes("-topmost", False))
                 elif act == "quit":
                     self.quit()
         except queue.Empty:
