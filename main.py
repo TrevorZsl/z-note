@@ -297,7 +297,7 @@ class NoteWindow(tk.Toplevel):
         spacer = tk.Label(self.toolbar, text="", bg=self._bg, cursor="fleur")
         spacer.pack(side="left", fill="both", expand=True)
         btn("minus", lambda: "隐藏这张便签", self.hide).pack(side="right", padx=(2, 8), pady=9)
-        btn("sticky-note", lambda: "新建便签（Ctrl+Alt+N）",
+        btn("plus", lambda: "新建便签（Ctrl+Alt+N）",
             lambda: self.app.new_note()).pack(side="right", padx=5, pady=9)
         btn("trash", lambda: "删除便签", self.delete_self).pack(side="right", padx=5, pady=9)
         for w in (self.toolbar, spacer):
@@ -1148,7 +1148,7 @@ class SettingsWindow(tk.Toplevel):
         super().__init__(app.root)
         self.app = app
         self.title("z-note 设置")
-        self.transient(app.root)
+        # 不能 transient 到常驻隐藏的 root：Windows 上宿主隐藏时 transient 窗口永远不显示
         self.resizable(False, False)
         self.configure(bg="#FAFAF8")
         f = tk.Frame(self, bg="#FAFAF8", padx=20, pady=16)
@@ -1228,6 +1228,14 @@ class App:
                 note["opacity"] = 1.0
         self.q = queue.Queue()
         self.root = tk.Tk()
+        # 钉死 tk scaling：首次运行记录系统 DPI，此后不再跟随系统缩放变化，画面始终一致。
+        # 想重新适配当前缩放，删掉 %APPDATA%/z-note/notes.json 里的 uiDpi 即可。
+        dpi = self.data["settings"].get("uiDpi")
+        if not dpi:
+            dpi = round(self.root.winfo_fpixels("1i"))
+            self.data["settings"]["uiDpi"] = dpi
+            save_data(self.data)
+        self.root.tk.call("tk", "scaling", dpi / 72.0)
         self.root.withdraw()
         for name in ("TkDefaultFont", "TkMenuFont"):
             tkfont.nametofont(name, root=self.root).configure(family=UI_FONT)
@@ -1359,6 +1367,7 @@ class App:
                     if self.settings_win is None or not self.settings_win.winfo_exists():
                         self.settings_win = SettingsWindow(self)
                     else:
+                        self.settings_win.deiconify()
                         self.settings_win.lift(); self.settings_win.focus_set()
                 elif act == "quit":
                     self.quit()
