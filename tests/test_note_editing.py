@@ -166,6 +166,17 @@ class NoteEditingTests(unittest.TestCase):
         self.assertFalse(popup.winfo_exists())
         self.assertEqual(self.note.d["lines"][0]["type"], "text")
 
+    def test_add_todo_inserts_below_cursor_line(self):
+        before = list(self.note.d["lines"])
+        self.text.mark_set("insert", "2.end")
+        self.note._pill_press(None)
+        self.assertEqual(self.note.d["lines"][:2], before[:2])
+        self.assertEqual(self.note.d["lines"][2],
+                         {"type": "todo", "text": "", "checked": False})
+        self.assertEqual(self.note.d["lines"][3:], before[2:])
+        self.assertEqual(self.text.index("insert"),
+                         f"3.{self.note._prefix_len(self.note.d['lines'][2])}")
+
     def test_title_text_is_visually_centered_in_chip(self):
         self.note.d["title"] = "10.27"
         self.note._draw_chip()
@@ -343,6 +354,16 @@ class NoteEditingTests(unittest.TestCase):
         self.app.root.update()
         self.assertFalse(self.note._strike_widgets)
 
+    def test_completed_last_todo_has_strike_without_following_line(self):
+        self.note.d["lines"] = [
+            {"type": "text", "text": "前一行", "checked": False},
+            {"type": "todo", "text": "最后一项", "checked": True},
+        ]
+        self.note.render()
+        self.app.root.update()
+        self.assertEqual(len(self.note._strike_widgets), 1)
+        self.assertGreater(self.note._strike_widgets[0].winfo_width(), 1)
+
     def test_completed_wrapped_todo_strikes_every_display_line(self):
         self.note.geometry("300x500")
         self.note.d["lines"] = [{"type": "todo", "text": "啊" * 55, "checked": True}]
@@ -381,6 +402,18 @@ class NoteEditingTests(unittest.TestCase):
         self.note._on_enter(None)
         self.assertEqual(self.note.d["lines"][1]["text"], original[:2])
         self.assertEqual(self.note.d["lines"][2]["text"], "")
+
+    def test_enter_at_start_of_checked_todo_keeps_text_and_adds_empty_todo_below(self):
+        original = dict(self.note.d["lines"][2])
+        self.note.toggle_done(2)
+        self.text.mark_set("insert", f"3.{self.note._prefix_len(original)}")
+        self.note._on_enter(None)
+        self.app.root.update()
+        self.assertEqual(self.note.d["lines"][2], dict(original, checked=True))
+        self.assertEqual(self.note.d["lines"][3],
+                         {"type": "todo", "text": "", "checked": False})
+        self.assertEqual(self.text.index("insert"), "4.3")
+        self.assertEqual(len(self.note._strike_widgets), 1)
 
     def test_cancel_cross_row_ime_restores_todo_icons_and_text(self):
         original = [dict(line) for line in self.note.d["lines"]]

@@ -727,7 +727,8 @@ class NoteWindow(tk.Toplevel):
             end = f"{row}.end"
             while self.text.compare(start, "<", end):
                 next_start = self.text.index(f"{start} +1 display lines display linestart")
-                stop = next_start if self.text.compare(next_start, "<", end) else end
+                stop = (next_start if self.text.compare(start, "<", next_start) and
+                        self.text.compare(next_start, "<", end) else end)
                 first = self.text.bbox(start)
                 last = self.text.bbox(f"{stop}-1c") if self.text.compare(stop, ">", start) else None
                 if first and last:
@@ -754,11 +755,11 @@ class NoteWindow(tk.Toplevel):
 
     # ---- 底部添加条 ----
     def add_todo(self):
-        self.d["lines"].append({"type": "todo", "text": "", "checked": False})
+        row = int(self.text.index("insert").split(".")[0])
+        self.d["lines"].insert(row, {"type": "todo", "text": "", "checked": False})
         self.render(keep_cursor=False)
-        row = len(self.d["lines"])
-        self.text.mark_set("insert", f"{row}.0+{self._prefix_len(self.d['lines'][-1])}c")
-        self.text.see(f"{row}.0")
+        self.text.mark_set("insert", f"{row+1}.0+{self._prefix_len(self.d['lines'][row])}c")
+        self.text.see(f"{row+1}.0")
         self.text.focus_set()
         self.app.schedule_save()
 
@@ -967,7 +968,10 @@ class NoteWindow(tk.Toplevel):
         pre = self._prefix_len(ln)
         rel = max(0, col - pre)
         left, right = ln["text"][:rel], ln["text"][rel:]
-        ln["text"] = left
+        if ln["type"] == "todo" and rel == 0:
+            right = ""
+        else:
+            ln["text"] = left
         lines.insert(row + 1, {"type": ln["type"], "text": right, "checked": False})
         self.render(keep_cursor=False)
         nrow = row + 2
