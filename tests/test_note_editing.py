@@ -76,21 +76,20 @@ class NoteEditingTests(unittest.TestCase):
         self.app.root.update()
         self.assertEqual(self.note.d["title"], "新名称")
 
-    def test_opacity_slider_updates_existing_and_new_notes_in_five_percent_steps(self):
+    def test_transparency_slider_updates_existing_and_new_notes_in_ten_percent_steps(self):
         settings = main.SettingsWindow(self.app)
         self.app.root.update()
-        self.app.opacity_scale.set(73)
+        self.app.opacity_scale.set(27)
         self.app.root.update()
-        self.assertEqual(self.app.opacity_scale.get(), 75)
-        settings._op(self.app.opacity_scale.get())
-        self.assertEqual(self.app.data["settings"]["opacity"], 0.75)
-        self.assertEqual(self.note.d["opacity"], 0.75)
-        self.assertAlmostEqual(float(self.note.attributes("-alpha")), 0.75, places=2)
+        self.assertEqual(self.app.opacity_scale.get(), 30)
+        self.assertEqual(self.app.data["settings"]["opacity"], 0.7)
+        self.assertEqual(self.note.d["opacity"], 0.7)
+        self.assertAlmostEqual(float(self.note.attributes("-alpha")), 0.7, places=2)
         other = self.app.new_note()
-        self.assertEqual(other.d["opacity"], 0.75)
+        self.assertEqual(other.d["opacity"], 0.7)
         self.note._ctrl_wheel(type("Wheel", (), {"delta": 120})())
         self.assertEqual(other.d["opacity"], 0.8)
-        self.assertEqual(self.app.opacity_scale.get(), 80)
+        self.assertEqual(self.app.opacity_scale.get(), 20)
         settings.destroy()
 
     def test_settings_open_in_front_then_return_to_normal_z_order(self):
@@ -100,12 +99,39 @@ class NoteEditingTests(unittest.TestCase):
         settings = self.app.settings_win
         self.assertEqual(settings.state(), "normal")
         self.assertEqual(settings.attributes("-topmost"), 1)
+        hwnd = main.user32.GetParent(settings.winfo_id()) or settings.winfo_id()
+        self.assertTrue(main.user32.GetWindowLongPtrW(hwnd, -20) & 0x40000)
+        self.assertEqual(settings._icon_image.width(), 32)
+        settings._minimize_button.event_generate("<Button-1>")
+        self.app.root.update()
+        self.assertEqual(settings.state(), "iconic")
         self.app.q.put("settings")
         self.app._pump()
         self.assertIs(self.app.settings_win, settings)
+        self.assertEqual(settings.state(), "normal")
         self.app.root.after(350, self.app.root.quit)
         self.app.root.mainloop()
         self.assertEqual(settings.attributes("-topmost"), 0)
+        settings.destroy()
+
+    def test_only_settings_windows_have_taskbar_entries(self):
+        other = self.app.new_note()
+        settings = main.SettingsWindow(self.app)
+        self.app.root.update()
+        for note in (self.note, other):
+            for _ in range(2):
+                hwnd = main.user32.GetParent(note.winfo_id()) or note.winfo_id()
+                style = main.user32.GetWindowLongPtrW(hwnd, -20)
+                self.assertEqual(note.hwnd, hwnd)
+                self.assertTrue(style & 0x80)  # WS_EX_TOOLWINDOW
+                self.assertFalse(style & 0x40000)  # WS_EX_APPWINDOW
+                note.hide()
+                note.show()
+                self.app.root.update()
+        hwnd = main.user32.GetParent(settings.winfo_id()) or settings.winfo_id()
+        style = main.user32.GetWindowLongPtrW(hwnd, -20)
+        self.assertTrue(style & 0x40000)
+        self.assertFalse(style & 0x80)
         settings.destroy()
 
     def test_settings_slider_and_window_drag(self):
@@ -113,12 +139,12 @@ class NoteEditingTests(unittest.TestCase):
         self.app.root.update()
         scale = self.app.opacity_scale
         scale.event_generate("<Button-1>", x=8, y=14)
-        self.assertEqual(scale.get(), 50)
+        self.assertEqual(scale.get(), 0)
         scale.focus_force()
         self.app.root.update()
         scale.event_generate("<Right>")
-        self.assertEqual(scale.get(), 55)
-        self.assertEqual(self.note.d["opacity"], 0.55)
+        self.assertEqual(scale.get(), 10)
+        self.assertEqual(self.note.d["opacity"], 0.9)
         x, y = settings.winfo_x(), settings.winfo_y()
         settings._drag_press(type("Event", (), {"widget": settings, "x_root": x + 20, "y_root": y + 20})())
         settings._drag_move(type("Event", (), {"x_root": x + 35, "y_root": y + 30})())
@@ -136,13 +162,24 @@ class NoteEditingTests(unittest.TestCase):
                 scales.append(widget)
         opacity = self.app.opacity_scale
         font = next(scale for scale in scales if scale != opacity)
+        self.assertEqual(settings._check_images[False].width(), 22)
+        opacity_value = opacity.master.winfo_children()[1]
+        font_value = font.master.winfo_children()[1]
+        self.assertEqual(opacity_value.cget("text"), "0%")
+        self.assertEqual(opacity_value.winfo_rootx() + opacity_value.winfo_width(),
+                         font_value.winfo_rootx() + font_value.winfo_width())
+        for value, scale in ((opacity_value, opacity), (font_value, font)):
+            self.assertLessEqual(abs(value.winfo_rooty() + value.winfo_height() / 2
+                                     - scale.winfo_rooty() - scale.winfo_height() / 2), 1)
         for x in range(0, 181):
             opacity.event_generate("<B1-Motion>", x=x, y=14)
-            self.assertIn(opacity.get(), range(50, 101, 5))
+            self.assertIn(opacity.get(), range(0, 51, 10))
             font.event_generate("<B1-Motion>", x=x, y=14)
             self.assertIn(font.get(), range(10, 16))
         self.assertEqual(self.app.data["settings"]["fontSize"], 15)
-        opacity.set(0)
+        self.assertEqual((opacity.maximum - opacity.minimum) // opacity.step,
+                         (font.maximum - font.minimum) // font.step)
+        opacity.set(100)
         self.assertEqual(opacity.get(), 50)
         self.note._ctrl_wheel(type("Wheel", (), {"delta": -120})())
         self.assertEqual(self.app.data["settings"]["opacity"], 0.5)
@@ -172,7 +209,7 @@ class NoteEditingTests(unittest.TestCase):
         scale.event_generate("<B1-Motion>", x=168, y=14)
         self.app.root.update()
         self.assertEqual((settings.winfo_x(), settings.winfo_y()), (x, y))
-        self.assertEqual(scale.get(), 100)
+        self.assertEqual(scale.get(), 50)
         settings.destroy()
 
     def test_hotkey_capture_updates_box_and_esc_does_not_close_settings(self):
@@ -181,6 +218,7 @@ class NoteEditingTests(unittest.TestCase):
         entry = settings.hotkey_entries["new"]
         entry.focus_force()
         self.app.root.update()
+        self.assertEqual(entry.master.itemcget(entry.master.find_all()[0], "outline"), "#94A3B8")
         with patch.object(self.app, "update_hotkey", return_value=None) as update:
             entry.event_generate("<KeyPress>", keycode=75, state=5)
             update.assert_called_once_with("new", "Ctrl+Shift+K")
@@ -232,6 +270,42 @@ class NoteEditingTests(unittest.TestCase):
         self.assertIn("另一项", settings._hotkey_hint.cget("text"))
         settings.destroy()
 
+    def test_reset_hotkeys_restores_both_defaults_and_keeps_old_bindings_on_conflict(self):
+        self.app.data["settings"].update(newHotkey="Ctrl+Alt+H", toggleHotkey="Ctrl+Alt+N")
+        self.app._hotkey_hwnd = self.app.root.winfo_id()
+        self.app._hotkey_ids = {"new": 1, "toggle": 2}
+        self.app._active_hotkeys = {"new": "Ctrl+Alt+H", "toggle": "Ctrl+Alt+N"}
+        with patch.object(main.user32, "RegisterHotKey", side_effect=[True, False, True, True]), \
+             patch.object(main.user32, "UnregisterHotKey"), patch.object(main, "save_data") as save:
+            self.assertIn("占用", self.app.reset_hotkeys())
+            self.assertEqual(self.app.hotkey_text("new"), "Ctrl+Alt+H")
+            self.assertEqual(self.app._active_hotkeys["toggle"], "Ctrl+Alt+N")
+            save.assert_not_called()
+        with patch.object(main.user32, "RegisterHotKey", return_value=True), \
+             patch.object(main.user32, "UnregisterHotKey"), patch.object(main, "save_data") as save:
+            settings = main.SettingsWindow(self.app)
+            self.app.root.update()
+            heading = next(w for w in settings._hotkey_hint.master.winfo_children()
+                           if isinstance(w, main.tk.Frame) and any(
+                               isinstance(child, main.tk.Label) and child.cget("text") == "快捷键"
+                               for child in w.winfo_children()))
+            button = next(w for w in heading.winfo_children() if isinstance(w, main.tk.Button))
+            label = next(w for w in heading.winfo_children() if isinstance(w, main.tk.Label))
+            self.assertEqual(button.winfo_rootx() - label.winfo_rootx() - label.winfo_width(), 16)
+            self.assertLess(button.winfo_rooty(), settings.hotkey_entries["new"].winfo_rooty())
+            self.assertTrue(button.cget("image"))
+            for entry in settings.hotkey_entries.values():
+                self.assertIsInstance(entry.master, main.tk.Canvas)
+                self.assertEqual(entry.master.type(entry.master.find_all()[0]), "polygon")
+            save.reset_mock()
+            settings._reset_hotkeys()
+            self.assertEqual(settings.hotkey_entries["new"].get(), "Ctrl+Alt+N")
+            self.assertEqual(settings.hotkey_entries["toggle"].get(), "Ctrl+Alt+H")
+            self.assertEqual(self.app._active_hotkeys,
+                             {"new": "Ctrl+Alt+N", "toggle": "Ctrl+Alt+H"})
+            save.assert_called_once_with(self.app.data)
+            settings.destroy()
+
     def test_settings_text_fits_at_different_scales_and_long_paths(self):
         original_scaling = self.app.root.tk.call("tk", "scaling")
         try:
@@ -249,7 +323,7 @@ class NoteEditingTests(unittest.TestCase):
                     settings = main.SettingsWindow(self.app)
                     try:
                         self.app.root.update()
-                        self.assertGreaterEqual(settings.winfo_width(), 500)
+                        self.assertGreaterEqual(settings.winfo_width(), 720)
                         self.assertLessEqual(settings.winfo_width(), screen_w - 32)
                         self.assertLessEqual(settings.winfo_height(), screen_h - 32)
                         for entry in settings.hotkey_entries.values():

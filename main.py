@@ -38,6 +38,10 @@ kernel32.WaitForSingleObject.argtypes = [wintypes.HANDLE, wintypes.DWORD]
 kernel32.WaitForSingleObject.restype = wintypes.DWORD
 user32.SetWindowPos.argtypes = [wintypes.HWND, wintypes.HWND, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int, wintypes.UINT]
 user32.SetWindowPos.restype = wintypes.BOOL
+user32.ShowWindow.argtypes = [wintypes.HWND, ctypes.c_int]
+user32.ShowWindow.restype = wintypes.BOOL
+user32.GetWindowLongPtrW.argtypes = [wintypes.HWND, ctypes.c_int]
+user32.GetWindowLongPtrW.restype = ctypes.c_ssize_t
 user32.GetParent.argtypes = [wintypes.HWND]
 user32.GetParent.restype = wintypes.HWND
 user32.RegisterHotKey.argtypes = [wintypes.HWND, ctypes.c_int, wintypes.UINT, wintypes.UINT]
@@ -314,6 +318,7 @@ class NoteWindow(tk.Toplevel):
         self.geometry(f"{data['w']}x{data['h']}+{data['x']}+{data['y']}")
         self.attributes("-alpha", data["opacity"])
         self.overrideredirect(True)
+        self.attributes("-toolwindow", True)
 
         # 画布画圆角底板，控件都放圆角内部
         self.cv = tk.Canvas(self, bg=self._bg, highlightthickness=0, bd=0)
@@ -1168,7 +1173,7 @@ class NoteWindow(tk.Toplevel):
         self.app.schedule_save()
 
     def _ctrl_wheel(self, e):
-        step = 5 if e.delta > 0 else -5
+        step = 10 if e.delta > 0 else -10
         percent = round(self.app.data["settings"]["opacity"] * 100)
         self.app.set_opacity(percent + step)
         return "break"
@@ -1388,7 +1393,11 @@ class SettingsScale(tk.Canvas):
 class SettingsWindow(tk.Toplevel):
     def __init__(self, app):
         super().__init__(app.root)
+        self.withdraw()
         self.app = app
+        self.title("z-note 设置")
+        self._icon_image = ImageTk.PhotoImage(_make_tray_icon(), master=self)
+        self.iconphoto(False, self._icon_image)
         self.overrideredirect(True)
         self.resizable(False, False)
         self.configure(bg=NOTE_BG)
@@ -1407,23 +1416,31 @@ class SettingsWindow(tk.Toplevel):
                          font=(UI_FONT, 17), cursor="hand2")
         close.pack(side="right", padx=(8, 2))
         close.bind("<Button-1>", lambda _e: self.destroy())
+        minimize = tk.Label(header, text="−", bg=NOTE_BG, fg=INK,
+                            font=(UI_FONT, 17), cursor="hand2")
+        minimize.pack(side="right", padx=(8, 2))
+        minimize.bind("<Button-1>", lambda _e: self._minimize())
         self.bind("<Escape>", lambda _e: self.destroy())
         self._drag = None
         self._close_button = close
+        self._minimize_button = minimize
         self.bind("<Button-1>", self._drag_press)
         self.bind("<B1-Motion>", self._drag_move)
         self.bind("<ButtonRelease-1>", lambda _e: setattr(self, "_drag", None))
 
         def section(title):
             tk.Frame(f, bg=NOTE_BORDER, height=1).pack(fill="x", pady=(14, 14))
-            tk.Label(f, text=title, bg=NOTE_BG, fg="#1F2328",
-                     font=(UI_FONT, 11, "bold")).pack(anchor="w", pady=(0, 8))
+            heading = tk.Frame(f, bg=NOTE_BG)
+            heading.pack(fill="x", pady=(0, 8))
+            tk.Label(heading, text=title, bg=NOTE_BG, fg="#1F2328",
+                     font=(UI_FONT, 11, "bold")).pack(side="left")
+            return heading
 
         section("常规")
 
-        self._check_images = check_images(self, 18)
+        self._check_images = check_images(self, 22)
         self.v_boot = tk.BooleanVar(value=app.data["settings"]["autostart"])
-        tk.Checkbutton(f, text="开机自启", variable=self.v_boot, bg=NOTE_BG,
+        tk.Checkbutton(f, text=" 开机自启", variable=self.v_boot, bg=NOTE_BG,
                        fg="#2B2F36", activebackground=NOTE_BG, selectcolor=NOTE_BG,
                        font=(UI_FONT, 10), image=self._check_images[False],
                        selectimage=self._check_images[True], compound="left",
@@ -1432,7 +1449,7 @@ class SettingsWindow(tk.Toplevel):
                        command=self._toggle_boot).pack(anchor="w", pady=4)
 
         self.v_show = tk.BooleanVar(value=app.data["settings"]["showOnStartup"])
-        startup = tk.Checkbutton(f, text="启动时显示便签（关闭=仅驻留托盘）", variable=self.v_show,
+        startup = tk.Checkbutton(f, text=" 启动时显示便签", variable=self.v_show,
                        bg=NOTE_BG, fg="#2B2F36", activebackground=NOTE_BG,
                        selectcolor=NOTE_BG, font=(UI_FONT, 10),
                        image=self._check_images[False], selectimage=self._check_images[True],
@@ -1443,19 +1460,19 @@ class SettingsWindow(tk.Toplevel):
 
         section("外观")
         row = tk.Frame(f, bg=NOTE_BG); row.pack(fill="x", pady=(0, 4))
-        tk.Label(row, text="所有便签不透明度", bg=NOTE_BG, fg="#2B2F36",
+        tk.Label(row, text="透明度", bg=NOTE_BG, fg="#2B2F36",
                  font=(UI_FONT, 10)).pack(side="left")
         opacity_value = tk.Label(row, bg=NOTE_BG, fg=QUIET,
-                                 font=(UI_FONT, 9), width=4, anchor="e")
+                                 font=(UI_FONT, 9), width=4, anchor="center")
         opacity_value.pack(side="right")
         def update_opacity(v):
             opacity_value.config(text=f"{v}%")
             self._op(v)
-        s = SettingsScale(row, 50, 100, 5, update_opacity)
+        s = SettingsScale(row, 0, 50, 10, update_opacity)
         app.opacity_scale = s
-        s.set(int(app.data["settings"]["opacity"] * 100))
+        s.set(round((1 - app.data["settings"]["opacity"]) * 100))
         opacity_value.config(text=f"{s.get()}%")
-        if app.data["settings"]["opacity"] != s.get() / 100:
+        if app.data["settings"]["opacity"] != (100 - s.get()) / 100:
             self._op(s.get())
         s.pack(side="right")
 
@@ -1463,7 +1480,7 @@ class SettingsWindow(tk.Toplevel):
         tk.Label(row3, text="字号", bg=NOTE_BG, fg="#2B2F36",
                  font=(UI_FONT, 10)).pack(side="left")
         font_value = tk.Label(row3, bg=NOTE_BG, fg=QUIET,
-                              font=(UI_FONT, 9), width=4, anchor="e")
+                              font=(UI_FONT, 9), width=4, anchor="center")
         font_value.pack(side="right")
         def update_font(v):
             font_value.config(text=str(v))
@@ -1475,12 +1492,27 @@ class SettingsWindow(tk.Toplevel):
             self._font(s2.get())
         s2.pack(side="right")
 
-        section("快捷键")
+        hotkey_heading = section("快捷键")
+        reset_font = tkfont.Font(root=self, family=UI_FONT, size=9)
+        button_w = reset_font.measure("重置快捷键") + 24
+        button_h = reset_font.metrics("linespace") + 14
+        button_image = Image.new("RGB", (button_w * 4, button_h * 4), NOTE_BG)
+        ImageDraw.Draw(button_image).rounded_rectangle(
+            (2, 2, button_w * 4 - 3, button_h * 4 - 3), radius=32,
+            fill=NOTE_BG, outline=NOTE_BORDER, width=4)
+        self._reset_image = ImageTk.PhotoImage(
+            button_image.resize((button_w, button_h), Image.Resampling.LANCZOS), master=self)
+        reset_button = tk.Button(hotkey_heading, text="重置快捷键", command=self._reset_hotkeys,
+                                 image=self._reset_image, compound="center", bg=NOTE_BG,
+                                 fg="#475569", font=reset_font, relief="flat", bd=0,
+                                 highlightthickness=0, padx=0, pady=0, cursor="hand2")
+        reset_button.pack(side="left", padx=(16, 0))
         self._hotkey_font = tkfont.Font(root=self, family=UI_FONT, size=9)
         hotkey_width = math.ceil(self._hotkey_font.measure("Ctrl+Alt+Shift+Backspace") /
                                  self._hotkey_font.measure("0")) + 2
         self.hotkey_entries = {}
         self._hotkey_vars = {}
+        self._hotkey_borders = []
         hotkey_rows = []
         for action, name in (("new", "新建便签"), ("toggle", "显示/隐藏全部便签")):
             hotkey_row = tk.Frame(f, bg=NOTE_BG)
@@ -1489,25 +1521,37 @@ class SettingsWindow(tk.Toplevel):
             label = tk.Label(hotkey_row, text=name, bg=NOTE_BG, fg="#2B2F36",
                              font=(UI_FONT, 10), justify="left", anchor="w")
             label.grid(row=0, column=0, sticky="w", padx=(0, 12))
-            entry = tk.Entry(hotkey_row, font=self._hotkey_font, width=hotkey_width, justify="center",
+            border = tk.Canvas(hotkey_row, bg=NOTE_BG, highlightthickness=0, bd=0,
+                               cursor="hand2")
+            entry = tk.Entry(border, font=self._hotkey_font, width=hotkey_width, justify="center",
                              state="readonly", readonlybackground=NOTE_BG, fg="#475569",
-                             relief="flat", highlightthickness=1, highlightbackground=NOTE_BORDER,
-                             highlightcolor="#94A3B8", cursor="hand2")
-            entry.grid(row=0, column=1, sticky="e", ipady=6)
+                             relief="flat", highlightthickness=0, cursor="hand2")
+            box_w, box_h = entry.winfo_reqwidth() + 12, entry.winfo_reqheight() + 12
+            border.configure(width=box_w, height=box_h)
+            outline = round_rect(border, 1, 1, box_w - 1, box_h - 1, 7,
+                                 fill=NOTE_BG, outline=NOTE_BORDER)
+            entry.place(x=6, y=6)
+            border.grid(row=0, column=1, sticky="e")
+            border.bind("<Button-1>", lambda _e, widget=entry: widget.focus_set())
+            entry.bind("<FocusIn>", lambda _e, canvas=border, shape=outline:
+                       canvas.itemconfigure(shape, outline="#94A3B8"), add="+")
+            entry.bind("<FocusOut>", lambda _e, canvas=border, shape=outline:
+                       canvas.itemconfigure(shape, outline=NOTE_BORDER), add="+")
             self._hotkey_vars[action] = tk.StringVar(master=self, value=app.hotkey_text(action))
             entry.configure(textvariable=self._hotkey_vars[action])
             entry.bind("<KeyPress>", lambda e, action=action: self._capture_hotkey(e, action))
             entry.bind("<Button-1>", lambda e: e.widget.focus_set())
             entry.bind("<FocusIn>", lambda _e, action=action:
-                       setattr(app, "_hotkey_capture", (self, action)))
-            entry.bind("<FocusOut>", lambda _e: setattr(app, "_hotkey_capture", None))
+                       setattr(app, "_hotkey_capture", (self, action)), add="+")
+            entry.bind("<FocusOut>", lambda _e: setattr(app, "_hotkey_capture", None), add="+")
             self.hotkey_entries[action] = entry
-            hotkey_rows.append((hotkey_row, label, entry))
+            self._hotkey_borders.append(border)
+            hotkey_rows.append((hotkey_row, label, border))
         hotkey_hint = tk.Label(f, text="点击方框后按下组合键，自动保存。Esc 取消。",
                               bg=NOTE_BG, fg=QUIET, font=(UI_FONT, 9), justify="left",
-                              anchor="nw", height=3)
-        hotkey_hint.pack(fill="x", pady=(6, 0))
+                              anchor="w")
         self._hotkey_hint = hotkey_hint
+        hotkey_hint.pack(fill="x", pady=(8, 0))
         self.bind("<Destroy>", lambda e: e.widget == self and setattr(app, "_hotkey_capture", None))
         section("数据")
         path = tk.Label(f, text=DATA_FILE, bg=NOTE_BG, fg="#A9AFB6",
@@ -1517,12 +1561,12 @@ class SettingsWindow(tk.Toplevel):
         work = wintypes.RECT()
         user32.SystemParametersInfoW(48, 0, ctypes.byref(work), 0)  # SPI_GETWORKAREA
         available_w, available_h = work.right - work.left - 32, work.bottom - work.top - 32
-        width = min(max(500, f.winfo_reqwidth() + 2 * RADIUS), available_w)
+        width = min(max(720, f.winfo_reqwidth() + 2 * RADIUS), available_w)
         content_width = width - 2 * RADIUS
         # 文本按实际可用宽度换行，窗口高度在换行完成后再计算。
         startup.configure(wraplength=max(1, content_width - self._check_images[False].width() - 16))
-        for label in (hotkey_hint, path):
-            label.configure(wraplength=max(1, content_width - 16))
+        hotkey_hint.configure(wraplength=max(1, content_width - 16))
+        path.configure(wraplength=max(1, content_width - 16))
         for hotkey_row, label, entry in hotkey_rows:
             label.configure(wraplength=max(1, content_width - entry.winfo_reqwidth() - 28))
         body.itemconfigure(content, width=content_width)
@@ -1543,8 +1587,8 @@ class SettingsWindow(tk.Toplevel):
                             width=scrollbar_width, height=viewport_height)
             body.configure(yscrollcommand=scrollbar.set)
             startup.configure(wraplength=max(1, content_width - self._check_images[False].width() - 16))
-            for label in (hotkey_hint, path):
-                label.configure(wraplength=max(1, content_width - 16))
+            hotkey_hint.configure(wraplength=max(1, content_width - 16))
+            path.configure(wraplength=max(1, content_width - 16))
             for hotkey_row, label, entry in hotkey_rows:
                 label.configure(wraplength=max(1, content_width - entry.winfo_reqwidth() - 28))
             body.itemconfigure(content, width=content_width)
@@ -1569,13 +1613,20 @@ class SettingsWindow(tk.Toplevel):
         hwnd = user32.GetParent(self.winfo_id()) or self.winfo_id()
         preference = ctypes.c_int(2)
         dwmapi.DwmSetWindowAttribute(hwnd, 33, ctypes.byref(preference), ctypes.sizeof(preference))
+        style = user32.GetWindowLongPtrW(hwnd, -20)
+        user32.SetWindowLongPtrW(hwnd, -20, style & ~0x80 | 0x40000)  # WS_EX_TOOLWINDOW / WS_EX_APPWINDOW
+        user32.SetWindowPos(hwnd, None, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | 0x04 | 0x20)
+        self.deiconify()
 
     def _drag_press(self, event):
-        if (event.widget == self._close_button or
-                isinstance(event.widget, (SettingsScale, tk.Checkbutton, tk.Scrollbar, tk.Entry))):
+        if (event.widget in (self._close_button, self._minimize_button, *self._hotkey_borders) or
+                isinstance(event.widget, (SettingsScale, tk.Checkbutton, tk.Button, tk.Scrollbar, tk.Entry))):
             self._drag = None
             return
         self._drag = (event.x_root - self.winfo_x(), event.y_root - self.winfo_y())
+
+    def _minimize(self):
+        user32.ShowWindow(user32.GetParent(self.winfo_id()) or self.winfo_id(), 6)  # SW_MINIMIZE
 
     def _drag_move(self, event):
         if self._drag is None:
@@ -1607,6 +1658,15 @@ class SettingsWindow(tk.Toplevel):
             self._hotkey_vars[action].set(value)
             self._hotkey_hint.configure(text="快捷键已保存并生效。", fg=QUIET)
 
+    def _reset_hotkeys(self):
+        error = self.app.reset_hotkeys()
+        if error:
+            self._hotkey_hint.configure(text=error, fg="#A44A42")
+        else:
+            for action in HOTKEY_ACTIONS:
+                self._hotkey_vars[action].set(self.app.hotkey_text(action))
+            self._hotkey_hint.configure(text="快捷键已恢复默认值。", fg=QUIET)
+
     def _toggle_boot(self):
         if set_autostart(self.v_boot.get()):
             self.app.data["settings"]["autostart"] = self.v_boot.get()
@@ -1616,7 +1676,7 @@ class SettingsWindow(tk.Toplevel):
         self._save()
 
     def _op(self, v):
-        self.app.set_opacity(int(float(v)))
+        self.app.set_opacity(100 - int(float(v)))
 
     def _font(self, v):
         self.app.data["settings"]["fontSize"] = int(v)
@@ -1717,15 +1777,15 @@ class App:
             w.render()
 
     def set_opacity(self, percent):
-        percent = min(100, max(50, 5 * round(percent / 5)))
+        percent = min(100, max(50, 10 * round(percent / 10)))
         value = percent / 100
         self.data["settings"]["opacity"] = value
         for note in self.notes.values():
             note.d["opacity"] = value
             note.attributes("-alpha", value)
         scale = getattr(self, "opacity_scale", None)
-        if scale is not None and scale.winfo_exists() and scale.get() != percent:
-            scale.set(percent)
+        if scale is not None and scale.winfo_exists() and scale.get() != 100 - percent:
+            scale.set(100 - percent)
         self.schedule_save()
 
     def new_note(self):
@@ -1822,6 +1882,40 @@ class App:
         self._hotkey_ids[action] = new_identity
         self._active_hotkeys[action] = value
         self.data["settings"][setting] = value
+        self.save_now()
+        if hasattr(self, "icon"):
+            self.icon.update_menu()
+        return None
+
+    def reset_hotkeys(self):
+        defaults = {action: default for action, (_, _, default) in HOTKEY_ACTIONS.items()}
+        if all(self.hotkey_text(action) == value and self._active_hotkeys.get(action) == value
+               for action, value in defaults.items()):
+            return None
+        old_ids, old_active = self._hotkey_ids.copy(), self._active_hotkeys.copy()
+        for action in old_active:
+            user32.UnregisterHotKey(self._hotkey_hwnd, old_ids[action])
+        registered = {}
+        for action, (identity, _, default) in HOTKEY_ACTIONS.items():
+            modifiers, key = parse_hotkey(default)
+            if not user32.RegisterHotKey(self._hotkey_hwnd, identity, modifiers | 0x4000, key):
+                for new_id in registered.values():
+                    user32.UnregisterHotKey(self._hotkey_hwnd, new_id)
+                restored = {}
+                for old_action, value in old_active.items():
+                    old_modifiers, old_key = parse_hotkey(value)
+                    if user32.RegisterHotKey(self._hotkey_hwnd, old_ids[old_action],
+                                             old_modifiers | 0x4000, old_key):
+                        restored[old_action] = value
+                self._active_hotkeys = restored
+                if len(restored) != len(old_active):
+                    return "默认快捷键被占用，且部分原快捷键未能恢复，请重新设置。"
+                return "默认快捷键被系统或其他应用占用，原快捷键已保留。"
+            registered[action] = identity
+        self._hotkey_ids = {action: identity for action, (identity, _, _) in HOTKEY_ACTIONS.items()}
+        self._active_hotkeys = defaults
+        for action, (_, setting, default) in HOTKEY_ACTIONS.items():
+            self.data["settings"][setting] = default
         self.save_now()
         if hasattr(self, "icon"):
             self.icon.update_menu()
