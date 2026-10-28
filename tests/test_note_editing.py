@@ -29,6 +29,57 @@ class NoteEditingTests(unittest.TestCase):
         for item in reversed(self.patches):
             item.stop()
 
+    def test_note_blank_regions_move_window_and_save_position(self):
+        note = self.note
+        w, h = note.winfo_width(), note.winfo_height()
+        regions = [(note.cv, 12, h // 2), (note.cv, w - 12, h // 2),
+                   (note.cv, w // 2, 10), (note.cv, w - 12, 20),
+                   (note.cv, w // 2, h - 8), (note.bar, 12, 13),
+                   (note.bar, w - 12, 13), (note.status, 5, 5),
+                   (note.toolbar, 5, 5), (note.title_box, 0, 0)]
+        for widget, px, py in regions:
+            with self.subTest(widget=str(widget), point=(px, py)):
+                x, y = note.winfo_x(), note.winfo_y()
+                widget.event_generate("<Button-1>", x=px, y=py)
+                widget.event_generate("<B1-Motion>", x=px + 15, y=py + 10)
+                self.app.root.update()
+                widget.event_generate("<ButtonRelease-1>", x=px + 15, y=py + 10)
+                self.assertEqual((note.winfo_x(), note.winfo_y()), (x + 15, y + 10))
+                self.assertEqual((note.d["x"], note.d["y"]), (x + 15, y + 10))
+                self.assertEqual((note.winfo_width(), note.winfo_height()), (w, h))
+
+    def test_note_outer_edge_still_resizes(self):
+        note = self.note
+        x, y, w, h = note.winfo_x(), note.winfo_y(), note.winfo_width(), note.winfo_height()
+        note.cv.event_generate("<Button-1>", x=w - 2, y=h // 2)
+        note.cv.event_generate("<B1-Motion>", x=w + 18, y=h // 2)
+        self.app.root.update()
+        note.cv.event_generate("<ButtonRelease-1>", x=w + 18, y=h // 2)
+        self.assertEqual((note.winfo_x(), note.winfo_y()), (x, y))
+        self.assertEqual((note.winfo_width(), note.d["w"]), (w + 20, w + 20))
+
+    def test_note_controls_do_not_move_window(self):
+        note = self.note
+        x, y = note.winfo_x(), note.winfo_y()
+        with patch.object(note, "edit_title") as title, \
+                patch.object(note, "clear_done") as clear, \
+                patch.object(note, "add_todo") as add:
+            for widget in (note.title_chip, note.clear_btn, note.add_pill,
+                           note.b_pin, note.text, note.scroll_thumb):
+                widget.event_generate("<Button-1>", x=5, y=5)
+                widget.event_generate("<B1-Motion>", x=20, y=15)
+                widget.event_generate("<ButtonRelease-1>", x=20, y=15)
+                self.app.root.update()
+                self.assertEqual((note.winfo_x(), note.winfo_y()), (x, y))
+            title.assert_called_once()
+            clear.assert_called_once()
+            add.assert_called_once()
+        checked = note.d["lines"][1]["checked"]
+        note._checkbox_widgets[0].event_generate("<Button-1>", x=5, y=5)
+        self.app.root.update()
+        self.assertEqual(note.d["lines"][1]["checked"], not checked)
+        self.assertEqual((note.winfo_x(), note.winfo_y()), (x, y))
+
     def test_body_preedit_is_inline_and_only_confirmed_text_is_saved(self):
         original = self.note.d["lines"][1]["text"]
         self.text.mark_set("insert", "2.end")

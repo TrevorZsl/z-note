@@ -388,10 +388,6 @@ class NoteWindow(tk.Toplevel):
         btn("plus", lambda: f"新建便签（{self.app.hotkey_text('new')}）",
             lambda: self.app.new_note()).pack(side="right", padx=5, pady=9)
         btn("trash", lambda: "删除便签", self.delete_self).pack(side="right", padx=5, pady=9)
-        for w in (self.toolbar, spacer):
-            w.bind("<Button-1>", self._drag_press)
-            w.bind("<B1-Motion>", self._drag_move)
-            w.bind("<ButtonRelease-1>", self._drag_release)
 
         # -- 正文 --
         self.done_font = tkfont.Font(family=UI_FONT,
@@ -413,6 +409,11 @@ class NoteWindow(tk.Toplevel):
         self.bar = tk.Frame(self, bg=self._bg)
         self.status = tk.Label(self, text="", bg=self._bg, fg=QUIET,
                                font=(UI_FONT, 9), padx=0, bd=0)
+        for w in (self.toolbar, spacer, self.title_box, self.bar, self.status):
+            w.config(cursor="fleur")
+            w.bind("<Button-1>", self._drag_press)
+            w.bind("<B1-Motion>", self._drag_move)
+            w.bind("<ButtonRelease-1>", self._drag_release)
         self.clear_btn = tk.Label(self.bar, text="清除已完成", bg=self._bg,
                                   fg="#A9AFB6", font=(UI_FONT, 9),
                                   padx=0, bd=0, cursor="hand2")
@@ -1255,21 +1256,21 @@ class NoteWindow(tk.Toplevel):
         elif t or b:
             cur = "size_ns"
         else:
-            cur = "arrow"
+            cur = "fleur"
         if cur != self.cv.cget("cursor"):
             self.cv.config(cursor=cur)
 
     def _edge_press(self, e):
         l, r, t, b = self._edge_hit(e.x, e.y)
         if not (l or r or t or b):
-            return None
+            return self._drag_press(e)
         self._rs = [l, r, t, b, self.winfo_width(), self.winfo_height(),
                     self.winfo_x(), self.winfo_y(), e.x_root, e.y_root]
         return "break"
 
     def _edge_move(self, e):
         if not getattr(self, "_rs", None):
-            return
+            return self._drag_move(e)
         l, r, t, b, w0, h0, x0, y0, mx0, my0 = self._rs
         dx, dy = e.x_root - mx0, e.y_root - my0
         x, y, w, h = x0, y0, w0, h0
@@ -1292,6 +1293,8 @@ class NoteWindow(tk.Toplevel):
             self.d.update(w=self.winfo_width(), h=self.winfo_height(),
                           x=self.winfo_x(), y=self.winfo_y())
             self.app.schedule_save()
+        else:
+            self._drag_release(_e)
 
     # ---- 层级 / 透明度 / 颜色 ----
     def set_z(self, state):
