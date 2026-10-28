@@ -369,23 +369,225 @@ class NoteEditingTests(unittest.TestCase):
                     app.root.tk.call("after", "cancel", job)
                 app.root.destroy()
 
-    def test_delete_dialog_keeps_message_above_buttons(self):
-        original_scaling = self.app.root.tk.call("tk", "scaling")
+    def test_delete_moves_whole_note_to_recycle_bin_and_restore_keeps_identity(self):
+        note_id = self.note.d["id"]
+        lines = [dict(line) for line in self.note.d["lines"]]
+        self.note.delete_self()
+        self.assertNotIn(note_id, self.app.notes)
+        self.assertEqual(self.app.data["deletedNotes"][0]["lines"], lines)
+        self.assertTrue(self.app.recover_note(note_id))
+        self.assertEqual(self.app.notes[note_id].d["lines"], lines)
+        self.assertFalse(self.app.data["deletedNotes"])
+
+    def test_clear_preserves_completed_items_and_undo_restores_positions(self):
+        self.note.toggle_done(1)
+        original = [dict(line) for line in self.note.d["lines"]]
+        self.note.clear_done()
+        batch = self.app.data["archives"][0]
+        self.assertEqual(batch["items"][0]["line"], original[1])
+        self.assertEqual(len(self.note.d["lines"]), len(original)-1)
+        self.app.return_archive(batch["id"])
+        self.assertEqual(self.note.d["lines"], original)
+        self.assertFalse(self.app.data["archives"])
+
+    def test_undo_clear_preserves_existing_blank_line(self):
+        self.note.d["lines"] = [
+            {"type": "text", "text": "", "checked": False},
+            {"type": "todo", "text": "完成事项", "checked": True}]
+        self.note.render()
+        self.note.clear_done()
+        self.app.return_archive(self.app.data["archives"][0]["id"])
+        self.assertEqual(len(self.note.d["lines"]), 2)
+        self.assertEqual(self.note.d["lines"][0]["type"], "text")
+
+    def test_clear_save_failure_keeps_note_and_history(self):
+        self.note.toggle_done(1)
+        original = [dict(line) for line in self.note.d["lines"]]
+        with patch.object(main, "save_data", side_effect=OSError("disk full")), \
+             patch.object(main.messagebox, "showerror") as error:
+            self.note.clear_done()
+        self.assertEqual(self.note.d["lines"], original)
+        self.assertFalse(self.app.data["archives"])
+        error.assert_called_once()
+
+    def test_history_groups_same_names_by_identity_and_keeps_archive_after_deletion(self):
+        self.note.d["title"] = "项目"
+        self.note.d["editedAt"] = "2026-10-28T10:00:00"
+        self.note.toggle_done(1)
+        self.note.clear_done()
+        other = self.app.new_note()
+        other.d["title"] = "项目"
+        other.d["editedAt"] = "2026-10-28T11:00:00"
+        other.text.insert("1.end", "另一项")
+        other._sync_lines_from_text()
+        other.toggle_done(0)
+        other.clear_done()
+        win = main.HistoryWindow(self.app)
+        self.app.history_win = win
+        self.app.root.update()
+        self.assertEqual(len(win.ids), 2)
+        self.assertTrue(all("项目 · " in name for name in win.names))
+        self.assertEqual(self.note.d["title"], "项目")
+        self.note.delete_self()
+        win.switch("deletedNotes")
+        self.assertEqual(len(win.ids), 1)
+        with patch.object(main.messagebox, "askyesno", return_value=True):
+            win.delete_record(self.note.d["id"])
+        self.assertEqual(len(self.app.data["archives"]), 2)
+        self.assertFalse(self.app.data["deletedNotes"])
+        win.destroy()
+
+    def test_history_preview_and_batch_deletion_are_scoped_to_category(self):
+        self.note.toggle_done(1)
+        self.note.clear_done()
+        note_id = self.note.d["id"]
+        self.note.delete_self()
+        win = main.HistoryWindow(self.app)
+        self.app.history_win = win
+        self.app.root.update()
+        self.assertFalse(any(isinstance(c, main.tk.Button) for c in win.content.winfo_children()))
+        win.toggle_batch()
+        win.check(note_id, True)
+        with patch.object(main.messagebox, "askyesno", return_value=True):
+            win.delete_selected()
+        self.assertFalse(self.app.data["archives"])
+        self.assertEqual(len(self.app.data["deletedNotes"]), 1)
+        win.switch("deletedNotes")
+        buttons = [c.cget("text") for c in win.content.winfo_children() if isinstance(c, main.tk.Button)]
+        self.assertEqual(buttons, ["彻底删除"])
+        win.toggle_batch()
+        win.check(note_id, True)
+        with patch.object(main.messagebox, "askyesno", return_value=True):
+            win.delete_selected()
+        self.assertFalse(self.app.data["deletedNotes"])
+        win.destroy()
+
+    def test_history_drag_ignores_controls_and_thumb_matches_view(self):
+        win = main.HistoryWindow(self.app)
+        self.app.root.update()
+        event = lambda widget: type("Event", (), {"widget":widget,"x_root":100,"y_root":100})()
+        main.SettingsWindow._drag_press(win, event(win.hint))
+        self.assertIsNotNone(win._drag)
+        for widget in (win._close_button,win._minimize_button,win.batch_button,win.left.bars["y"]):
+            main.SettingsWindow._drag_press(win, event(widget))
+            self.assertIsNone(win._drag)
+        pane = win.right
+        pane.thumb("y", 0.25, 0.75)
+        coordinates = pane.bars["y"].coords("thumb")
+        length = pane.bars["y"].winfo_height()-8
+        self.assertAlmostEqual(coordinates[3]-coordinates[1], length*.5)
+        pane.thumb("y",0,1)
+        self.assertFalse(pane.bars["y"].find_withtag("thumb"))
+        win.destroy()
+
+    def test_history_scrollbar_appears_on_overflow_and_short_content_cannot_scroll(self):
+        win = main.HistoryWindow(self.app)
+        self.app.history_win = win
+        self.app.root.update()
+        pane = win.right
+        self.assertEqual(set(pane.bars), {"y"})
+        self.assertFalse(pane.bars["y"].find_withtag("thumb"))
+        event = type("Event", (), {"delta": -120})()
+        pane.wheel(event)
+        self.app.root.update()
+        self.assertEqual(pane.viewport.yview(), (0.0, 1.0))
+        for i in range(60):
+            win.label("内容 " + str(i))
+        self.app.root.update()
+        self.assertTrue(pane.bars["y"].find_withtag("thumb"))
+        first_thumb = pane.bars["y"].coords("thumb")
+        pane.wheel(event)
+        self.app.root.update()
+        self.assertGreater(pane.viewport.yview()[0], 0)
+        self.assertGreater(pane.bars["y"].coords("thumb")[1], first_thumb[1])
+        win.select()
+        self.app.root.update()
+        self.assertFalse(pane.bars["y"].find_withtag("thumb"))
+        self.assertEqual(pane.viewport.yview(), (0.0, 1.0))
+        win.destroy()
+
+    def test_history_wrapped_row_centers_checkbox_and_click_selects_content(self):
+        from copy import deepcopy
+        self.note.toggle_done(1)
+        self.note.clear_done()
+        batch = self.app.data["archives"][0]
+        other = deepcopy(batch)
+        other.update(id="batch2", noteId="note2", title="很长的便签名称"*18,
+                     editedAt="2026-10-28T12:34:56.123456")
+        other["items"][0]["line"]["text"] = "第二张便签的内容"
+        self.app.data["archives"].append(other)
+        win = main.HistoryWindow(self.app)
+        self.app.history_win = win
+        win.toggle_batch()
+        self.app.root.update()
+        row = win.rows["note2"]
+        checkbox, label = row.winfo_children()
+        self.assertGreater(label.winfo_height(), checkbox.winfo_height()*2)
+        self.assertAlmostEqual(checkbox.winfo_y()+checkbox.winfo_height()/2,
+                               label.winfo_y()+label.winfo_height()/2, delta=2)
+        label.event_generate("<Button-1>")
+        self.app.root.update()
+        self.assertEqual(win.selected_id, "note2")
+        self.assertEqual(label.cget("bg"), "#E9EDF2")
+        self.assertTrue(any(c.cget("text") == "✓ 第二张便签的内容"
+            for c in win.content.winfo_children() if isinstance(c, main.tk.Label)))
+        win.destroy()
+
+    def test_history_duplicate_name_suffix_only_shows_seconds(self):
+        from copy import deepcopy
+        note = deepcopy(self.note.d)
+        note.update(id="second", title="同名", editedAt="2026-10-28T12:34:56.123456")
+        first = deepcopy(note)
+        first.update(id="first", editedAt="2026-10-28T11:22:33.654321")
+        self.app.data["deletedNotes"] = [first, note]
+        win = main.HistoryWindow(self.app)
+        win.switch("deletedNotes")
+        self.app.root.update()
+        self.assertEqual(win.names, ["同名 · 2026-10-28 11:22:33", "同名 · 2026-10-28 12:34:56"])
+        win.choose("second")
+        self.assertEqual(win.rows["second"].cget("bg"), "#E9EDF2")
+        win.destroy()
+
+    def test_history_persists_and_readding_keeps_record(self):
+        import json
+        import tempfile
+        from pathlib import Path
+        self.note.toggle_done(1)
+        self.note.clear_done()
+        batch = self.app.data["archives"][0]
+        count = len(self.note.d["lines"])
+        self.app.return_archive(batch["id"], 0)
+        self.assertEqual(len(self.note.d["lines"]), count+1)
+        self.assertFalse(self.note.d["lines"][-1]["checked"])
+        self.assertEqual(len(self.app.data["archives"]), 1)
+        self.note.delete_self()
+        with tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parent) as folder, \
+             patch.object(main, "DATA_DIR", folder), \
+             patch.object(main, "DATA_FILE", str(Path(folder)/"notes.json")):
+            self.patches[1].stop()
+            try:
+                main.save_data(self.app.data)
+                saved = json.loads((Path(folder)/"notes.json").read_text(encoding="utf-8"))
+            finally:
+                self.patches[1].start()
+        self.assertEqual(saved["archives"], self.app.data["archives"])
+        self.assertEqual(saved["deletedNotes"], self.app.data["deletedNotes"])
+
+    def test_history_content_stays_inside_window_at_large_scaling(self):
+        original = self.app.root.tk.call("tk", "scaling")
         try:
             for scaling in (1.0, 2.0):
                 self.app.root.tk.call("tk", "scaling", scaling)
-                self.note.delete_self()
+                win = main.HistoryWindow(self.app)
                 self.app.root.update()
-                popup = next(child for child in self.note.winfo_children()
-                             if isinstance(child, main.tk.Toplevel))
-                canvas = next(child for child in popup.winfo_children()
-                              if isinstance(child, main.tk.Canvas))
-                self.assertLess(canvas.bbox("message")[3], canvas.bbox("confirm")[1])
-                self.assertLess(canvas.bbox("message")[2], popup.winfo_width())
-                popup.grab_release()
-                popup.destroy()
+                self.assertLessEqual(win.canvas.winfo_rootx()+win.canvas.winfo_width(),
+                                     win.winfo_rootx()+win.winfo_width())
+                self.assertGreater(win.canvas.winfo_width(), 200)
+                self.assertGreater(win.content.winfo_width(), 200)
+                self.assertGreater(win.left.content.winfo_width(), 200)
+                win.destroy()
         finally:
-            self.app.root.tk.call("tk", "scaling", original_scaling)
+            self.app.root.tk.call("tk", "scaling", original)
 
     def test_large_title_stays_inside_toolbar_above_body(self):
         self.note._chip_font.configure(size=20)

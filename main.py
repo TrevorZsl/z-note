@@ -3,6 +3,8 @@
 运行: python main.py   依赖: pystray (pip install pystray)
 """
 import ctypes, json, math, os, queue, sys, threading, uuid, winreg
+from copy import deepcopy
+from datetime import datetime
 import tkinter as tk
 from tkinter import font as tkfont, messagebox
 from ctypes import wintypes
@@ -788,6 +790,7 @@ class NoteWindow(tk.Toplevel):
         self.text.mark_set("insert", f"{row+1}.0+{self._prefix_len(self.d['lines'][row])}c")
         self.text.see(f"{row+1}.0")
         self.text.focus_set()
+        self.d["editedAt"] = datetime.now().isoformat(timespec="microseconds")
         self.app.schedule_save()
 
     def _pill_press(self, _e):
@@ -879,6 +882,7 @@ class NoteWindow(tk.Toplevel):
             if not e.winfo_exists() or self._ime_composing(e):
                 return
             self.d["title"] = e.get().strip()
+            self.d["editedAt"] = datetime.now().isoformat(timespec="microseconds")
             self.app.schedule_save()
             e.destroy()
             self._title_editor = None
@@ -966,6 +970,8 @@ class NoteWindow(tk.Toplevel):
                           "checked": todo and image == str(self._check_slots[True])})
         old = self.d["lines"]
         self.d["lines"] = lines
+        if old != lines:
+            self.d["editedAt"] = datetime.now().isoformat(timespec="microseconds")
         structure_changed = (len(old) != len(lines) or
                              any(a["type"] != b["type"] for a, b in zip(old, lines)))
         if structure_changed:
@@ -1004,6 +1010,7 @@ class NoteWindow(tk.Toplevel):
         nrow = row + 2
         self.text.mark_set("insert", f"{nrow}.0+{self._prefix_len(lines[row+1])}c")
         self.text.see(f"{nrow}.0")
+        self.d["editedAt"] = datetime.now().isoformat(timespec="microseconds")
         self.app.schedule_save()
         return "break"
 
@@ -1022,6 +1029,7 @@ class NoteWindow(tk.Toplevel):
             target = f"{row}.0+{self._prefix_len(prev)}c lineend"
             self.render(keep_cursor=False)
             self.text.mark_set("insert", target)
+            self.d["editedAt"] = datetime.now().isoformat(timespec="microseconds")
             self.app.schedule_save()
             return "break"
         return None
@@ -1137,6 +1145,7 @@ class NoteWindow(tk.Toplevel):
         ln = self.d["lines"][row]
         ln["checked"] = not ln["checked"]
         self.render()
+        self.d["editedAt"] = datetime.now().isoformat(timespec="microseconds")
         self.app.schedule_save()
 
     def convert(self, row, to):
@@ -1146,12 +1155,14 @@ class NoteWindow(tk.Toplevel):
             ln["checked"] = False
         self.render(keep_cursor=False)
         self.text.mark_set("insert", f"{row+1}.0+{self._prefix_len(ln)}c")
+        self.d["editedAt"] = datetime.now().isoformat(timespec="microseconds")
         self.app.schedule_save()
 
     def insert_line(self, row):
         self.d["lines"].insert(row + 1, {"type": "text", "text": "", "checked": False})
         self.render(keep_cursor=False)
         self.text.mark_set("insert", f"{row+2}.0")
+        self.d["editedAt"] = datetime.now().isoformat(timespec="microseconds")
         self.app.schedule_save()
 
     def delete_line(self, row):
@@ -1160,17 +1171,11 @@ class NoteWindow(tk.Toplevel):
         else:
             del self.d["lines"][row]
         self.render(keep_cursor=False)
+        self.d["editedAt"] = datetime.now().isoformat(timespec="microseconds")
         self.app.schedule_save()
 
     def clear_done(self):
-        if not any(l["checked"] for l in self.d["lines"]):
-            return
-        self.d["lines"] = [l for l in self.d["lines"]
-                           if not (l["type"] == "todo" and l["checked"])]
-        if not self.d["lines"]:
-            self.d["lines"] = [{"type": "text", "text": "", "checked": False}]
-        self.render(keep_cursor=False)
-        self.app.schedule_save()
+        self.app.archive_done(self)
 
     def _ctrl_wheel(self, e):
         step = 10 if e.delta > 0 else -10
@@ -1277,58 +1282,7 @@ class NoteWindow(tk.Toplevel):
         self.apply_z()
 
     def delete_self(self):
-        # 不用原生 messagebox：overrideredirect 父窗口会让原生模态框收不到点击
-        p = tk.Toplevel(self)
-        p.withdraw()
-        p.overrideredirect(True)
-        p.configure(bg=T_COLOR)
-        p.attributes("-transparentcolor", T_COLOR)
-        p.attributes("-topmost", True)
-        title_font = tkfont.Font(family=UI_FONT, size=10)
-        body_font = tkfont.Font(family=UI_FONT, size=9)
-        W = max(268, title_font.measure("删除便签") + 40)
-        cv = tk.Canvas(p, bg=T_COLOR, highlightthickness=0, bd=0)
-        cv.pack(fill="both", expand=True)
-        title = cv.create_text(W / 2, 16, anchor="n", text="删除便签", fill="#1F2328",
-                               font=title_font)
-        body = cv.create_text(W / 2, cv.bbox(title)[3] + 12, anchor="n", width=W - 32,
-                              justify="center", text="删除后无法恢复，确定删除这张便签吗？",
-                              fill="#666D75", font=body_font, tags="message")
-        button_h = max(30, body_font.metrics("linespace") + 10)
-        H = cv.bbox(body)[3] + 16 + button_h + 16
-        cv.config(width=W, height=H)
-        background = round_rect(cv, 1, 1, W - 2, H - 2, 12,
-                                fill="#FFFFFF", outline="#D9DCE1")
-        cv.tag_lower(background)
-        bx, by = W - 16, H - 16
-        round_rect(cv, bx - 76, by - button_h, bx, by, 8,
-                   fill="#E5484D", outline="", tags="confirm")
-        cv.create_text(bx - 38, by - button_h / 2, text="删除", fill="#FFFFFF",
-                       font=(UI_FONT, 9), tags="confirm")
-        round_rect(cv, bx - 164, by - button_h, bx - 88, by, 8,
-                   fill="#F2F3F5", outline="#D9DCE1", tags="cancel")
-        cv.create_text(bx - 126, by - button_h / 2, text="取消", fill="#3A3F46",
-                       font=body_font, tags="cancel")
-
-        def cancel(_e=None):
-            p.grab_release()
-            p.destroy()
-
-        def confirm(_e=None):
-            cancel()
-            self.app.remove_note(self)
-
-        cv.tag_bind("confirm", "<Button-1>", confirm)
-        cv.tag_bind("cancel", "<Button-1>", cancel)
-        p.bind("<Escape>", cancel)
-        p.update_idletasks()
-        x = max(0, self.winfo_rootx() + (self.winfo_width() - W) // 2)
-        y = max(0, self.winfo_rooty() + (self.winfo_height() - H) // 2)
-        p.geometry(f"{W}x{H}+{x}+{y}")
-        p.deiconify()
-        p.grab_set()
-        p.focus_set()
-        p.bind("<FocusOut>", cancel)
+        self.app.remove_note(self)
 
 # ---------- 设置窗口 ----------
 class SettingsScale(tk.Canvas):
@@ -1701,9 +1655,316 @@ def _make_tray_icon():
     d.text((16, 15), "Z", fill=(70, 58, 20, 255), font=font, anchor="mm")
     return img
 
+class HistoryPane(tk.Canvas):
+    """圆角底板内放置内容和按可见比例绘制的滚动滑块。"""
+    def __init__(self, parent):
+        super().__init__(parent, bg=NOTE_BG, highlightthickness=0, bd=0)
+        self.viewport = tk.Canvas(self, bg=NOTE_BG, highlightthickness=0)
+        self.content = tk.Frame(self.viewport, bg=NOTE_BG)
+        self.window = self.viewport.create_window(0, 0, window=self.content, anchor="nw")
+        self.bars = {}
+        for axis in ("y",):
+            bar = tk.Canvas(self, bg=NOTE_BG, highlightthickness=0, cursor="arrow")
+            self.bars[axis] = bar
+            bar.bind("<Button-1>", lambda e, a=axis: self.scroll_to(e, a))
+            bar.bind("<B1-Motion>", lambda e, a=axis: self.scroll_to(e, a))
+            bar.bind("<ButtonRelease-1>", lambda e: setattr(self, "_thumb_drag", None))
+            bar.bind("<Configure>", lambda e, a=axis: self.thumb(a, *self.viewport.yview()))
+            self.viewport.configure(**{axis+"scrollcommand": lambda first, last, a=axis: self.thumb(a, first, last)})
+        self._thumb_drag = None
+        self.bind("<Configure>", self.layout)
+        self.content.bind("<Configure>", self.update_region)
+        self.viewport.bind("<Configure>", self.update_region)
+        self.viewport.bind("<MouseWheel>", self.wheel)
+
+    def wheel(self, event):
+        if self.content.winfo_reqheight() > self.viewport.winfo_height():
+            self.viewport.yview_scroll(-int(event.delta/120), "units")
+        else:
+            self.viewport.yview_moveto(0)
+        return "break"
+
+    def layout(self, _event=None):
+        w, h = self.winfo_width(), self.winfo_height()
+        image = Image.new("RGBA", (max(1,w)*4, max(1,h)*4))
+        ImageDraw.Draw(image).rounded_rectangle((2,2,w*4-3,h*4-3), radius=48,
+                                                fill=NOTE_BG, outline=NOTE_BORDER, width=4)
+        self._border = ImageTk.PhotoImage(image.resize((max(1,w),max(1,h)), Image.Resampling.LANCZOS), master=self)
+        self.delete("border")
+        self.create_image(0,0,anchor="nw",image=self._border,tags="border")
+        self.viewport.place(x=12,y=12,width=max(1,w-30),height=max(1,h-30))
+        self.bars["y"].place(x=w-15,y=14,width=8,height=max(1,h-38))
+        self.update_region()
+
+    def update_region(self, _event=None):
+        self.viewport.itemconfigure(self.window, width=max(1,self.viewport.winfo_width()))
+        self.viewport.configure(scrollregion=(0, 0, self.viewport.winfo_width(),
+            max(self.content.winfo_reqheight(), self.viewport.winfo_height())))
+        if self.content.winfo_reqheight() <= self.viewport.winfo_height():
+            self.viewport.yview_moveto(0)
+        for axis in self.bars:
+            self.thumb(axis, *getattr(self.viewport, axis+"view")())
+
+    def thumb(self, axis, first, last):
+        first, last = float(first), float(last)
+        bar = self.bars[axis]
+        bar.delete("all")
+        length = bar.winfo_height() if axis == "y" else bar.winfo_width()
+        if last-first >= .999 or length < 9:
+            return
+        start, end = 4+first*(length-8), 4+last*(length-8)
+        if axis == "y":
+            bar.create_line(4,start,4,end,fill="#A7B0BE",width=6,capstyle="round",tags="thumb")
+        else:
+            bar.create_line(start,4,end,4,fill="#A7B0BE",width=6,capstyle="round",tags="thumb")
+
+    def scroll_to(self, event, axis):
+        first, last = getattr(self.viewport, axis+"view")()
+        if last-first >= .999:
+            return
+        bar = self.bars[axis]
+        length = max(1,(bar.winfo_height() if axis == "y" else bar.winfo_width())-8)
+        position = ((event.y if axis == "y" else event.x)-4)/length
+        if self._thumb_drag is None:
+            self._thumb_drag = position-first if first <= position <= last else (last-first)/2
+        getattr(self.viewport, axis+"view_moveto")(position-self._thumb_drag)
+
+
+class HistoryWindow(tk.Toplevel):
+    def __init__(self, app):
+        super().__init__(app.root)
+        self.withdraw()
+        self.app = app
+        self.mode = "archives"
+        self.selected_id = None
+        self.overrideredirect(True)
+        self.configure(bg=NOTE_BORDER)
+        self.title("z-note 清除记录与回收站")
+        self._icon_image = ImageTk.PhotoImage(_make_tray_icon(), master=self)
+        self.iconphoto(False, self._icon_image)
+        shell = tk.Frame(self, bg=NOTE_BG, padx=20, pady=16)
+        shell.pack(fill="both", expand=True, padx=1, pady=1)
+        header = tk.Frame(shell, bg=NOTE_BG)
+        header.pack(fill="x")
+        title = tk.Label(header, text="清除记录与回收站", bg=NOTE_BG, fg="#1F2328",
+                         font=(UI_FONT, 12, "bold"), cursor="fleur")
+        title.pack(side="left")
+        self._drag = None
+        self._close_button = tk.Label(header, text="×", bg=NOTE_BG, fg=INK,
+                                      font=(UI_FONT, 17), cursor="hand2")
+        self._close_button.pack(side="right", padx=(8, 2))
+        self._close_button.bind("<Button-1>", lambda e: self.destroy())
+        self._minimize_button = tk.Label(header, text="−", bg=NOTE_BG, fg=INK,
+                                         font=(UI_FONT, 17), cursor="hand2")
+        self._minimize_button.pack(side="right", padx=(8, 2))
+        self._minimize_button.bind("<Button-1>", lambda e: SettingsWindow._minimize(self))
+        self._hotkey_borders = []
+        self.bind("<Button-1>", SettingsWindow._drag_press.__get__(self))
+        self.bind("<B1-Motion>", SettingsWindow._drag_move.__get__(self))
+        self.bind("<ButtonRelease-1>", lambda e: setattr(self, "_drag", None))
+        self.batch_mode = False
+        self.checked = set()
+        self._check_images = check_images(self, 22)
+        tabs = tk.Frame(shell, bg=NOTE_BG)
+        tabs.pack(fill="x", pady=(18, 12))
+        self.tabs = {}
+        for key, label in (("archives", "已清除待办"), ("deletedNotes", "已删除便签")):
+            self.tabs[key] = self.button(tabs, label, lambda key=key: self.switch(key))
+            self.tabs[key].pack(side="left", padx=(0, 12))
+        self.batch_button = self.button(tabs, "批量删除", self.toggle_batch)
+        self.batch_button.pack(side="right")
+        self.delete_button = self.button(tabs, "删除", self.delete_selected)
+        self.hint = tk.Label(shell, bg=NOTE_BG, fg=QUIET, font=(UI_FONT, 10), anchor="w")
+        self.hint.pack(fill="x", pady=(0, 12))
+        panes = tk.Frame(shell, bg=NOTE_BG)
+        panes.pack(fill="both", expand=True)
+        panes.columnconfigure(0, weight=1, uniform="panes")
+        panes.columnconfigure(1, weight=1, uniform="panes")
+        panes.rowconfigure(0, weight=1)
+        self.left = HistoryPane(panes)
+        self.left.grid(row=0,column=0,sticky="nsew",padx=(0,10))
+        self.right = HistoryPane(panes)
+        self.right.grid(row=0,column=1,sticky="nsew",padx=(10,0))
+        self._hotkey_borders = list(self.left.bars.values()) + list(self.right.bars.values())
+        self.canvas = self.right.viewport
+        self.content = self.right.content
+        self.bind("<MouseWheel>", self.wheel)
+        self.bind("<Escape>", lambda e: self.destroy())
+        work = wintypes.RECT()
+        user32.SystemParametersInfoW(48, 0, ctypes.byref(work), 0)
+        width = min(max(960, self.winfo_reqwidth()), work.right-work.left-32)
+        height = min(720, work.bottom-work.top-32)
+        self.geometry(f"{width}x{height}+{work.left+(work.right-work.left-width)//2}+{work.top+(work.bottom-work.top-height)//2}")
+        self.update_idletasks()
+        hwnd = user32.GetParent(self.winfo_id()) or self.winfo_id()
+        preference = ctypes.c_int(2)
+        dwmapi.DwmSetWindowAttribute(hwnd, 33, ctypes.byref(preference), ctypes.sizeof(preference))
+        style = user32.GetWindowLongPtrW(hwnd, -20)
+        user32.SetWindowLongPtrW(hwnd, -20, style & ~0x80 | 0x40000)
+        user32.SetWindowPos(hwnd, None, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | 0x04 | 0x20)
+        self.refresh()
+        self.deiconify()
+
+    def button(self, parent, text, command):
+        font = tkfont.Font(root=self, family=UI_FONT, size=10)
+        width, height = font.measure(text) + 24, font.metrics("linespace") + 12
+        image = Image.new("RGBA", (width * 4, height * 4))
+        ImageDraw.Draw(image).rounded_rectangle((2, 2, width*4-3, height*4-3), radius=28,
+                                                fill=NOTE_BG, outline=NOTE_BORDER, width=4)
+        photo = ImageTk.PhotoImage(image.resize((width, height), Image.Resampling.LANCZOS), master=self)
+        button = tk.Button(parent, text=text, command=command, image=photo, compound="center",
+            bg=NOTE_BG, fg="#475569", activebackground=NOTE_BG, activeforeground="#1F2328",
+            font=font, relief="flat", bd=0, padx=0, pady=0, cursor="hand2", highlightthickness=0)
+        button._image = photo
+        return button
+
+    def switch(self, mode):
+        self.mode = mode
+        self.selected_id = None
+        self.batch_mode = False
+        self.checked.clear()
+        self.refresh()
+
+    def refresh(self):
+        for key, tab in self.tabs.items():
+            tab.configure(fg="#1F2328" if key == self.mode else QUIET,
+                          relief="sunken" if key == self.mode else "flat")
+        self.hint.configure(text="清除的已完成待办会保存在这里，按便签整理。" if self.mode == "archives"
+                            else "彻底删除便签不会删除已清除待办的记录。")
+        sources = {n["id"]: n for n in self.app.data["deletedNotes"] + self.app.data["notes"]}
+        groups = {}
+        for record in self.app.data[self.mode]:
+            key = record["noteId"] if self.mode == "archives" else record["id"]
+            groups.setdefault(key, []).append(record)
+        self.groups = groups
+        self.ids = list(groups)
+        names = {}
+        for key, records in groups.items():
+            source = sources.get(key, records[-1])
+            names[key] = (source.get("title") or "无标题", source.get("editedAt", ""))
+        self.checked.intersection_update(self.ids)
+        for child in self.left.content.winfo_children():
+            child.destroy()
+        self.names = []
+        self.rows = {}
+        for key in self.ids:
+            name, stamp = names[key]
+            if sum(value[0] == name for value in names.values()) > 1:
+                name += " · " + (stamp.split(".")[0].replace("T", " ") or "编辑时间未知")
+            self.names.append(name)
+            row = tk.Frame(self.left.content, bg=NOTE_BG)
+            row.pack(fill="x", pady=4)
+            row.bind("<Button-1>", lambda e,k=key: self.choose(k))
+            self.rows[key] = row
+            if self.batch_mode:
+                value = tk.BooleanVar(value=key in self.checked)
+                box = tk.Checkbutton(row, variable=value, bg=NOTE_BG, activebackground=NOTE_BG,
+                    indicatoron=False, image=self._check_images[False], selectimage=self._check_images[True],
+                    command=lambda k=key, v=value: self.check(k,v.get()), bd=0, highlightthickness=0)
+                box._value = value
+                box.pack(side="left", anchor="center", padx=(0, 6))
+            label = tk.Label(row, text=name, bg=NOTE_BG, fg="#2B2F36", anchor="w",
+                             justify="left", font=(UI_FONT,10), cursor="hand2")
+            label.pack(side="left",fill="x",expand=True)
+            label.bind("<Configure>", lambda e, l=label: l.configure(wraplength=max(1,e.width-8)))
+            label.bind("<Button-1>", lambda e,k=key: self.choose(k))
+        if self.selected_id not in self.ids:
+            self.selected_id = self.ids[0] if self.ids else None
+        self.batch_button.configure(text="取消批量" if self.batch_mode else "批量删除")
+        self.delete_button.pack_forget()
+        if self.batch_mode and self.checked:
+            self.delete_button.pack(side="right",padx=8)
+        self.left.content.update_idletasks()
+        self.left.update_region()
+        self.highlight_selection()
+        self.select()
+
+    def wheel(self, event):
+        pane = self.left if event.x_root < self.right.winfo_rootx() else self.right
+        return pane.wheel(event)
+
+    def choose(self, key):
+        self.selected_id = key
+        self.highlight_selection()
+        self.select()
+
+    def highlight_selection(self):
+        for key, row in self.rows.items():
+            color = "#E9EDF2" if key == self.selected_id else NOTE_BG
+            row.configure(bg=color)
+            for child in row.winfo_children():
+                child.configure(bg=color)
+
+    def check(self, key, selected):
+        self.checked.add(key) if selected else self.checked.discard(key)
+        self.delete_button.pack_forget()
+        if self.checked:
+            self.delete_button.pack(side="right",padx=8)
+
+    def toggle_batch(self):
+        self.batch_mode = not self.batch_mode
+        self.checked.clear()
+        self.refresh()
+
+    def delete_selected(self):
+        keys = set(self.checked)
+        if not keys:
+            return
+        if messagebox.askyesno("批量删除", f"彻底删除选中的 {len(keys)} 张便签记录？此操作无法恢复。", parent=self):
+            field = "noteId" if self.mode == "archives" else "id"
+            mode = self.mode
+            def change(data):
+                data[mode] = [r for r in data[mode] if r[field] not in keys]
+            self.app._store_history(change)
+
+    def label(self, text, bold=False):
+        label = tk.Label(self.content, text=text, bg=NOTE_BG, fg="#2B2F36",
+            font=(UI_FONT, 10, "bold") if bold else (UI_FONT, 10), justify="left", anchor="w")
+        label.pack(fill="x", pady=(6, 4), padx=4)
+        label.bind("<Configure>", lambda e: label.configure(wraplength=max(1, e.width-8)))
+
+    def select(self, _event=None):
+        for child in self.content.winfo_children():
+            child.destroy()
+        if self.selected_id is None:
+            self.label("暂无记录")
+            self.content.update_idletasks()
+            self.right.update_region()
+            return
+        records = self.groups[self.selected_id]
+        self.canvas.yview_moveto(0)
+        if self.mode == "deletedNotes":
+            note = records[0]
+            self.button(self.content, "彻底删除", lambda: self.delete_record(note["id"])).pack(anchor="w",pady=(0,12))
+            self.label(note.get("title") or "无标题", True)
+            for line in note["lines"]:
+                self.label(("✓ " if line["checked"] else "□ ") + line["text"] if line["type"] == "todo" else line["text"])
+        else:
+            for batch in reversed(records):
+                self.label("清除于 " + batch["clearedAt"].replace("T", " "), True)
+                for item in batch["items"]:
+                    self.label("✓ " + item["line"]["text"])
+                tk.Frame(self.content, bg=NOTE_BORDER, height=1).pack(fill="x", pady=12)
+        self.content.update_idletasks()
+        self.right.update_region()
+
+    def delete_record(self, record_id):
+        message = ("彻底删除这张便签？此操作无法恢复，已清除待办的记录仍保留。"
+                   if self.mode == "deletedNotes" else "永久删除这次清除记录？此操作无法恢复。")
+        if messagebox.askyesno("彻底删除", message, parent=self):
+            key = self.mode
+            self.app._store_history(lambda data: data.__setitem__(key,
+                [r for r in data[key] if r["id"] != record_id]))
+
+
 class App:
     def __init__(self):
         self.data = load_data()
+        self.data.setdefault("archives", [])
+        self.data.setdefault("deletedNotes", [])
+        for note in self.data["notes"]:
+            note.setdefault("editedAt", datetime.now().isoformat(timespec="microseconds"))
+        self.history_win = None
         migrate_opacity = self.data.get("schemaVersion", 1) < 2
         if migrate_opacity:
             self.data["schemaVersion"] = 2
@@ -1745,7 +2006,7 @@ class App:
 
     # 便签管理
     def _restore_notes(self):
-        if not self.data["notes"]:
+        if not self.data["notes"] and not self.data["archives"] and not self.data["deletedNotes"]:
             sw, sh = self.root.winfo_screenwidth(), self.root.winfo_screenheight()
             self.data["notes"].append({
                 "id": str(uuid.uuid4()), "x": sw - 360, "y": 90, "w": 320, "h": 340,
@@ -1759,6 +2020,7 @@ class App:
                 ]})
             self.save_now()
         for d in self.data["notes"]:
+            d.setdefault("editedAt", datetime.now().isoformat(timespec="microseconds"))
             sw, sh = self.root.winfo_screenwidth(), self.root.winfo_screenheight()
             d["x"] = min(max(0, d["x"]), max(0, sw - 120))
             d["y"] = min(max(0, d["y"]), max(0, sh - 60))
@@ -1797,6 +2059,7 @@ class App:
              "w": 320, "h": 300, "z": "top",
              "opacity": self.data["settings"]["opacity"],
              "color": self.data["settings"]["color"], "visible": True,
+             "editedAt": datetime.now().isoformat(timespec="microseconds"),
              "lines": [{"type": "todo", "text": "", "checked": False}]}
         self.data["notes"].append(d)
         w = NoteWindow(self, d)
@@ -1806,12 +2069,103 @@ class App:
         self.schedule_save()
         return w
 
+    def _store_history(self, change):
+        candidate = deepcopy(self.data)
+        change(candidate)
+        try:
+            save_data(candidate)
+        except Exception as exc:
+            messagebox.showerror("保存失败", f"内容尚未移动，请重试。\n{exc}", parent=self.root)
+            return False
+        # 保留打开窗口引用的便签对象。
+        for key in ("archives", "deletedNotes"):
+            self.data[key] = candidate[key]
+        self.data["notes"][:] = [next((n for n in self.data["notes"] if n["id"] == item["id"]), item)
+                                for item in candidate["notes"]]
+        for item in candidate["notes"]:
+            target = next(n for n in self.data["notes"] if n["id"] == item["id"])
+            target.update(item)
+        if self.history_win is not None and self.history_win.winfo_exists():
+            self.history_win.refresh()
+        return True
+
+    def archive_done(self, w):
+        w._sync_lines_from_text()
+        done = [(i, deepcopy(line)) for i, line in enumerate(w.d["lines"])
+                if line["type"] == "todo" and line["checked"]]
+        if not done:
+            return
+        def change(data):
+            note = next(n for n in data["notes"] if n["id"] == w.d["id"])
+            data["archives"].append({"id": str(uuid.uuid4()), "noteId": note["id"],
+                "title": note.get("title", ""), "editedAt": note.get("editedAt", ""),
+                "clearedAt": datetime.now().isoformat(timespec="seconds"),
+                "emptied": len(done) == len(note["lines"]),
+                "items": [{"index": i, "line": line} for i, line in done]})
+            note["lines"] = [line for line in note["lines"]
+                             if not (line["type"] == "todo" and line["checked"])] or [
+                                 {"type": "text", "text": "", "checked": False}]
+        if self._store_history(change):
+            w.render(keep_cursor=False)
+
     def remove_note(self, w):
-        self.notes.pop(w.d["id"], None)
-        if w.d in self.data["notes"]:
-            self.data["notes"].remove(w.d)
-        w.destroy()
-        self.schedule_save()
+        w._sync_lines_from_text()
+        def change(data):
+            note = next(n for n in data["notes"] if n["id"] == w.d["id"])
+            note["deletedAt"] = datetime.now().isoformat(timespec="seconds")
+            data["deletedNotes"].append(note)
+            data["notes"].remove(note)
+        if self._store_history(change):
+            self.notes.pop(w.d["id"], None)
+            w.destroy()
+
+    def recover_note(self, note_id):
+        def change(data):
+            note = next(n for n in data["deletedNotes"] if n["id"] == note_id)
+            data["deletedNotes"].remove(note)
+            note.pop("deletedAt", None)
+            note["visible"] = True
+            data["notes"].append(note)
+        if self._store_history(change):
+            note = next(n for n in self.data["notes"] if n["id"] == note_id)
+            self.notes[note_id] = NoteWindow(self, note)
+            self.notes[note_id].show()
+            return True
+        return False
+
+    def return_archive(self, batch_id, item_index=None):
+        batch = next(b for b in self.data["archives"] if b["id"] == batch_id)
+        note_id = batch["noteId"]
+        if note_id not in self.notes:
+            if any(n["id"] == note_id for n in self.data["deletedNotes"]):
+                if not messagebox.askyesno("恢复便签", "原便签已删除，先恢复便签再加入待办？", parent=self.history_win):
+                    return
+                if not self.recover_note(note_id):
+                    return
+            else:
+                if not messagebox.askyesno("新建便签", "原便签已彻底删除，新建便签并加入待办？", parent=self.history_win):
+                    return
+                w = self.new_note()
+                w.d["title"] = batch["title"]
+                note_id = w.d["id"]
+        def change(data):
+            note = next(n for n in data["notes"] if n["id"] == note_id)
+            items = batch["items"] if item_index is None else [batch["items"][item_index]]
+            if (item_index is not None or batch.get("emptied")) and note["lines"] == [
+                    {"type": "text", "text": "", "checked": False}]:
+                note["lines"] = []
+            for item in items:
+                line = deepcopy(item["line"])
+                if item_index is None:
+                    note["lines"].insert(min(item["index"], len(note["lines"])), line)
+                else:
+                    line["checked"] = False
+                    note["lines"].append(line)
+            note["editedAt"] = datetime.now().isoformat(timespec="microseconds")
+            if item_index is None:
+                data["archives"] = [b for b in data["archives"] if b["id"] != batch_id]
+        if self._store_history(change):
+            self.notes[note_id].render(keep_cursor=False)
 
     def toggle_all(self):
         any_visible = any(w.d["visible"] for w in self.notes.values())
@@ -1825,6 +2179,7 @@ class App:
             pystray.MenuItem(lambda _item: f"新建便签  {self.hotkey_text('new')}", lambda: self.q.put("new")),
             pystray.MenuItem(lambda _item: f"显示/隐藏全部便签  {self.hotkey_text('toggle')}", lambda: self.q.put("toggle")),
             pystray.Menu.SEPARATOR,
+            pystray.MenuItem("清除记录与回收站…", lambda: self.q.put("history")),
             pystray.MenuItem("设置…", lambda: self.q.put("settings")),
             pystray.MenuItem("退出", lambda: self.q.put("quit")),
         )
@@ -1937,6 +2292,13 @@ class App:
                     self.new_note()
                 elif act == "toggle":
                     self.toggle_all()
+                elif act == "history":
+                    if self.history_win is None or not self.history_win.winfo_exists():
+                        self.history_win = HistoryWindow(self)
+                    self.history_win.refresh()
+                    self.history_win.deiconify()
+                    self.history_win.lift()
+                    self.history_win.focus_force()
                 elif act == "settings":
                     if self.settings_win is None or not self.settings_win.winfo_exists():
                         self.settings_win = SettingsWindow(self)
