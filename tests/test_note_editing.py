@@ -472,11 +472,11 @@ class NoteEditingTests(unittest.TestCase):
             main.SettingsWindow._drag_press(win, event(widget))
             self.assertIsNone(win._drag)
         pane = win.right
-        pane.thumb("y", 0.25, 0.75)
+        pane.bars["y"].set(0.25, 0.75)
         coordinates = pane.bars["y"].coords("thumb")
         length = pane.bars["y"].winfo_height()-8
         self.assertAlmostEqual(coordinates[3]-coordinates[1], length*.5)
-        pane.thumb("y",0,1)
+        pane.bars["y"].set(0,1)
         self.assertFalse(pane.bars["y"].find_withtag("thumb"))
         win.destroy()
 
@@ -547,6 +547,32 @@ class NoteEditingTests(unittest.TestCase):
         win.choose("second")
         self.assertEqual(win.rows["second"].cget("bg"), "#E9EDF2")
         win.destroy()
+
+    def test_note_scroll_thumb_only_shows_for_overflow_and_tracks_drag(self):
+        self.note.d["lines"] = [{"type":"text", "text":"短内容", "checked":False}]
+        self.note.render()
+        self.app.root.update()
+        thumb = self.note.scroll_thumb
+        self.assertFalse(thumb.find_withtag("thumb"))
+        self.text.event_generate("<MouseWheel>", delta=-120)
+        self.app.root.update()
+        self.assertEqual(self.text.yview(), (0.0,1.0))
+        self.note.d["lines"] = [{"type":"todo", "text":f"待办 {i}", "checked":i%2==0} for i in range(50)]
+        self.note.render()
+        self.app.root.update()
+        self.assertTrue(thumb.find_withtag("thumb"))
+        self.text.event_generate("<MouseWheel>", delta=-120)
+        self.app.root.update()
+        self.assertGreater(self.text.yview()[0],0)
+        event = type("Event", (), {"y":thumb.winfo_height()//2})()
+        thumb.move(event)
+        self.app.root.update()
+        self.assertGreater(self.text.yview()[0],.2)
+        self.note.d["lines"] = [{"type":"text", "text":"短内容", "checked":False}]
+        self.note.render()
+        self.app.root.update()
+        self.assertFalse(thumb.find_withtag("thumb"))
+        self.assertEqual(self.text.yview(), (0.0,1.0))
 
     def test_history_persists_and_readding_keeps_record(self):
         import json

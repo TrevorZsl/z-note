@@ -310,6 +310,35 @@ class ToolButton(tk.Canvas):
             self.itemconfig(self._icon, image=self._image)
 
 # ---------- 便签窗口 ----------
+class VerticalThumb(tk.Canvas):
+    def __init__(self, parent, target, bg):
+        super().__init__(parent, bg=bg, highlightthickness=0, bd=0, cursor="arrow")
+        self.target = target
+        self._drag_offset = None
+        self.bind("<Configure>", lambda e: self.set(*target.yview()))
+        self.bind("<Button-1>", self.move)
+        self.bind("<B1-Motion>", self.move)
+        self.bind("<ButtonRelease-1>", lambda e: setattr(self, "_drag_offset", None))
+
+    def set(self, first, last):
+        first, last = float(first), float(last)
+        self.delete("all")
+        length = self.winfo_height()-8
+        if last-first >= .999 or length < 1:
+            return
+        self.create_line(4,4+first*length,4,4+last*length,
+                         fill="#A7B0BE",width=6,capstyle="round",tags="thumb")
+
+    def move(self, event):
+        first, last = self.target.yview()
+        if last-first >= .999:
+            return
+        position = (event.y-4)/max(1,self.winfo_height()-8)
+        if self._drag_offset is None:
+            self._drag_offset = position-first if first <= position <= last else (last-first)/2
+        self.target.yview_moveto(position-self._drag_offset)
+
+
 class NoteWindow(tk.Toplevel):
     def __init__(self, app, data):
         super().__init__(app.root)
@@ -372,6 +401,7 @@ class NoteWindow(tk.Toplevel):
                             selectbackground=self._bg, inactiveselectbackground=self._bg,
                             selectforeground="#2B2F36", selectborderwidth=0,
                             font=app.base_font, insertbackground="#2B2F36", cursor="xterm")
+        self.scroll_thumb = VerticalThumb(self, self.text, self._bg)
         self._make_check_images()
         self.text.tag_config("todo_indent", lmargin2=self._check_images[False].width() + app.base_font.measure(PREFIX_PAD))
         self.text.tag_config("done", font=self.done_font)  # 只加删除线，不改字色
@@ -395,7 +425,7 @@ class NoteWindow(tk.Toplevel):
         self._strike_widgets = []
         self._selection_masks = []
         self._checkbox_widgets = []
-        self.text.configure(yscrollcommand=lambda *args: self._queue_strikes())
+        self.text.configure(yscrollcommand=self._text_scrolled)
         self.text.bind("<Configure>", lambda e: self._queue_strikes())
         self._bind_ime(self.text)
         self._draw_chip()
@@ -411,6 +441,8 @@ class NoteWindow(tk.Toplevel):
         t.bind("<KeyPress-BackSpace>", self._on_backspace)
         t.bind("<Button-1>", self._on_click)
         t.bind("<Button-3>", self._on_rightclick)
+        t.bind("<MouseWheel>", self._text_wheel)
+        self.scroll_thumb.bind("<MouseWheel>", self._text_wheel)
         t.bind("<Control-MouseWheel>", self._ctrl_wheel)
         self.bind("<FocusOut>", lambda e: self.sink_if_bottom())
 
@@ -460,12 +492,27 @@ class NoteWindow(tk.Toplevel):
         if text_y is not None:
             self.text.place(x=RADIUS + 4, y=text_y, width=w - 2 * (RADIUS + 4),
                             height=max(20, bar_y - text_y - 8))
+            self.scroll_thumb.place(x=w-RADIUS-10, y=text_y+4,
+                                    width=8, height=max(12,bar_y-text_y-16))
+            tk.Misc.lift(self.scroll_thumb)
         self.bar.place(x=0, y=bar_y, width=w, height=26)
         self.status.place(x=pill_x / 2, y=bar_y + 13, anchor="center", height=26)
         self.clear_btn.place(x=(pill_x + pill_width + w) / 2, y=13, anchor="center")
         self.add_pill.place(x=pill_x, y=h - 10 - pill_height,
                             width=pill_width, height=pill_height)
         self._draw_pill(pill_width, pill_height)
+
+    def _text_scrolled(self, first, last):
+        self.scroll_thumb.set(first, last)
+        self._queue_strikes()
+
+    def _text_wheel(self, event):
+        first, last = self.text.yview()
+        if last-first < .999:
+            self.text.yview_scroll(-int(event.delta/120), "units")
+        else:
+            self.text.yview_moveto(0)
+        return "break"
 
     def destroy(self):
         if hasattr(self, "_ime_pump_job"):
@@ -1662,16 +1709,8 @@ class HistoryPane(tk.Canvas):
         self.viewport = tk.Canvas(self, bg=NOTE_BG, highlightthickness=0)
         self.content = tk.Frame(self.viewport, bg=NOTE_BG)
         self.window = self.viewport.create_window(0, 0, window=self.content, anchor="nw")
-        self.bars = {}
-        for axis in ("y",):
-            bar = tk.Canvas(self, bg=NOTE_BG, highlightthickness=0, cursor="arrow")
-            self.bars[axis] = bar
-            bar.bind("<Button-1>", lambda e, a=axis: self.scroll_to(e, a))
-            bar.bind("<B1-Motion>", lambda e, a=axis: self.scroll_to(e, a))
-            bar.bind("<ButtonRelease-1>", lambda e: setattr(self, "_thumb_drag", None))
-            bar.bind("<Configure>", lambda e, a=axis: self.thumb(a, *self.viewport.yview()))
-            self.viewport.configure(**{axis+"scrollcommand": lambda first, last, a=axis: self.thumb(a, first, last)})
-        self._thumb_drag = None
+        self.bars = {"y": VerticalThumb(self, self.viewport, NOTE_BG)}
+        self.viewport.configure(yscrollcommand=self.bars["y"].set)
         self.bind("<Configure>", self.layout)
         self.content.bind("<Configure>", self.update_region)
         self.viewport.bind("<Configure>", self.update_region)
@@ -1703,32 +1742,7 @@ class HistoryPane(tk.Canvas):
         if self.content.winfo_reqheight() <= self.viewport.winfo_height():
             self.viewport.yview_moveto(0)
         for axis in self.bars:
-            self.thumb(axis, *getattr(self.viewport, axis+"view")())
-
-    def thumb(self, axis, first, last):
-        first, last = float(first), float(last)
-        bar = self.bars[axis]
-        bar.delete("all")
-        length = bar.winfo_height() if axis == "y" else bar.winfo_width()
-        if last-first >= .999 or length < 9:
-            return
-        start, end = 4+first*(length-8), 4+last*(length-8)
-        if axis == "y":
-            bar.create_line(4,start,4,end,fill="#A7B0BE",width=6,capstyle="round",tags="thumb")
-        else:
-            bar.create_line(start,4,end,4,fill="#A7B0BE",width=6,capstyle="round",tags="thumb")
-
-    def scroll_to(self, event, axis):
-        first, last = getattr(self.viewport, axis+"view")()
-        if last-first >= .999:
-            return
-        bar = self.bars[axis]
-        length = max(1,(bar.winfo_height() if axis == "y" else bar.winfo_width())-8)
-        position = ((event.y if axis == "y" else event.x)-4)/length
-        if self._thumb_drag is None:
-            self._thumb_drag = position-first if first <= position <= last else (last-first)/2
-        getattr(self.viewport, axis+"view_moveto")(position-self._thumb_drag)
-
+            self.bars[axis].set(*self.viewport.yview())
 
 class HistoryWindow(tk.Toplevel):
     def __init__(self, app):
