@@ -29,6 +29,12 @@ class NoteEditingTests(unittest.TestCase):
         for item in reversed(self.patches):
             item.stop()
 
+    def test_new_note_uses_larger_default_size(self):
+        note = self.app.new_note()
+        self.app.root.update()
+        self.assertEqual((note.d["w"], note.d["h"]), (543, 477))
+        self.assertEqual((note.winfo_width(), note.winfo_height()), (543, 477))
+
     def test_note_blank_regions_move_window_and_save_position(self):
         note = self.note
         w, h = note.winfo_width(), note.winfo_height()

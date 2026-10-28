@@ -2073,7 +2073,7 @@ class App:
         off = 24 * (self._cascade % 6); self._cascade += 1
         d = {"id": str(uuid.uuid4()),
              "x": min(cx + off, sw - 240), "y": min(cy + off, sh - 200),
-             "w": 320, "h": 300, "z": "top",
+             "w": 543, "h": 477, "z": "top",
              "opacity": self.data["settings"]["opacity"],
              "color": self.data["settings"]["color"], "visible": True,
              "editedAt": datetime.now().isoformat(timespec="microseconds"),
