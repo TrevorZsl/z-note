@@ -846,6 +846,46 @@ class NoteEditingTests(unittest.TestCase):
         self.assertEqual(self.note._checkbox_widgets[0].cget("bg"), self.note._bg)
         self.assertFalse(self.note._selection_masks)
 
+    def test_scroll_positions_checkboxes_before_next_idle_frame(self):
+        self.note.geometry("340x340")
+        self.note.d["lines"] = [
+            {"type": "todo", "text": f"待办 {i}", "checked": i % 2 == 0}
+            for i in range(100)]
+        self.note.render()
+        self.app.root.update()
+        for fraction in (.2, .7, .35):
+            with self.subTest(fraction=fraction):
+                self.text.yview_moveto(fraction)
+                self.app.root.update()
+                box = self.note._checkbox_widgets[1]
+                old_y = box.winfo_y()
+                row = self.text.index(f"@40,{old_y + box.winfo_height() // 2}").split(".")[0]
+                old_text_y = self.text.dlineinfo(f"{row}.0")[1]
+                self.text.yview_scroll(7, "pixels")
+                self.note._text_scrolled(*self.text.yview())
+                delta = self.text.dlineinfo(f"{row}.0")[1] - old_text_y
+                self.assertNotEqual(delta, 0)
+                self.assertEqual(int(box.place_info()["y"]), old_y + delta)
+                self.assertIsNone(self.note._strike_job)
+                self.app.root.update()
+                self.assertEqual(box.winfo_y(), old_y + delta)
+                box.event_generate("<Button-1>")
+                self.assertEqual(self.note.d["lines"][int(row)-1]["checked"], int(row) % 2 == 0)
+
+    def test_scroll_overlay_work_is_bounded_by_visible_rows(self):
+        self.note.d["lines"] = [
+            {"type": "todo", "text": f"待办 {i}", "checked": False}
+            for i in range(1000)]
+        self.note.render()
+        self.app.root.update()
+        self.text.yview_moveto(.6)
+        self.app.root.update()
+        visible_rows = (int(self.text.index(f"@0,{self.text.winfo_height()}").split(".")[0]) -
+                        int(self.text.index("@0,0").split(".")[0]) + 1)
+        with patch.object(self.text, "count", wraps=self.text.count) as count:
+            self.note._draw_strikes()
+        self.assertLessEqual(count.call_count, visible_rows * 2)
+
     def test_scrolling_reuses_checkbox_widgets_instead_of_recreating(self):
         self.note.geometry("300x300")
         self.note.d["lines"] = [{"type": "todo", "text": f"待办{i}", "checked": bool(i % 2)}
@@ -958,6 +998,107 @@ class NoteEditingTests(unittest.TestCase):
         self.assertEqual(self.note.d["lines"][1]["text"], expected)
         self.note.render()
         self.assertEqual(self.text.get("2.3", "2.end"), expected)
+
+    def test_toggling_wrapped_todos_keeps_exact_pixel_position(self):
+        self.note.geometry("340x340")
+        self.note.d["lines"] = [
+            {"type": "todo", "text": f"待办 {i} " + "需要处理的事项" * (i % 4 + 1),
+             "checked": i % 3 == 0} for i in range(45)]
+        self.note.render()
+        self.app.root.update()
+        for fraction in (.3, .65, 1):
+            with self.subTest(fraction=fraction):
+                self.text.yview_moveto(fraction)
+                self.text.yview_scroll(-7, "pixels")
+                self.app.root.update()
+                anchor = self.text.index("@0,0")
+                top = self.text.dlineinfo(anchor)[1]
+                target = self.text.index("@30,100")
+                row = int(target.split(".")[0]) - 1
+                target_y = self.text.dlineinfo(target)[1]
+                for _ in range(6):
+                    self.note.toggle_done(row)
+                    self.app.root.update()
+                    self.assertEqual(self.text.index("@0,0"), anchor)
+                    self.assertEqual(self.text.dlineinfo(anchor)[1], top)
+                    self.assertEqual(self.text.dlineinfo(target)[1], target_y)
+
+    def test_list_actions_keep_scrolled_view(self):
+        actions = ("toggle", "convert", "insert", "delete", "add", "enter",
+                   "clear", "restore", "sync")
+        for action in actions:
+            with self.subTest(action=action):
+                self.note.d["lines"] = [
+                    {"type": "todo", "text": f"待办 {i}", "checked": i == 26}
+                    for i in range(40)]
+                self.note.render()
+                self.app.root.update()
+                if action == "restore":
+                    self.note.clear_done()
+                    self.app.root.update()
+                self.text.mark_set("insert", "28.3")
+                self.text.see("insert")
+                self.app.root.update()
+                top_row = int(self.text.index("@0,0").split(".")[0])
+                if action == "toggle":
+                    # 点击勾选框时，编辑光标可以仍在屏幕外。
+                    self.text.mark_set("insert", "1.3")
+                    for checked in (True, False):
+                        self.note.toggle_done(27)
+                        self.app.root.update()
+                        self.assertEqual(self.note.d["lines"][27]["checked"], checked)
+                        self.assertEqual(self.text.index("insert"), "1.3")
+                        self.assertIsNotNone(self.text.bbox("28.3"))
+                        self.assertEqual(int(self.text.index("@0,0").split(".")[0]), top_row)
+                elif action == "convert":
+                    self.note.convert(27, "text")
+                    self.assertEqual(self.text.index("insert"), "28.0")
+                elif action == "insert":
+                    self.note.insert_line(27)
+                    self.assertEqual(self.text.index("insert"), "29.0")
+                elif action == "delete":
+                    self.note.delete_line(27)
+                    self.assertEqual(self.text.index("insert"), "28.3")
+                elif action == "add":
+                    self.note.add_todo()
+                    self.assertEqual(self.text.index("insert"), "29.3")
+                elif action == "enter":
+                    self.note._on_enter(None)
+                    self.assertEqual(self.text.index("insert"), "29.3")
+                elif action == "clear":
+                    self.note.clear_done()
+                    self.assertEqual(len(self.note.d["lines"]), 39)
+                elif action == "restore":
+                    self.app.return_archive(self.app.data["archives"][-1]["id"])
+                    self.assertEqual(len(self.note.d["lines"]), 40)
+                elif action == "sync":
+                    self.text.delete("28.0", "28.3")
+                    self.note._on_keyrelease(None)
+                    self.assertEqual(self.note.d["lines"][27]["type"], "text")
+                self.app.root.update()
+                self.assertLessEqual(
+                    abs(int(self.text.index("@0,0").split(".")[0]) - top_row), 1)
+                if action not in ("toggle", "clear", "restore"):
+                    self.assertIsNotNone(self.text.bbox("insert"))
+
+    def test_delete_last_line_keeps_neighbor_cursor_and_short_list_cannot_scroll(self):
+        self.note.d["lines"] = [
+            {"type": "todo", "text": f"待办 {i}", "checked": False}
+            for i in range(40)]
+        self.note.render()
+        self.app.root.update()
+        self.text.see("end-1c")
+        self.note.delete_line(39)
+        self.app.root.update()
+        self.assertEqual(self.text.index("insert"), "39.3")
+        self.assertIsNotNone(self.text.bbox("insert"))
+        for row in range(38, -1, -1):
+            self.note.delete_line(row)
+        self.app.root.update()
+        self.assertEqual(self.note.d["lines"], [
+            {"type": "text", "text": "", "checked": False}])
+        self.assertEqual(self.text.index("insert"), "1.0")
+        self.assertEqual(self.text.yview(), (0.0, 1.0))
 
     def test_backspace_empty_todo_keeps_scrolled_view_and_previous_row_cursor(self):
         for row in (25, 40):

@@ -629,7 +629,7 @@ class NoteWindow(tk.Toplevel):
 
     def _text_scrolled(self, first, last):
         self.scroll_thumb.set(first, last)
-        self._queue_strikes()
+        self._draw_strikes()
 
     def _text_wheel(self, event):
         first, last = self.text.yview()
@@ -864,10 +864,16 @@ class NoteWindow(tk.Toplevel):
         self._strike_job = self.after_idle(self._draw_strikes)
 
     def _draw_strikes(self):
+        if getattr(self, "_strike_job", None):
+            self.after_cancel(self._strike_job)
         self._strike_job = None
         # 滚动时复用控件只挪位置，整批销毁重建会让勾选框先消失再出现（闪烁）。
         used_masks = used_boxes = used_bars = 0
-        for row, line in enumerate(self.d["lines"], 1):
+        first = int(self.text.index("@0,0").split(".")[0])
+        last = min(len(self.d["lines"]),
+                   int(self.text.index(f"@0,{self.text.winfo_height()}").split(".")[0]))
+        for row in range(first, last + 1):
+            line = self.d["lines"][row - 1]
             if line["type"] == "todo":
                 # Tk 会把软换行的选区背景画进左边距，盖回勾选框旁的留白。
                 if self.text.tag_nextrange("selection_fill", f"{row}.0", f"{row}.end"):
@@ -1082,6 +1088,8 @@ class NoteWindow(tk.Toplevel):
     # ---- 渲染 ----
     def render(self, keep_cursor=True):
         cur = self.text.index("insert")
+        view = self.text.index("@0,0")
+        top = self.text.dlineinfo(view)
         self.text.delete("1.0", "end")
         lines = self.d["lines"] or [{"type": "text", "text": "", "checked": False}]
         self.d["lines"] = lines
@@ -1102,6 +1110,10 @@ class NoteWindow(tk.Toplevel):
             if self.text.compare(cur, ">", end):
                 cur = end
             self.text.mark_set("insert", cur)
+        self.text.yview(view)
+        restored = self.text.dlineinfo(view)
+        if top and restored:
+            self.text.yview_scroll(restored[1] - top[1], "pixels")
         self.update_status()
         self._queue_strikes()
 
@@ -1214,10 +1226,8 @@ class NoteWindow(tk.Toplevel):
             prev["text"] += ln["text"]
             del lines[row]
             target = f"{row}.0+{self._prefix_len(prev)}c lineend"
-            view = self.text.yview()[0]
             self.render(keep_cursor=False)
             self.text.mark_set("insert", target)
-            self.text.yview_moveto(view)
             self.text.see("insert")
             self.d["editedAt"] = datetime.now().isoformat(timespec="microseconds")
             self.app.schedule_save()
@@ -1345,6 +1355,7 @@ class NoteWindow(tk.Toplevel):
             ln["checked"] = False
         self.render(keep_cursor=False)
         self.text.mark_set("insert", f"{row+1}.0+{self._prefix_len(ln)}c")
+        self.text.see("insert")
         self.d["editedAt"] = datetime.now().isoformat(timespec="microseconds")
         self.app.schedule_save()
 
@@ -1352,6 +1363,7 @@ class NoteWindow(tk.Toplevel):
         self.d["lines"].insert(row + 1, {"type": "text", "text": "", "checked": False})
         self.render(keep_cursor=False)
         self.text.mark_set("insert", f"{row+2}.0")
+        self.text.see("insert")
         self.d["editedAt"] = datetime.now().isoformat(timespec="microseconds")
         self.app.schedule_save()
 
@@ -1361,6 +1373,9 @@ class NoteWindow(tk.Toplevel):
         else:
             del self.d["lines"][row]
         self.render(keep_cursor=False)
+        row = min(row, len(self.d["lines"]) - 1)
+        self.text.mark_set("insert", f"{row+1}.{self._prefix_len(self.d['lines'][row])}")
+        self.text.see("insert")
         self.d["editedAt"] = datetime.now().isoformat(timespec="microseconds")
         self.app.schedule_save()
 
