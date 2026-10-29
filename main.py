@@ -1214,8 +1214,11 @@ class NoteWindow(tk.Toplevel):
             prev["text"] += ln["text"]
             del lines[row]
             target = f"{row}.0+{self._prefix_len(prev)}c lineend"
+            view = self.text.yview()[0]
             self.render(keep_cursor=False)
             self.text.mark_set("insert", target)
+            self.text.yview_moveto(view)
+            self.text.see("insert")
             self.d["editedAt"] = datetime.now().isoformat(timespec="microseconds")
             self.app.schedule_save()
             return "break"

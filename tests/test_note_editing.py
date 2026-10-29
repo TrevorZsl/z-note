@@ -959,6 +959,30 @@ class NoteEditingTests(unittest.TestCase):
         self.note.render()
         self.assertEqual(self.text.get("2.3", "2.end"), expected)
 
+    def test_backspace_empty_todo_keeps_scrolled_view_and_previous_row_cursor(self):
+        for row in (25, 40):
+            with self.subTest(row=row):
+                self.note.d["lines"] = [
+                    {"type": "todo", "text": f"待办 {i}" if i < 15 else "",
+                     "checked": i == 0} for i in range(40)]
+                self.note.render()
+                self.app.root.update()
+                self.text.mark_set("insert", f"{row}.3")
+                self.text.see("insert")
+                self.app.root.update()
+                for _ in range(3):
+                    previous_lines = [dict(line) for line in self.note.d["lines"]]
+                    cursor_row = int(self.text.index("insert").split(".")[0])
+                    top_row = int(self.text.index("@0,0").split(".")[0])
+                    self.assertEqual(self.note._on_backspace(None), "break")
+                    self.app.root.update()
+                    del previous_lines[cursor_row - 1]
+                    self.assertEqual(self.note.d["lines"], previous_lines)
+                    self.assertEqual(self.text.index("insert"), f"{cursor_row - 1}.3")
+                    self.assertIsNotNone(self.text.bbox("insert"))
+                    self.assertLessEqual(
+                        abs(int(self.text.index("@0,0").split(".")[0]) - top_row), 1)
+
     def test_enter_replaces_selected_text(self):
         original = self.note.d["lines"][1]["text"]
         self.text.tag_add("sel", "2.5", "2.end")
