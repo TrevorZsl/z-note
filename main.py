@@ -183,7 +183,8 @@ dwmapi.DwmSetWindowAttribute.restype = ctypes.c_long
 SWP_NOSIZE, SWP_NOMOVE = 0x0001, 0x0002
 WM_HOTKEY = 0x0312
 HOTKEY_ACTIONS = {"new": (1, "newHotkey", "Ctrl+Alt+N"),
-                  "toggle": (2, "toggleHotkey", "Ctrl+Alt+H")}
+                  "hide": (2, "hideHotkey", "Ctrl+Alt+H"),
+                  "show": (3, "showHotkey", "Ctrl+Alt+S")}
 HOTKEY_KEYS = {**{chr(k): k for k in range(65, 91)},
                **{str(k): 48 + k for k in range(10)},
                **{f"F{k}": 111 + k for k in range(1, 25)},
@@ -1926,7 +1927,7 @@ class SettingsWindow(tk.Toplevel):
         self._hotkey_vars = {}
         self._hotkey_borders = []
         hotkey_rows = []
-        for action, name in (("new", "新建便签"), ("toggle", "显示/隐藏全部便签")):
+        for action, name in (("new", "新建便签"), ("hide", "隐藏所有便签"), ("show", "显示所有便签")):
             hotkey_row = tk.Frame(f, bg=NOTE_BG)
             hotkey_row.pack(fill="x", pady=5)
             hotkey_row.columnconfigure(0, weight=1)
@@ -2385,6 +2386,9 @@ class HistoryWindow(tk.Toplevel):
 class App:
     def __init__(self):
         self.data = load_data()
+        settings = self.data["settings"]
+        if "toggleHotkey" in settings:
+            settings.setdefault("hideHotkey", settings.pop("toggleHotkey"))
         self.data.setdefault("archives", [])
         self.data.setdefault("deletedNotes", [])
         for note in self.data["notes"]:
@@ -2591,17 +2595,22 @@ class App:
         if self._store_history(change):
             self.notes[note_id].render(keep_cursor=False)
 
-    def toggle_all(self):
-        any_visible = any(w.d["visible"] for w in self.notes.values())
+    def hide_all(self):
         for w in self.notes.values():
-            (w.hide() if any_visible else w.show())
+            w.hide()
+        self.schedule_save()
+
+    def show_all(self):
+        for w in self.notes.values():
+            w.show()
         self.schedule_save()
 
     # 托盘
     def _start_tray(self):
         menu = pystray.Menu(
             pystray.MenuItem(lambda _item: f"新建便签  {self.hotkey_text('new')}", lambda: self.q.put("new")),
-            pystray.MenuItem(lambda _item: f"显示/隐藏全部便签  {self.hotkey_text('toggle')}", lambda: self.q.put("toggle")),
+            pystray.MenuItem(lambda _item: f"隐藏所有便签  {self.hotkey_text('hide')}", lambda: self.q.put("hide")),
+            pystray.MenuItem(lambda _item: f"显示所有便签  {self.hotkey_text('show')}", lambda: self.q.put("show")),
             pystray.Menu.SEPARATOR,
             pystray.MenuItem("清除记录与回收站…", lambda: self.q.put("history")),
             pystray.MenuItem("设置…", lambda: self.q.put("settings")),
@@ -2714,8 +2723,10 @@ class App:
                         window._apply_hotkey(action, value)
                 elif act == "new":
                     self.new_note()
-                elif act == "toggle":
-                    self.toggle_all()
+                elif act == "hide":
+                    self.hide_all()
+                elif act == "show":
+                    self.show_all()
                 elif act == "history":
                     if self.history_win is None or not self.history_win.winfo_exists():
                         self.history_win = HistoryWindow(self)

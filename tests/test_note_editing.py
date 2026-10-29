@@ -10,6 +10,7 @@ import main
 class NoteEditingTests(unittest.TestCase):
     def setUp(self):
         self._start_hotkeys_impl = main.App._start_hotkeys
+        self._start_tray_impl = main.App._start_tray
         self._callback_errors = []
         self.patches = [
             patch.object(main.tk.Tk, "report_callback_exception", side_effect=lambda kind, value, trace:
@@ -78,11 +79,11 @@ class NoteEditingTests(unittest.TestCase):
             for layer in (-1, -2):  # HWND_TOPMOST / HWND_NOTOPMOST
                 self.assertTrue(main.user32.SetWindowPos(
                     other_hwnd, layer, 0, 0, 0, 0, main.SWP_NOMOVE | main.SWP_NOSIZE | 0x10))
-        self.app.toggle_all()
+        self.app.hide_all()
         raise_other()
         self.app.root.update()
 
-        self.app.toggle_all()
+        self.app.show_all()
         self.app.root.update()
         self.app.root.after(1300, self.app.root.quit)
         self.app.root.mainloop()
@@ -101,12 +102,12 @@ class NoteEditingTests(unittest.TestCase):
         order = window_order()
         self.assertGreater(order.index(self.note.hwnd), order.index(other_hwnd))
         self.assertLess(order.index(pinned.hwnd), order.index(other_hwnd))
-        self.app.toggle_all()
+        self.app.hide_all()
         self.app.root.update()
         for note in (self.note, pinned):
             self.assertFalse(note.d["visible"])
             self.assertEqual(note.state(), "withdrawn")
-        self.app.toggle_all()
+        self.app.show_all()
         self.app.root.update()
         order = window_order()
         for note in (self.note, pinned):
@@ -130,6 +131,52 @@ class NoteEditingTests(unittest.TestCase):
                 self.assertEqual((note.winfo_x(), note.winfo_y()), (x + 15, y + 10))
                 self.assertEqual((note.d["x"], note.d["y"]), (x + 15, y + 10))
                 self.assertEqual((note.winfo_width(), note.winfo_height()), (w, h))
+
+    def test_show_and_hide_all_are_independent_and_repeatable(self):
+        other = self.app.new_note()
+        self.note.set_z("bottom")
+        other.hide()
+        self.app.root.update()
+        original = [(w.winfo_x(), w.winfo_y(), w.winfo_width(), w.winfo_height(), w.d["z"])
+                    for w in self.app.notes.values()]
+        for action in ("show", "show", "hide", "hide", "show"):
+            with self.subTest(action=action):
+                self.app.q.put(action)
+                self.app._pump()
+                self.app.root.update()
+                for w, geometry in zip(self.app.notes.values(), original):
+                    self.assertEqual(w.d["visible"], action == "show")
+                    self.assertEqual(w.state(), "normal" if action == "show" else "withdrawn")
+                    self.assertEqual((w.winfo_x(), w.winfo_y(), w.winfo_width(),
+                                      w.winfo_height(), w.d["z"]), geometry)
+        self.app.notes.clear()
+        self.app.hide_all()
+        self.app.show_all()
+
+    def test_tray_has_separate_show_and_hide_actions(self):
+        with patch.object(main.pystray, "Icon") as icon:
+            self._start_tray_impl(self.app)
+        menu = icon.call_args.args[3]
+        hide, show = menu.items[1:3]
+        self.assertEqual(hide.text, "隐藏所有便签  Ctrl+Alt+H")
+        self.assertEqual(show.text, "显示所有便签  Ctrl+Alt+S")
+        hide(None)
+        show(None)
+        self.assertEqual(self.app.q.get_nowait(), "hide")
+        self.assertEqual(self.app.q.get_nowait(), "show")
+
+    def test_legacy_toggle_hotkey_migrates_to_hide_without_overwriting_new_setting(self):
+        for configured in ({"toggleHotkey": "Ctrl+Shift+H"},
+                           {"toggleHotkey": "Ctrl+Shift+H", "hideHotkey": "Alt+F9"}):
+            data = {"schemaVersion": 2, "settings": dict(main.DEFAULT_SETTINGS, **configured),
+                    "notes": []}
+            with patch.object(main, "load_data", return_value=data), \
+                 patch.object(main.tk, "Tk", side_effect=RuntimeError("stop before creating UI")):
+                with self.assertRaisesRegex(RuntimeError, "stop before creating UI"):
+                    main.App()
+            self.assertEqual(data["settings"]["hideHotkey"],
+                             configured.get("hideHotkey", configured["toggleHotkey"]))
+            self.assertNotIn("toggleHotkey", data["settings"])
 
     def test_note_outer_edge_still_resizes(self):
         note = self.note
@@ -560,30 +607,34 @@ class NoteEditingTests(unittest.TestCase):
             unregister.assert_called_once_with(self.app._hotkey_hwnd, 1)
             self.assertEqual(self.app.data["settings"]["newHotkey"], "Ctrl+Shift+K")
             save.assert_called_once_with(self.app.data)
-            self.assertIn("另一项", self.app.update_hotkey("toggle", "Ctrl+Shift+K"))
+            self.assertIn("另一项", self.app.update_hotkey("hide", "Ctrl+Shift+K"))
         self.app._hotkey_proc(self.app._hotkey_hwnd, main.WM_HOTKEY, 101, 0)
         self.assertEqual(self.app.q.get_nowait(), "new")
         self.app._hotkey_proc(self.app._hotkey_hwnd, main.WM_HOTKEY, 2, 0)
-        self.assertEqual(self.app.q.get_nowait(), "toggle")
+        self.assertEqual(self.app.q.get_nowait(), "hide")
+        self.app._hotkey_proc(self.app._hotkey_hwnd, main.WM_HOTKEY, 3, 0)
+        self.assertEqual(self.app.q.get_nowait(), "show")
         settings = main.SettingsWindow(self.app)
         self.app._hotkey_capture = (settings, "new")
         self.app._hotkey_proc(self.app._hotkey_hwnd, main.WM_HOTKEY, 2, 0)
-        with patch.object(self.app, "toggle_all") as toggle:
+        with patch.object(self.app, "hide_all") as hide:
             self.app._pump()
-            toggle.assert_not_called()
+            hide.assert_not_called()
         self.assertIn("另一项", settings._hotkey_hint.cget("text"))
         settings.destroy()
 
-    def test_reset_hotkeys_restores_both_defaults_and_keeps_old_bindings_on_conflict(self):
-        self.app.data["settings"].update(newHotkey="Ctrl+Alt+H", toggleHotkey="Ctrl+Alt+N")
+    def test_reset_hotkeys_restores_all_defaults_and_keeps_old_bindings_on_conflict(self):
+        self.app.data["settings"].update(newHotkey="Ctrl+Alt+H", hideHotkey="Ctrl+Alt+N",
+                                         showHotkey="Ctrl+Shift+S")
         self.app._hotkey_hwnd = self.app.root.winfo_id()
-        self.app._hotkey_ids = {"new": 1, "toggle": 2}
-        self.app._active_hotkeys = {"new": "Ctrl+Alt+H", "toggle": "Ctrl+Alt+N"}
-        with patch.object(main.user32, "RegisterHotKey", side_effect=[True, False, True, True]), \
+        self.app._hotkey_ids = {"new": 1, "hide": 2, "show": 3}
+        self.app._active_hotkeys = {"new": "Ctrl+Alt+H", "hide": "Ctrl+Alt+N", "show": "Ctrl+Shift+S"}
+        with patch.object(main.user32, "RegisterHotKey", side_effect=[True, False, True, True, True]), \
              patch.object(main.user32, "UnregisterHotKey"), patch.object(main, "save_data") as save:
             self.assertIn("占用", self.app.reset_hotkeys())
             self.assertEqual(self.app.hotkey_text("new"), "Ctrl+Alt+H")
-            self.assertEqual(self.app._active_hotkeys["toggle"], "Ctrl+Alt+N")
+            self.assertEqual(self.app._active_hotkeys["hide"], "Ctrl+Alt+N")
+            self.assertEqual(self.app._active_hotkeys["show"], "Ctrl+Shift+S")
             save.assert_not_called()
         with patch.object(main.user32, "RegisterHotKey", return_value=True), \
              patch.object(main.user32, "UnregisterHotKey"), patch.object(main, "save_data") as save:
@@ -604,9 +655,10 @@ class NoteEditingTests(unittest.TestCase):
             save.reset_mock()
             settings._reset_hotkeys()
             self.assertEqual(settings.hotkey_entries["new"].get(), "Ctrl+Alt+N")
-            self.assertEqual(settings.hotkey_entries["toggle"].get(), "Ctrl+Alt+H")
+            self.assertEqual(settings.hotkey_entries["hide"].get(), "Ctrl+Alt+H")
+            self.assertEqual(settings.hotkey_entries["show"].get(), "Ctrl+Alt+S")
             self.assertEqual(self.app._active_hotkeys,
-                             {"new": "Ctrl+Alt+N", "toggle": "Ctrl+Alt+H"})
+                             {"new": "Ctrl+Alt+N", "hide": "Ctrl+Alt+H", "show": "Ctrl+Alt+S"})
             save.assert_called_once_with(self.app.data)
             settings.destroy()
 
