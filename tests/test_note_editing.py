@@ -2,13 +2,18 @@
 import unittest
 from unittest.mock import patch
 
+from PIL import ImageChops, ImageGrab
+
 import main
 
 
 class NoteEditingTests(unittest.TestCase):
     def setUp(self):
         self._start_hotkeys_impl = main.App._start_hotkeys
+        self._callback_errors = []
         self.patches = [
+            patch.object(main.tk.Tk, "report_callback_exception", side_effect=lambda kind, value, trace:
+                         self._callback_errors.append(f"{kind.__name__}: {value}")),
             patch.object(main, "load_data", return_value={
                 "settings": dict(main.DEFAULT_SETTINGS), "notes": []}),
             patch.object(main, "save_data"),
@@ -28,6 +33,14 @@ class NoteEditingTests(unittest.TestCase):
         self.app.root.destroy()
         for item in reversed(self.patches):
             item.stop()
+        self.assertFalse(self._callback_errors, self._callback_errors)
+
+    def _visible_bbox(self, index):
+        box = self.text.bbox(index)
+        if box:
+            y = self.text.winfo_rooty() + box[1] - self.note.body.winfo_rooty()
+            if y < self.note.body.winfo_height() and y + box[3] > 0:
+                return box[0], y, box[2], box[3]
 
     def test_new_note_uses_larger_default_size(self):
         note = self.app.new_note()
@@ -613,23 +626,23 @@ class NoteEditingTests(unittest.TestCase):
         self.assertFalse(thumb.find_withtag("thumb"))
         self.text.event_generate("<MouseWheel>", delta=-120)
         self.app.root.update()
-        self.assertEqual(self.text.yview(), (0.0,1.0))
+        self.assertEqual(self.note.body.yview(), (0.0,1.0))
         self.note.d["lines"] = [{"type":"todo", "text":f"待办 {i}", "checked":i%2==0} for i in range(50)]
         self.note.render()
         self.app.root.update()
         self.assertTrue(thumb.find_withtag("thumb"))
         self.text.event_generate("<MouseWheel>", delta=-120)
         self.app.root.update()
-        self.assertGreater(self.text.yview()[0],0)
+        self.assertGreater(self.note.body.yview()[0],0)
         event = type("Event", (), {"y":thumb.winfo_height()//2})()
         thumb.move(event)
         self.app.root.update()
-        self.assertGreater(self.text.yview()[0],.2)
+        self.assertGreater(self.note.body.yview()[0],.2)
         self.note.d["lines"] = [{"type":"text", "text":"短内容", "checked":False}]
         self.note.render()
         self.app.root.update()
         self.assertFalse(thumb.find_withtag("thumb"))
-        self.assertEqual(self.text.yview(), (0.0,1.0))
+        self.assertEqual(self.note.body.yview(), (0.0,1.0))
 
     def test_history_persists_and_readding_keeps_record(self):
         import json
@@ -678,7 +691,7 @@ class NoteEditingTests(unittest.TestCase):
         self.note._last_sz = None
         self.note._relayout()
         self.app.root.update()
-        self.assertGreaterEqual(self.note.text.winfo_y(),
+        self.assertGreaterEqual(self.note.body.winfo_y(),
                                 self.note.toolbar.winfo_y() + self.note.toolbar.winfo_height())
         self.assertGreaterEqual(self.note.title_chip.winfo_height(),
                                 self.note._chip_font.metrics("linespace") + 12)
@@ -800,11 +813,12 @@ class NoteEditingTests(unittest.TestCase):
         self.note.d["lines"] = [{"type": "todo", "text": "啊" * 140, "checked": False}]
         self.note.render()
         self.app.root.update()
-        self.text.yview_scroll(4, "units")
+        self.note.body.yview_scroll(4 * self.app.base_font.metrics("linespace"), "units")
         self.app.root.update()
         count = self.text.count("1.0", "1.end", "displaylines")[0]
         middle = self.text.index(f"1.0 +{count // 2} display lines display linestart")
-        self.assertIsNone(self.text.dlineinfo("1.0"))
+        self.assertLess(self.text.winfo_rooty() + self.text.dlineinfo("1.0")[1],
+                        self.note.body.winfo_rooty())
         self.assertEqual(len(self.note._checkbox_widgets), 1)
         box = self.note._checkbox_widgets[0]
         info = self.text.dlineinfo(middle)
@@ -821,7 +835,7 @@ class NoteEditingTests(unittest.TestCase):
         count = self.text.count("1.0", "1.end", "displaylines")[0]
         middle = self.text.index(f"1.0 +{(count + 1) // 2} display lines")
         for scroll in (3, 1, -2):
-            self.text.yview_scroll(scroll, "units")
+            self.note.body.yview_scroll(scroll * self.app.base_font.metrics("linespace"), "units")
             self.app.root.update()
             info = self.text.dlineinfo(middle)
             self.assertIsNotNone(info)
@@ -855,36 +869,87 @@ class NoteEditingTests(unittest.TestCase):
         self.app.root.update()
         for fraction in (.2, .7, .35):
             with self.subTest(fraction=fraction):
-                self.text.yview_moveto(fraction)
+                self.note.body.yview_moveto(fraction)
                 self.app.root.update()
-                box = self.note._checkbox_widgets[1]
-                old_y = box.winfo_y()
-                row = self.text.index(f"@40,{old_y + box.winfo_height() // 2}").split(".")[0]
-                old_text_y = self.text.dlineinfo(f"{row}.0")[1]
-                self.text.yview_scroll(7, "pixels")
-                self.note._text_scrolled(*self.text.yview())
-                delta = self.text.dlineinfo(f"{row}.0")[1] - old_text_y
+                row = self.note._body_index(40, 60).split(".")[0]
+                box = next(box for box in self.note._checkbox_widgets if box._todo_row == int(row))
+                old_y = box.winfo_rooty()
+                local_y = box.winfo_y()
+                old_text_y = self.text.winfo_rooty() + self.text.dlineinfo(f"{row}.0")[1]
+                self.note.body.yview_scroll(7, "units")
+                self.app.root.update()
+                delta = self.text.winfo_rooty() + self.text.dlineinfo(f"{row}.0")[1] - old_text_y
                 self.assertNotEqual(delta, 0)
-                self.assertEqual(int(box.place_info()["y"]), old_y + delta)
+                self.assertEqual(int(box.place_info()["y"]), local_y)
                 self.assertIsNone(self.note._strike_job)
-                self.app.root.update()
-                self.assertEqual(box.winfo_y(), old_y + delta)
+                self.assertEqual(box.winfo_rooty(), old_y + delta)
                 box.event_generate("<Button-1>")
                 self.assertEqual(self.note.d["lines"][int(row)-1]["checked"], int(row) % 2 == 0)
 
-    def test_scroll_overlay_work_is_bounded_by_visible_rows(self):
+    def test_thousand_rows_reach_bottom_with_bounded_native_windows(self):
         self.note.d["lines"] = [
             {"type": "todo", "text": f"待办 {i}", "checked": False}
             for i in range(1000)]
         self.note.render()
         self.app.root.update()
-        self.text.yview_moveto(.6)
+        self.assertEqual(len(self.note.d["lines"]), 1000)
+        with patch.object(self.note, "_draw_strikes", wraps=self.note._draw_strikes) as draw:
+            for fraction in (.1, .6, 1, 0):
+                self.note.body.yview_moveto(fraction)
+                self.app.root.update()
+                if fraction == 1:
+                    self.assertIsNotNone(self._visible_bbox("1000.3"))
+            self.assertLessEqual(draw.call_count, 4)
+            self.assertLessEqual(self.text.winfo_height(), 16000)
+            self.assertLessEqual(abs(int(self.text.place_info()["y"])), 16000)
+
+    def test_keyboard_page_navigation_keeps_cursor_inside_body(self):
+        self.note.d["lines"] = [
+            {"type": "todo", "text": f"待办 {i}", "checked": False} for i in range(50)]
+        self.note.render()
+        self.text.mark_set("insert", "1.3")
+        for key, shift in (("Next", 0), ("Next", 1), ("Prior", 0)):
+            self.note._page_key(type("Key", (), {"keysym": key, "state": shift})())
+            self.app.root.update()
+            box = self._visible_bbox("insert")
+            self.assertIsNotNone(box)
+            self.assertGreaterEqual(box[1], 0)
+            self.assertLessEqual(box[1] + box[3], self.note.body.winfo_height())
+            if shift:
+                self.assertTrue(self.text.tag_ranges("sel"))
+
+    def test_long_preedit_at_bottom_keeps_composition_visible(self):
+        self.note.d["lines"] = [
+            {"type": "todo", "text": f"待办 {i}", "checked": False} for i in range(20)]
+        self.note.render()
+        self.text.mark_set("insert", "20.end")
+        self.note._see_text("insert")
+        original = self.note.d["lines"][-1]["text"]
+        self.note._begin_preedit(self.text)
+        self.note._replace_preedit("pinyin" * 30)
         self.app.root.update()
-        visible_rows = (int(self.text.index(f"@0,{self.text.winfo_height()}").split(".")[0]) -
-                        int(self.text.index("@0,0").split(".")[0]) + 1)
-        with patch.object(self.text, "count", wraps=self.text.count) as count:
-            self.note._draw_strikes()
-        self.assertLessEqual(count.call_count, visible_rows * 2)
+        self.assertIsNotNone(self._visible_bbox("insert"))
+        self.assertEqual(self.note.d["lines"][-1]["text"], original)
+        self.note._finish_preedit("确认")
+        self.app.root.update()
+        self.assertEqual(self.note.d["lines"][-1]["text"], original + "确认")
+        self.assertIsNotNone(self._visible_bbox("insert"))
+
+    def test_drag_selection_scrolls_outer_body_and_stops_on_release(self):
+        self.note.d["lines"] = [
+            {"type": "todo", "text": f"待办 {i}", "checked": False} for i in range(50)]
+        self.note.render()
+        self.text.event_generate("<Button-1>", x=70, y=30)
+        before = self.note.body.yview()[0]
+        y = self.note.body.winfo_height() + 20
+        self.text.event_generate("<B1-Motion>", x=70, y=y, state=256)
+        self.assertGreater(self.note.body.yview()[0], before)
+        self.assertTrue(self.text.tag_ranges("sel"))
+        self.assertIsNotNone(self.note._selection_scroll_job)
+        self.note._selection_scroll()
+        self.text.event_generate("<ButtonRelease-1>", x=70, y=y)
+        self.assertIsNone(self.note._selection_scroll_job)
+        self.app.root.update()
 
     def test_scrolling_reuses_checkbox_widgets_instead_of_recreating(self):
         self.note.geometry("300x300")
@@ -894,16 +959,246 @@ class NoteEditingTests(unittest.TestCase):
         self.app.root.update()
         first_pass = list(self.note._checkbox_widgets)
         self.assertGreater(len(first_pass), 1)
-        self.text.yview_scroll(60, "units")
+        self.note.body.yview_scroll(60 * self.app.base_font.metrics("linespace"), "units")
         self.app.root.update()
         for box in self.note._checkbox_widgets:
             self.assertIn(box, first_pass)
-        self.text.yview_scroll(-60, "units")
+        self.note.body.yview_scroll(-60 * self.app.base_font.metrics("linespace"), "units")
         self.app.root.update()
         for box in self.note._checkbox_widgets:
             self.assertIn(box, first_pass)
         self.note._checkbox_widgets[0].event_generate("<Button-1>")
         self.assertTrue(self.note.d["lines"][0]["checked"])
+
+    def test_wheel_uses_pixel_steps_and_keeps_small_deltas(self):
+        self.note.d["lines"] = [
+            {"type": "todo", "text": f"待办 {i}", "checked": i % 2 == 0}
+            for i in range(50)]
+        self.note.render()
+        self.app.root.update()
+        for delta in (-120, -15):
+            with self.subTest(delta=delta):
+                self.note.body.yview_moveto(0)
+                self.app.root.update()
+                with patch.object(self.note.body, "yview_scroll", wraps=self.note.body.yview_scroll) as scroll:
+                    self.note._text_wheel(type("Wheel", (), {"delta": delta})())
+                self.assertEqual(scroll.call_args.args[1], "units")
+                self.assertGreater(scroll.call_args.args[0], 0)
+                self.assertIsNotNone(self.note._wheel_job)
+                self.note._stop_wheel()
+                self.assertIsNone(self.note._wheel_job)
+
+    def test_scroll_moves_text_checkboxes_and_strikes_as_one_window(self):
+        self.note.d["lines"] = [
+            {"type": "todo", "text": f"待办 {i} " + "需要处理的事情" * 3,
+             "checked": i % 2 == 0} for i in range(20)]
+        self.note.render()
+        self.app.root.update()
+        body = self.note.body
+        box, bar = self.note._checkbox_widgets[0], self.note._strike_widgets[0]
+        native_view = self.text.yview()
+        positions = (box.winfo_y(), bar.winfo_y(), self.text.dlineinfo("1.3")[1])
+        with patch.object(self.note, "_draw_strikes", wraps=self.note._draw_strikes) as draw:
+            for distance in (1, 7, 21, -9, -20):
+                before = [widget.winfo_rooty() for widget in (self.text, box, bar)]
+                body.yview_scroll(distance, "units")
+                self.app.root.update()
+                deltas = [widget.winfo_rooty() - y for widget, y in zip((self.text, box, bar), before)]
+                self.assertEqual(deltas, [-distance] * 3)
+                self.assertEqual((box.winfo_y(), bar.winfo_y(), self.text.dlineinfo("1.3")[1]), positions)
+                self.assertEqual(self.text.yview(), native_view)
+            clock = [10.0]
+            with patch.object(main.time, "monotonic", side_effect=lambda: clock[0]):
+                self.note._text_wheel(type("Wheel", (), {"delta": -240})())
+                for _ in range(100):
+                    if self.note._wheel_job is None:
+                        break
+                    self.note.after_cancel(self.note._wheel_job)
+                    before = [widget.winfo_rooty() for widget in (self.text, box, bar)]
+                    clock[0] += .016
+                    self.note._step_wheel()
+                    deltas = [widget.winfo_rooty() - y for widget, y in zip((self.text, box, bar), before)]
+                    self.assertEqual(deltas, [deltas[0]] * 3)
+                    self.assertEqual((box.winfo_y(), bar.winfo_y(), self.text.dlineinfo("1.3")[1]), positions)
+                self.assertIsNone(self.note._wheel_job)
+            draw.assert_not_called()
+
+    def test_buffer_switch_preserves_visible_todo_relative_positions(self):
+        self.note.d["lines"] = [
+            {"type": "todo", "text": f"待办 {i}", "checked": True} for i in range(100)]
+        self.note.render()
+        self.app.root.update()
+        boundary = self.text.winfo_height() - self.note.body.winfo_height() - self.note._buffer_margin - 1
+        self.note._scroll_to(boundary)
+        self.app.root.update()
+        row = self.note._body_index(60, self.note.body.winfo_height() // 2).split(".")[0]
+        old_chunk = self.note._chunk_start
+
+        def positions():
+            glyph = self.text.bbox(f"{row}.3")
+            box = next(w for w in self.note._checkbox_widgets if w._todo_row == int(row))
+            bar = next(w for w in self.note._strike_widgets if w._text_start.split(".")[0] == row)
+            return self.text.winfo_rooty() + glyph[1], box.winfo_rooty(), bar.winfo_rooty()
+
+        before = positions()
+        self.note.body.yview_scroll(2, "units")
+        self.app.root.update()
+        self.assertNotEqual(self.note._chunk_start, old_chunk)
+        self.assertEqual([a - b for a, b in zip(positions(), before)], [-2, -2, -2])
+        boundary += self.note._chunk_start
+        self.note._scroll_to(boundary)
+        self.app.root.update()
+        row = self.note._body_index(60, self.note.body.winfo_height() // 2).split(".")[0]
+        before, old_chunk, old_top = positions(), self.note._chunk_start, self.note.body.canvasy(0)
+        self.note._text_wheel(type("Wheel", (), {"delta": -24})())
+        moved = round(self.note.body.canvasy(0) - old_top)
+        self.assertNotEqual(self.note._chunk_start, old_chunk)
+        self.assertEqual([a - b for a, b in zip(positions(), before)], [-moved] * 3)
+        self.assertIsNotNone(self.note._wheel_job)
+        self.note._stop_wheel()
+
+    def test_wheel_animation_finishes_and_render_cancels_it(self):
+        self.note.d["lines"] = [
+            {"type": "todo", "text": f"待办 {i}", "checked": False}
+            for i in range(50)]
+        self.note.render()
+        self.app.root.update()
+        self.text.event_generate("<MouseWheel>", delta=-120)
+        def wait_for_scroll():
+            if self.note._wheel_job is None:
+                self.app.root.quit()
+            else:
+                self.app.root.after(10, wait_for_scroll)
+        self.app.root.after(10, wait_for_scroll)
+        self.app.root.after(2000, self.app.root.quit)
+        self.app.root.mainloop()
+        self.assertIsNone(self.note._wheel_job)
+        self.assertLess(abs(self.note._wheel_remaining), 1)
+        self.assertGreater(self.note.body.yview()[0], 0)
+        self.text.event_generate("<MouseWheel>", delta=-120)
+        self.assertIsNotNone(self.note._wheel_job)
+        self.note.render()
+        self.assertIsNone(self.note._wheel_job)
+        self.note.after_idle(self.note.render)
+        self.text.event_generate("<MouseWheel>", delta=-120)
+        self.assertIsNone(self.note._wheel_job)
+        self.assertEqual(self.note._wheel_remaining, 0)
+
+    def test_wheel_works_over_checkbox_and_strike(self):
+        self.note.d["lines"] = [
+            {"type": "todo", "text": f"待办 {i}", "checked": True}
+            for i in range(50)]
+        self.note.render()
+        self.app.root.update()
+        for widget in (self.note._checkbox_widgets[0], self.note._strike_widgets[0]):
+            with self.subTest(widget=widget):
+                old = self.note.body.yview()[0]
+                widget.event_generate("<MouseWheel>", delta=-120)
+                self.app.root.update()
+                self.assertGreater(self.note.body.yview()[0], old)
+                self.note._stop_wheel()
+
+    def test_wheel_distance_matches_across_scaling_fonts_and_input_sizes(self):
+        clock = [10.0]
+        patterns = [(-120,), (-15,) * 8, (-1,) * 120, (-3, -9, -28, -80)]
+        with patch.object(self.note.body, "yview", return_value=(.2, .4)), \
+                patch.object(self.note.body, "yview_scroll") as scroll, \
+                patch.object(self.note.body, "update_idletasks"), \
+                patch.object(self.note, "_text_scrolled"), \
+                patch.object(self.note, "after", return_value="frame"), \
+                patch.object(self.note, "after_cancel"), \
+                patch.object(main.time, "monotonic", side_effect=lambda: clock[0]):
+            for dpi in (96, 120, 144, 192, 240, 288):
+                self.app.root.tk.call("tk", "scaling", dpi / 72)
+                scale = self.text.winfo_fpixels("1i") / 96
+                for font_size in (11, 20):
+                    self.app.base_font.configure(size=font_size)
+                    for deltas in patterns:
+                        with self.subTest(dpi=dpi, font=font_size, deltas=len(deltas)):
+                            self.note._stop_wheel()
+                            scroll.reset_mock()
+                            for delta in deltas:
+                                self.note._text_wheel(type("Wheel", (), {"delta": delta})())
+                            for _ in range(100):
+                                if self.note._wheel_job is None:
+                                    break
+                                clock[0] += .016
+                                self.note._step_wheel()
+                            self.assertIsNone(self.note._wheel_job)
+                            moved = sum(call.args[0] for call in scroll.call_args_list)
+                            self.assertLessEqual(abs(moved - scale * 36), 1 + 1e-7)
+                            self.assertAlmostEqual((moved + self.note._wheel_remaining) / scale, 36)
+
+    def test_tiny_wheel_deltas_accumulate_instead_of_disappearing(self):
+        self.app.root.tk.call("tk", "scaling", 96 / 72)
+        with patch.object(self.note.body, "yview", return_value=(.2, .4)), \
+                patch.object(self.note.body, "yview_scroll") as scroll:
+            event = type("Wheel", (), {"delta": -1})()
+            self.note._text_wheel(event)
+            scroll.assert_not_called()
+            self.assertGreater(self.note._wheel_remaining, 0)
+            for _ in range(3):
+                self.note._text_wheel(event)
+            self.assertGreater(sum(call.args[0] for call in scroll.call_args_list), 0)
+        self.note._stop_wheel()
+
+    def test_delayed_scroll_frame_catches_up_with_elapsed_time(self):
+        steps = []
+        with patch.object(self.note.body, "yview_scroll") as scroll, \
+                patch.object(self.note.body, "update_idletasks"), \
+                patch.object(self.note, "_text_scrolled"), \
+                patch.object(self.note, "after", return_value="frame"), \
+                patch.object(self.note, "after_cancel"):
+            for elapsed in (.016, .1):
+                self.note._wheel_remaining = 100
+                self.note._wheel_time = 10
+                with patch.object(main.time, "monotonic", return_value=10 + elapsed):
+                    self.note._step_wheel()
+                steps.append(scroll.call_args.args[0])
+            self.assertGreater(steps[1], steps[0])
+            self.note._stop_wheel()
+
+    def test_long_todo_scroll_never_remeasures_text(self):
+        self.note.geometry("300x340")
+        self.note.d["lines"] = [
+            {"type": "todo", "text": "很长的已完成待办" * 300, "checked": True}]
+        self.note.render()
+        self.app.root.update()
+        self.note.body.yview_moveto(.7)
+        self.app.root.update()
+        with patch.object(self.text, "index", wraps=self.text.index) as index:
+            with patch.object(self.text, "count", wraps=self.text.count) as count:
+                self.note.body.yview_scroll(7, "units")
+                self.app.root.update()
+        self.assertEqual(index.call_count, 0)
+        self.assertEqual(count.call_count, 0)
+        self.assertTrue(self.note._strike_widgets)
+
+    def test_scroll_does_not_copy_old_overlay_pixels(self):
+        self.note.geometry("536x478+100+100")
+        self.note.d["lines"] = [
+            {"type": "todo", "text": f"待办 {i} " + "需要处理的事情" * (i % 3 + 1),
+             "checked": i % 2 == 0} for i in range(20)]
+        self.note.render()
+        self.text.configure(insertwidth=0)
+        self.note.lift()
+        self.app.root.update()
+
+        def capture():
+            main.dwmapi.DwmFlush()
+            body = self.note.body
+            x, y = body.winfo_rootx(), body.winfo_rooty()
+            return ImageGrab.grab(bbox=(x, y, x + body.winfo_width(), y + body.winfo_height()))
+
+        for delta in (-120, -120, 120):
+            with self.subTest(delta=delta):
+                self.text.event_generate("<MouseWheel>", delta=delta)
+                self.note._stop_wheel()
+                scrolled = capture()
+                self.text.event_generate("<Expose>", x=0, y=0,
+                                         width=self.text.winfo_width(), height=self.text.winfo_height())
+                self.app.root.update()
+                self.assertIsNone(ImageChops.difference(scrolled, capture()).getbbox())
 
     def test_checkbox_does_not_move_as_its_line_is_clipped_at_bottom(self):
         self.note.geometry("300x500")
@@ -916,15 +1211,16 @@ class NoteEditingTests(unittest.TestCase):
         middle = f"1.0 +{(count + 1) // 2} display lines"
         info = self.text.dlineinfo(middle)
         original_y = self.note._checkbox_widgets[0].winfo_y()
-        self.text.place_configure(height=info[1] + info[3] - 5)
+        self.note.body.place_configure(height=info[1] + info[3] - 5)
         self.app.root.update()
         self.assertEqual(self.note._checkbox_widgets[0].winfo_y(), original_y)
-        self.text.place_configure(height=original_y + 3)
+        self.note.body.place_configure(height=original_y + 3)
         self.app.root.update()
         self.assertEqual(self.note._checkbox_widgets[0].winfo_y(), original_y)
-        self.text.place_configure(height=original_y)
+        self.note.body.place_configure(height=original_y)
         self.app.root.update()
-        self.assertFalse(self.note._checkbox_widgets)
+        self.assertGreaterEqual(self.note._checkbox_widgets[0].winfo_rooty(),
+                                self.note.body.winfo_rooty() + self.note.body.winfo_height())
 
     def test_add_button_border_is_visibly_thick(self):
         image = main.ImageTk.getimage(self.note._pill_image).convert("RGB")
@@ -940,7 +1236,13 @@ class NoteEditingTests(unittest.TestCase):
             ("result", "你", None), ("update", "", 0), ("end", None, None),
         ]:
             self.note._ime_pending.put((kind, self.text, value, cursor))
-        self.app.root.after(30, self.app.root.quit)
+        def wait_for_result():
+            if self.note.d["lines"][1]["text"] == original + "你" and not self.note._ime_active:
+                self.app.root.quit()
+            else:
+                self.app.root.after(10, wait_for_result)
+        self.app.root.after(10, wait_for_result)
+        self.app.root.after(2000, self.app.root.quit)
         self.app.root.mainloop()
         self.assertEqual(self.text.get("2.3", "2.end"), original + "你")
         self.assertEqual(self.note.d["lines"][1]["text"], original + "你")
@@ -1008,20 +1310,20 @@ class NoteEditingTests(unittest.TestCase):
         self.app.root.update()
         for fraction in (.3, .65, 1):
             with self.subTest(fraction=fraction):
-                self.text.yview_moveto(fraction)
-                self.text.yview_scroll(-7, "pixels")
+                self.note.body.yview_moveto(fraction)
+                self.note.body.yview_scroll(-7, "units")
                 self.app.root.update()
-                anchor = self.text.index("@0,0")
-                top = self.text.dlineinfo(anchor)[1]
-                target = self.text.index("@30,100")
+                anchor = self.note._body_index()
+                top = self.text.winfo_rooty() + self.text.dlineinfo(anchor)[1]
+                target = self.note._body_index(30, 100)
                 row = int(target.split(".")[0]) - 1
-                target_y = self.text.dlineinfo(target)[1]
+                target_y = self.text.winfo_rooty() + self.text.dlineinfo(target)[1]
                 for _ in range(6):
                     self.note.toggle_done(row)
                     self.app.root.update()
-                    self.assertEqual(self.text.index("@0,0"), anchor)
-                    self.assertEqual(self.text.dlineinfo(anchor)[1], top)
-                    self.assertEqual(self.text.dlineinfo(target)[1], target_y)
+                    self.assertEqual(self.note._body_index(), anchor)
+                    self.assertEqual(self.text.winfo_rooty() + self.text.dlineinfo(anchor)[1], top)
+                    self.assertEqual(self.text.winfo_rooty() + self.text.dlineinfo(target)[1], target_y)
 
     def test_list_actions_keep_scrolled_view(self):
         actions = ("toggle", "convert", "insert", "delete", "add", "enter",
@@ -1037,9 +1339,9 @@ class NoteEditingTests(unittest.TestCase):
                     self.note.clear_done()
                     self.app.root.update()
                 self.text.mark_set("insert", "28.3")
-                self.text.see("insert")
+                self.note._see_text("insert")
                 self.app.root.update()
-                top_row = int(self.text.index("@0,0").split(".")[0])
+                top_row = int(self.note._body_index().split(".")[0])
                 if action == "toggle":
                     # 点击勾选框时，编辑光标可以仍在屏幕外。
                     self.text.mark_set("insert", "1.3")
@@ -1048,8 +1350,8 @@ class NoteEditingTests(unittest.TestCase):
                         self.app.root.update()
                         self.assertEqual(self.note.d["lines"][27]["checked"], checked)
                         self.assertEqual(self.text.index("insert"), "1.3")
-                        self.assertIsNotNone(self.text.bbox("28.3"))
-                        self.assertEqual(int(self.text.index("@0,0").split(".")[0]), top_row)
+                        self.assertIsNotNone(self._visible_bbox("28.3"))
+                        self.assertEqual(int(self.note._body_index().split(".")[0]), top_row)
                 elif action == "convert":
                     self.note.convert(27, "text")
                     self.assertEqual(self.text.index("insert"), "28.0")
@@ -1077,9 +1379,9 @@ class NoteEditingTests(unittest.TestCase):
                     self.assertEqual(self.note.d["lines"][27]["type"], "text")
                 self.app.root.update()
                 self.assertLessEqual(
-                    abs(int(self.text.index("@0,0").split(".")[0]) - top_row), 1)
+                    abs(int(self.note._body_index().split(".")[0]) - top_row), 1)
                 if action not in ("toggle", "clear", "restore"):
-                    self.assertIsNotNone(self.text.bbox("insert"))
+                    self.assertIsNotNone(self._visible_bbox("insert"))
 
     def test_delete_last_line_keeps_neighbor_cursor_and_short_list_cannot_scroll(self):
         self.note.d["lines"] = [
@@ -1087,18 +1389,18 @@ class NoteEditingTests(unittest.TestCase):
             for i in range(40)]
         self.note.render()
         self.app.root.update()
-        self.text.see("end-1c")
+        self.note._see_text("end-1c")
         self.note.delete_line(39)
         self.app.root.update()
         self.assertEqual(self.text.index("insert"), "39.3")
-        self.assertIsNotNone(self.text.bbox("insert"))
+        self.assertIsNotNone(self._visible_bbox("insert"))
         for row in range(38, -1, -1):
             self.note.delete_line(row)
         self.app.root.update()
         self.assertEqual(self.note.d["lines"], [
             {"type": "text", "text": "", "checked": False}])
         self.assertEqual(self.text.index("insert"), "1.0")
-        self.assertEqual(self.text.yview(), (0.0, 1.0))
+        self.assertEqual(self.note.body.yview(), (0.0, 1.0))
 
     def test_backspace_empty_todo_keeps_scrolled_view_and_previous_row_cursor(self):
         for row in (25, 40):
@@ -1109,20 +1411,20 @@ class NoteEditingTests(unittest.TestCase):
                 self.note.render()
                 self.app.root.update()
                 self.text.mark_set("insert", f"{row}.3")
-                self.text.see("insert")
+                self.note._see_text("insert")
                 self.app.root.update()
                 for _ in range(3):
                     previous_lines = [dict(line) for line in self.note.d["lines"]]
                     cursor_row = int(self.text.index("insert").split(".")[0])
-                    top_row = int(self.text.index("@0,0").split(".")[0])
+                    top_row = int(self.note._body_index().split(".")[0])
                     self.assertEqual(self.note._on_backspace(None), "break")
                     self.app.root.update()
                     del previous_lines[cursor_row - 1]
                     self.assertEqual(self.note.d["lines"], previous_lines)
                     self.assertEqual(self.text.index("insert"), f"{cursor_row - 1}.3")
-                    self.assertIsNotNone(self.text.bbox("insert"))
+                    self.assertIsNotNone(self._visible_bbox("insert"))
                     self.assertLessEqual(
-                        abs(int(self.text.index("@0,0").split(".")[0]) - top_row), 1)
+                        abs(int(self.note._body_index().split(".")[0]) - top_row), 1)
 
     def test_enter_replaces_selected_text(self):
         original = self.note.d["lines"][1]["text"]
@@ -1182,7 +1484,7 @@ class NoteEditingTests(unittest.TestCase):
         for height in (230, 340, 500):
             self.note.geometry(f"300x{height}")
             self.app.root.update()
-            gap = self.note.bar.winfo_y() - (self.text.winfo_y() + self.text.winfo_height())
+            gap = self.note.bar.winfo_y() - (self.note.body.winfo_y() + self.note.body.winfo_height())
             self.assertEqual(gap, 8)
 
     def test_body_shrinks_before_footer_moves_up(self):
@@ -1192,13 +1494,13 @@ class NoteEditingTests(unittest.TestCase):
         place_bar = self.note.bar.place
 
         def record_body_height(**kwargs):
-            body_heights_at_footer_move.append(int(self.text.place_info()["height"]))
+            body_heights_at_footer_move.append(int(self.note.body.place_info()["height"]))
             return place_bar(**kwargs)
 
         with patch.object(self.note.bar, "place", side_effect=record_body_height):
             self.note.geometry("300x230")
             self.app.root.update()
-        self.assertEqual(body_heights_at_footer_move[-1], self.text.winfo_height())
+        self.assertEqual(body_heights_at_footer_move[-1], self.note.body.winfo_height())
 
     def test_title_grows_and_shrinks_while_editing_without_hiding_buttons(self):
         self.note.d["title"] = "日"

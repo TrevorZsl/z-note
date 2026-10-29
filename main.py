@@ -2,10 +2,11 @@
 """z-note 雏形：常驻托盘的桌面便签（自由文本 + 可勾选待办）。
 运行: python main.py   依赖: pystray (pip install pystray)
 """
-import atexit, ctypes, json, math, os, queue, sys, threading, uuid, winreg
+import atexit, ctypes, json, math, os, queue, sys, threading, time, uuid, winreg
 from copy import deepcopy
 from datetime import datetime
 import tkinter as tk
+from _tkinter import DONT_WAIT, WINDOW_EVENTS
 from tkinter import font as tkfont, messagebox
 from ctypes import wintypes
 
@@ -30,6 +31,10 @@ INK, QUIET = "#6B7280", "#666D75"      # 图标与状态栏的墨色（冷灰单
 
 # ---------- Win32 ----------
 user32 = ctypes.WinDLL("user32")
+user32.SendMessageW.argtypes = [wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM]
+user32.SendMessageW.restype = wintypes.LPARAM
+user32.RedrawWindow.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.RECT), wintypes.HRGN, wintypes.UINT]
+user32.RedrawWindow.restype = wintypes.BOOL
 kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
 kernel32.CreateEventW.argtypes = [ctypes.c_void_p, wintypes.BOOL, wintypes.BOOL, wintypes.LPCWSTR]
 kernel32.CreateEventW.restype = wintypes.HANDLE
@@ -513,12 +518,14 @@ class NoteWindow(tk.Toplevel):
         # -- 正文 --
         self.done_font = tkfont.Font(family=UI_FONT,
                                      size=app.data["settings"]["fontSize"])
-        self.text = tk.Text(self, bg=self._bg, fg="#2B2F36", bd=0, highlightthickness=0,
+        self.body = tk.Canvas(self, bg=self._bg, bd=0, highlightthickness=0, yscrollincrement=1)
+        self.text = tk.Text(self.body, bg=self._bg, fg="#2B2F36", bd=0, highlightthickness=0,
                             padx=12, pady=10, wrap="char", spacing1=9, spacing3=10,
                             selectbackground=self._bg, inactiveselectbackground=self._bg,
                             selectforeground="#2B2F36", selectborderwidth=0,
                             font=app.base_font, insertbackground="#2B2F36", cursor="xterm")
-        self.scroll_thumb = VerticalThumb(self, self.text, self._bg)
+        self.text.place(x=0, y=0)
+        self.scroll_thumb = VerticalThumb(self, self.body, self._bg)
         self._make_check_images()
         self.text.tag_config("todo_indent", lmargin2=self._check_images[False].width() + app.base_font.measure(PREFIX_PAD))
         self.text.tag_config("done", font=self.done_font)  # 只加删除线，不改字色
@@ -550,8 +557,18 @@ class NoteWindow(tk.Toplevel):
         self._strike_widgets = []
         self._selection_masks = []
         self._checkbox_widgets = []
-        self.text.configure(yscrollcommand=self._text_scrolled)
-        self.text.bind("<Configure>", lambda e: self._queue_strikes())
+        self._document_height = 0
+        self._content_height = 1
+        self._chunk_start = 0
+        self._buffer_margin = 0
+        self._layout_busy = False
+        self._layout_pending = False
+        self._row_layout = {}
+        self._wheel_job = None
+        self._wheel_remaining = 0
+        self._selection_scroll_job = None
+        self.body.configure(yscrollcommand=self._text_scrolled)
+        self.body.bind("<Configure>", lambda e: self._queue_strikes())
         self._bind_ime(self.text)
         self._draw_chip()
 
@@ -564,11 +581,21 @@ class NoteWindow(tk.Toplevel):
         t.bind("<KeyRelease>", self._on_keyrelease)
         t.bind("<KeyPress-Return>", self._on_enter)
         t.bind("<KeyPress-BackSpace>", self._on_backspace)
+        t.bind("<Prior>", self._page_key)
+        t.bind("<Next>", self._page_key)
         t.bind("<Button-1>", self._on_click)
         t.bind("<Button-3>", self._on_rightclick)
         t.bind("<MouseWheel>", self._text_wheel)
+        self.body.bind("<MouseWheel>", self._text_wheel)
         self.scroll_thumb.bind("<MouseWheel>", self._text_wheel)
+        self.scroll_thumb.bind("<Button-1>", self._stop_wheel, add="+")
+        t.bind("<KeyPress>", self._stop_wheel, add="+")
         t.bind("<Control-MouseWheel>", self._ctrl_wheel)
+        self.body.bind("<Control-MouseWheel>", self._ctrl_wheel)
+        t.bind("<B1-Motion>", self._selection_scroll, add="+")
+        t.bind("<ButtonRelease-1>", self._stop_selection_scroll, add="+")
+        t.bind("<Unmap>", self._stop_selection_scroll)
+        t.bind("<Unmap>", self._stop_wheel, add="+")
         self.bind("<FocusOut>", lambda e: self.sink_if_bottom())
 
         self.render()
@@ -615,7 +642,7 @@ class NoteWindow(tk.Toplevel):
         center_y = h - 10 - pill_height / 2
         bar_y = round(center_y - 13)
         if text_y is not None:
-            self.text.place(x=RADIUS + 4, y=text_y, width=w - 2 * (RADIUS + 4),
+            self.body.place(x=RADIUS + 4, y=text_y, width=w - 2 * (RADIUS + 4),
                             height=max(20, bar_y - text_y - 8))
             self.scroll_thumb.place(x=w-RADIUS-10, y=text_y+4,
                                     width=8, height=max(12,bar_y-text_y-16))
@@ -629,17 +656,128 @@ class NoteWindow(tk.Toplevel):
 
     def _text_scrolled(self, first, last):
         self.scroll_thumb.set(first, last)
-        self._draw_strikes()
+        if self._layout_busy:
+            return
+        top = round(self.body.canvasy(0))
+        if ((self._chunk_start > 0 and top < self._chunk_start + self._buffer_margin) or
+                (self.text.yview()[1] < 1 and
+                 top + self.body.winfo_height() > self._chunk_start + self.text.winfo_height() - self._buffer_margin)):
+            self._draw_strikes()
+        else:
+            self.text.place_configure(y=self._chunk_start - top)
 
     def _text_wheel(self, event):
-        first, last = self.text.yview()
+        first, last = self.body.yview()
         if last-first < .999:
-            self.text.yview_scroll(-int(event.delta/120), "units")
+            # 每格移动 36 个逻辑像素，随界面缩放，不随字体大小改变。
+            distance = -event.delta / 120 * self.text.winfo_fpixels("27p")
+            if distance * self._wheel_remaining < 0:
+                self._wheel_remaining = 0
+            self._wheel_remaining += distance
+            if self._wheel_job is None:
+                self._wheel_time = time.monotonic() - .016
+                self._step_wheel()
         else:
-            self.text.yview_moveto(0)
+            self._stop_wheel()
+            self.body.yview_moveto(0)
+        return "break"
+
+    def _step_wheel(self):
+        self._wheel_job = None
+        remaining = self._wheel_remaining
+        if abs(remaining) < 1:
+            # 不足一像素的移动留给下次输入，精细滚轮和触控板的小增量不能丢。
+            return
+        now = time.monotonic()
+        # 按实际经过时间推进，电脑繁忙时下一帧会追上进度。
+        progress = -math.expm1(-(now - self._wheel_time) / .04)
+        self._wheel_time = now
+        step = min(int(abs(remaining)), max(1, round(abs(remaining) * progress)))
+        step *= 1 if remaining > 0 else -1
+        self.body.yview_scroll(step, "units")
+        self._wheel_remaining -= step
+        self._wheel_job = self.after(16, self._step_wheel)
+        self.body.update_idletasks()
+        # 先处理整体移动产生的窗口重画事件，再提交这一帧；不运行下一帧的计时器。
+        while self.tk.dooneevent(WINDOW_EVENTS | DONT_WAIT):
+            pass
+        self.body.update_idletasks()
+
+    def _stop_wheel(self, _event=None):
+        if self._wheel_job is not None:
+            self.after_cancel(self._wheel_job)
+            self._wheel_job = None
+        self._wheel_remaining = 0
+
+    def _body_index(self, x=0, y=0):
+        return self.text.index(f"@{x},{round(self.body.canvasy(y)) - self._chunk_start}")
+
+    def _scroll_to(self, y):
+        self.body.yview_moveto(y / self._content_height)
+
+    def _see_text(self, index):
+        if getattr(self, "_strike_job", None):
+            self._draw_strikes()
+        box = self.text.bbox(index)
+        if box is None:
+            self.text.see(index)
+            self._chunk_start = round(self.text.yview()[0] * self._document_height)
+            box = self.text.bbox(index)
+        if box:
+            top, pad = self.body.canvasy(0), int(self.text.cget("pady"))
+            y = box[1] + self._chunk_start
+            if y < top + pad:
+                self._scroll_to(y - pad)
+            elif y + box[3] > top + self.body.winfo_height() - pad:
+                self._scroll_to(y + box[3] + pad - self.body.winfo_height())
+            self._draw_strikes()
+
+    def _stop_selection_scroll(self, _event=None):
+        if self._selection_scroll_job is not None:
+            self.after_cancel(self._selection_scroll_job)
+            self._selection_scroll_job = None
+
+    def _page_key(self, event):
+        self._stop_wheel()
+        box = self.text.bbox("insert")
+        cursor_y = box[1] + self._chunk_start - self.body.canvasy(0) if box else -1
+        if not 0 <= cursor_y < self.body.winfo_height():
+            box = None
+        direction = 1 if event.keysym == "Next" else -1
+        distance = direction * max(1, self.body.winfo_height() - self.app.base_font.metrics("linespace"))
+        self.body.yview_scroll(distance, "units")
+        self.body.update_idletasks()
+        target = (self._body_index(box[0], round(cursor_y)) if box else
+                  self._body_index(self.body.winfo_height() // 2, 0))
+        command = "tk::TextKeySelect" if event.state & 1 else "tk::TextSetCursor"
+        self.text.tk.call(command, self.text, target)
+        self._see_text("insert")
+        return "break"
+
+    def _selection_scroll(self, event=None):
+        self._stop_selection_scroll()
+        if event is not None:
+            self._selection_x = event.x
+            self._selection_y = event.y_root - self.body.winfo_rooty()
+        height = self.body.winfo_height()
+        direction = -1 if self._selection_y < 0 else (1 if self._selection_y >= height else 0)
+        if not direction:
+            return
+        before = self.body.yview()
+        self.body.yview_scroll(direction * 8, "units")
+        self.body.update_idletasks()
+        y = self.body.canvasy(max(0, min(height - 1, self._selection_y))) - self._chunk_start
+        self.text.tk.call("tk::TextSelectTo", self.text, self._selection_x, round(y))
+        if self.body.yview() != before:
+            self._selection_scroll_job = self.after(30, self._selection_scroll)
         return "break"
 
     def destroy(self):
+        self._stop_wheel()
+        self._stop_selection_scroll()
+        if getattr(self, "_strike_job", None):
+            self.after_cancel(self._strike_job)
+            self._strike_job = None
         if hasattr(self, "_ime_pump_job"):
             self.after_cancel(self._ime_pump_job)
             user32.SetWindowLongPtrW(self.winfo_id(), -4, self._ime_old_proc)
@@ -797,8 +935,8 @@ class NoteWindow(tk.Toplevel):
             widget.delete(start, f"{start}+{self._ime_length}c")
             widget.insert(start, value, ("ime_preedit",))
             widget.mark_set("insert", f"{start}+{cursor}c")
-            widget.see("insert")
             self._queue_strikes()
+            self._see_text("insert")
         else:
             widget.delete(start, start + self._ime_length)
             widget.insert(start, value)
@@ -859,39 +997,85 @@ class NoteWindow(tk.Toplevel):
             widget.bind(event, lambda e: widget.after_idle(self._sync_ime, widget), add="+")
 
     def _queue_strikes(self):
+        if self._layout_busy:
+            self._layout_pending = True
+            return
+        self._document_height = 0
+        self._row_layout.clear()
         if getattr(self, "_strike_job", None):
             self.after_cancel(self._strike_job)
         self._strike_job = self.after_idle(self._draw_strikes)
 
     def _draw_strikes(self):
+        if self._layout_busy:
+            return
+        self._layout_busy = True
+        hwnd = self.text.winfo_id()
+        user32.SendMessageW(hwnd, 0x000B, 0, 0)  # WM_SETREDRAW：缓冲段切换期间不展示中间布局。
+        try:
+            self._layout_text()
+            self.body.update_idletasks()
+        finally:
+            self._layout_busy = False
+            user32.SendMessageW(hwnd, 0x000B, 1, 0)
+            user32.RedrawWindow(hwnd, None, None, 0x0081)  # RDW_INVALIDATE | RDW_ALLCHILDREN
+        if self._layout_pending:
+            self._layout_pending = False
+            self._queue_strikes()
+
+    def _layout_text(self):
         if getattr(self, "_strike_job", None):
             self.after_cancel(self._strike_job)
         self._strike_job = None
-        # 滚动时复用控件只挪位置，整批销毁重建会让勾选框先消失再出现（闪烁）。
+        width = self.body.winfo_width()
+        if width < 50:
+            return
+        # 正文和所有装饰始终留在同一内容坐标系，滚动只移动整个 Text 窗口。
+        self.text.place_configure(width=width)
+        self.body.update_idletasks()
+        if not self._document_height:
+            self._document_height = self.text.count("1.0", "end", "update", "ypixels")
+        pad = int(self.text.cget("pady"))
+        self._buffer_margin = (max(self.app.base_font.metrics("linespace"), self._check_images[False].width()) +
+                               int(self.text.cget("spacing1")) + int(self.text.cget("spacing3")) + pad)
+        self._content_height = max(self.body.winfo_height(), self._document_height + 2 * pad)
+        # Windows 子窗口坐标有范围限制；正文保留数屏缓冲，跨段时整组一起切换。
+        height = min(self._content_height, max(self.body.winfo_height(),
+                     min(16000, max(self.body.winfo_height() * 5,
+                                    self.body.winfo_height() + 4 * self._buffer_margin))))
+        self.text.place_configure(height=height)
+        self.body.configure(scrollregion=(0, 0, width, self._content_height))
+        self.body.update_idletasks()
+        top = round(self.body.canvasy(0))
+        target = max(0, top - (height - self.body.winfo_height()) // 2)
+        self.text.yview_moveto(target / self._document_height)
+        self._chunk_start = round(self.text.yview()[0] * self._document_height)
+        self.text.place_configure(y=self._chunk_start - top)
+        self.body.update_idletasks()
         used_masks = used_boxes = used_bars = 0
-        first = int(self.text.index("@0,0").split(".")[0])
-        last = min(len(self.d["lines"]),
-                   int(self.text.index(f"@0,{self.text.winfo_height()}").split(".")[0]))
-        for row in range(first, last + 1):
+        content_height = self.text.winfo_height()
+        visible_start = self.text.index("@0,0")
+        first_row = int(visible_start.split(".")[0])
+        last_row = min(len(self.d["lines"]), int(self.text.index(f"@0,{content_height}").split(".")[0]))
+        for row in range(first_row, last_row + 1):
             line = self.d["lines"][row - 1]
             if line["type"] == "todo":
+                if row not in self._row_layout:
+                    row_height = self.text.count(f"{row}.0", f"{row+1}.0", "ypixels")[0]
+                    offset = self.text.count("1.0", f"{row}.0", "ypixels")
+                    self._row_layout[row] = (row_height, offset[0] if offset else 0)
+                row_height, offset = self._row_layout[row]
+                row_top = pad + offset - self._chunk_start
                 # Tk 会把软换行的选区背景画进左边距，盖回勾选框旁的留白。
                 if self.text.tag_nextrange("selection_fill", f"{row}.0", f"{row}.end"):
-                    start, top, bottom = f"{row}.0", None, None
-                    while self.text.compare(start, "<=", f"{row}.end"):
-                        info = self.text.dlineinfo(start)
-                        if info:
-                            top = info[1] if top is None else min(top, info[1])
-                            bottom = info[1] + info[3] if bottom is None else max(bottom, info[1] + info[3])
-                        next_start = self.text.index(f"{start} +1 display lines display linestart")
-                        if self.text.compare(next_start, "<=", start):
-                            break
-                        start = next_start
+                    top, bottom = max(0, row_top), min(content_height, row_top + row_height)
                     if top is not None:
                         if used_masks < len(self._selection_masks):
                             mask = self._selection_masks[used_masks]
                         else:
                             mask = tk.Frame(self.text, bg=self._bg)
+                            mask.bind("<MouseWheel>", self._text_wheel)
+                            mask.bind("<Control-MouseWheel>", self._ctrl_wheel)
                             for event in ("<Button-1>", "<B1-Motion>", "<ButtonRelease-1>"):
                                 mask.bind(event, lambda e, sequence=event: self.text.event_generate(
                                     sequence, x=e.x_root - self.text.winfo_rootx(),
@@ -903,21 +1087,8 @@ class NoteWindow(tk.Toplevel):
                                    height=bottom - top, bordermode="ignore")
                         mask.lift()
                 size = self._check_images[False].width()
-                count = self.text.count(f"{row}.0", f"{row}.end", "displaylines")
-                middle_index = (f"{row}.0 +{(count[0] + 1) // 2} display lines"
-                                if count else f"{row}.0")
-                middle = self.text.dlineinfo(middle_index)
-                middle_y = middle[1] if middle else None
-                if middle_y is None:
-                    previous_index = f"{middle_index} -1 display lines"
-                    previous = self.text.dlineinfo(previous_index)
-                    if previous:
-                        middle_y = previous[1] + self.text.count(previous_index, middle_index, "ypixels")[0]
-                full_height = (self.text.count(middle_index, f"{middle_index} +1 display lines", "ypixels")[0]
-                               if middle_y is not None else 0)
-                y = (middle_y + (0 if count and count[0] % 2 else full_height // 2) - size // 2
-                     if middle_y is not None else None)
-                if y is not None and -size < y < self.text.winfo_height():
+                y = row_top + row_height // 2 - size // 2
+                if -size < y < content_height:
                     image = self._check_images[line["checked"]]
                     if used_boxes < len(self._checkbox_widgets):
                         box = self._checkbox_widgets[used_boxes]
@@ -925,8 +1096,11 @@ class NoteWindow(tk.Toplevel):
                             box.configure(image=image)
                     else:
                         box = tk.Label(self.text, image=image, bg=self._bg, bd=0, cursor="hand2")
+                        box.bind("<MouseWheel>", self._text_wheel)
+                        box.bind("<Control-MouseWheel>", self._ctrl_wheel)
                         self._checkbox_widgets.append(box)
                     used_boxes += 1
+                    box._todo_row = row
                     box.place(x=int(self.text.cget("padx")), y=y, width=size, height=size,
                               bordermode="ignore")
                     box.lift()
@@ -934,31 +1108,39 @@ class NoteWindow(tk.Toplevel):
             if line["type"] != "todo" or not line["checked"]:
                 continue
             start = f"{row}.{self._prefix_len(line)}"
+            if self.text.compare(start, "<", visible_start):
+                start = visible_start
             end = f"{row}.end"
             while self.text.compare(start, "<", end):
-                next_start = self.text.index(f"{start} +1 display lines display linestart")
-                stop = (next_start if self.text.compare(start, "<", next_start) and
-                        self.text.compare(next_start, "<", end) else end)
+                display = self.text.dlineinfo(start)
+                if not display or display[1] >= content_height:
+                    break
+                stop = self.text.index(f"@{self.text.winfo_width()},{max(0, display[1])}")
                 first = self.text.bbox(start)
-                last = self.text.bbox(f"{stop}-1c") if self.text.compare(stop, ">", start) else None
+                last = self.text.bbox(f"{end}-1c" if self.text.compare(stop, ">=", end) else stop)
                 if first and last:
                     thickness = max(2, round(self.done_font.metrics("ascent") * 0.12))
                     if used_bars < len(self._strike_widgets):
                         bar = self._strike_widgets[used_bars]
                     else:
                         bar = tk.Frame(self.text, bg="#505761", height=thickness, cursor="xterm")
+                        bar.bind("<MouseWheel>", self._text_wheel)
+                        bar.bind("<Control-MouseWheel>", self._ctrl_wheel)
                         for event in ("<Button-1>", "<B1-Motion>", "<ButtonRelease-1>"):
                             bar.bind(event, lambda e, sequence=event: self.text.event_generate(
                                 sequence, x=e.x_root - self.text.winfo_rootx(),
                                 y=e.y_root - self.text.winfo_rooty(), time=e.time, state=e.state))
                         self._strike_widgets.append(bar)
                     used_bars += 1
-                    display = self.text.dlineinfo(start)
+                    bar._text_start = start
                     baseline = display[1] + display[4]
                     middle = baseline - round(self.done_font.metrics("ascent") * 0.33)
                     bar.place(x=first[0], y=middle - thickness // 2,
                               width=max(1, last[0] + last[2] - first[0]),
                               height=thickness, bordermode="ignore")
+                if display[1] + display[3] >= content_height:
+                    break
+                next_start = self.text.index(f"@0,{display[1] + display[3]}")
                 if self.text.compare(next_start, "<=", start):
                     break
                 start = next_start
@@ -981,7 +1163,7 @@ class NoteWindow(tk.Toplevel):
         self.d["lines"].insert(row, {"type": "todo", "text": "", "checked": False})
         self.render(keep_cursor=False)
         self.text.mark_set("insert", f"{row+1}.0+{self._prefix_len(self.d['lines'][row])}c")
-        self.text.see(f"{row+1}.0")
+        self._see_text(f"{row+1}.0")
         self.text.focus_set()
         self.d["editedAt"] = datetime.now().isoformat(timespec="microseconds")
         self.app.schedule_save()
@@ -1087,8 +1269,11 @@ class NoteWindow(tk.Toplevel):
 
     # ---- 渲染 ----
     def render(self, keep_cursor=True):
+        self._stop_wheel()
         cur = self.text.index("insert")
-        view = self.text.index("@0,0")
+        view = self._body_index()
+        scroll_y = self.body.canvasy(0)
+        old_chunk = self._chunk_start
         top = self.text.dlineinfo(view)
         self.text.delete("1.0", "end")
         lines = self.d["lines"] or [{"type": "text", "text": "", "checked": False}]
@@ -1110,12 +1295,12 @@ class NoteWindow(tk.Toplevel):
             if self.text.compare(cur, ">", end):
                 cur = end
             self.text.mark_set("insert", cur)
-        self.text.yview(view)
-        restored = self.text.dlineinfo(view)
-        if top and restored:
-            self.text.yview_scroll(restored[1] - top[1], "pixels")
         self.update_status()
         self._queue_strikes()
+        self.body.update_idletasks()
+        restored = self.text.dlineinfo(view)
+        if top and restored:
+            self._scroll_to(scroll_y + restored[1] + self._chunk_start - top[1] - old_chunk)
 
     @staticmethod
     def _prefix_len(ln):
@@ -1186,6 +1371,8 @@ class NoteWindow(tk.Toplevel):
             return
         self._queue_strikes()
         self._sync_lines_from_text()
+        if _e is None or _e.keysym not in ("Shift_L", "Shift_R", "Control_L", "Control_R", "Alt_L", "Alt_R"):
+            self._see_text("insert")
         self.app.schedule_save()
 
     def _on_enter(self, _e):
@@ -1208,7 +1395,7 @@ class NoteWindow(tk.Toplevel):
         self.render(keep_cursor=False)
         nrow = row + 2
         self.text.mark_set("insert", f"{nrow}.0+{self._prefix_len(lines[row+1])}c")
-        self.text.see(f"{nrow}.0")
+        self._see_text(f"{nrow}.0")
         self.d["editedAt"] = datetime.now().isoformat(timespec="microseconds")
         self.app.schedule_save()
         return "break"
@@ -1228,7 +1415,7 @@ class NoteWindow(tk.Toplevel):
             target = f"{row}.0+{self._prefix_len(prev)}c lineend"
             self.render(keep_cursor=False)
             self.text.mark_set("insert", target)
-            self.text.see("insert")
+            self._see_text("insert")
             self.d["editedAt"] = datetime.now().isoformat(timespec="microseconds")
             self.app.schedule_save()
             return "break"
@@ -1355,7 +1542,7 @@ class NoteWindow(tk.Toplevel):
             ln["checked"] = False
         self.render(keep_cursor=False)
         self.text.mark_set("insert", f"{row+1}.0+{self._prefix_len(ln)}c")
-        self.text.see("insert")
+        self._see_text("insert")
         self.d["editedAt"] = datetime.now().isoformat(timespec="microseconds")
         self.app.schedule_save()
 
@@ -1363,7 +1550,7 @@ class NoteWindow(tk.Toplevel):
         self.d["lines"].insert(row + 1, {"type": "text", "text": "", "checked": False})
         self.render(keep_cursor=False)
         self.text.mark_set("insert", f"{row+2}.0")
-        self.text.see("insert")
+        self._see_text("insert")
         self.d["editedAt"] = datetime.now().isoformat(timespec="microseconds")
         self.app.schedule_save()
 
@@ -1375,7 +1562,7 @@ class NoteWindow(tk.Toplevel):
         self.render(keep_cursor=False)
         row = min(row, len(self.d["lines"]) - 1)
         self.text.mark_set("insert", f"{row+1}.{self._prefix_len(self.d['lines'][row])}")
-        self.text.see("insert")
+        self._see_text("insert")
         self.d["editedAt"] = datetime.now().isoformat(timespec="microseconds")
         self.app.schedule_save()
 
