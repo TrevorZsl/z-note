@@ -48,6 +48,70 @@ class NoteEditingTests(unittest.TestCase):
         self.assertEqual((note.d["w"], note.d["h"]), (543, 477))
         self.assertEqual((note.winfo_width(), note.winfo_height()), (543, 477))
 
+    def test_show_all_raises_notes_and_preserves_pinning(self):
+        import subprocess
+        import sys
+
+        def window_order():
+            handles = []
+            callback = main.ctypes.WINFUNCTYPE(main.wintypes.BOOL, main.wintypes.HWND,
+                                              main.wintypes.LPARAM)(
+                lambda hwnd, _: handles.append(hwnd) or True)
+            main.user32.EnumWindows(callback, 0)
+            return handles
+
+        pinned = self.app.new_note()
+        self.note.set_z("bottom")
+        other = subprocess.Popen([sys.executable, "-c", (
+            "import tkinter as tk; root = tk.Tk(); "
+            "root.geometry('300x240+30+30'); root.update(); "
+            "print(root.winfo_id(), flush=True); root.mainloop()")],
+            stdout=subprocess.PIPE, text=True)
+        def close_other():
+            other.terminate()
+            other.wait(timeout=5)
+            other.stdout.close()
+        self.addCleanup(close_other)
+        other_id = int(other.stdout.readline())
+        other_hwnd = main.user32.GetParent(other_id) or other_id
+        def raise_other():
+            for layer in (-1, -2):  # HWND_TOPMOST / HWND_NOTOPMOST
+                self.assertTrue(main.user32.SetWindowPos(
+                    other_hwnd, layer, 0, 0, 0, 0, main.SWP_NOMOVE | main.SWP_NOSIZE | 0x10))
+        self.app.toggle_all()
+        raise_other()
+        self.app.root.update()
+
+        self.app.toggle_all()
+        self.app.root.update()
+        self.app.root.after(1300, self.app.root.quit)
+        self.app.root.mainloop()
+        order = window_order()
+        for note in (self.note, pinned):
+            self.assertTrue(note.d["visible"])
+            self.assertLess(order.index(note.hwnd), order.index(other_hwnd))
+        self.assertEqual(self.note.d["z"], "bottom")
+        self.assertEqual(self.note.attributes("-topmost"), 0)
+        self.assertFalse(main.user32.GetWindowLongPtrW(self.note.hwnd, -20) & 0x8)
+        self.assertEqual(pinned.d["z"], "top")
+        self.assertEqual(pinned.attributes("-topmost"), 1)
+
+        raise_other()
+        self.app.root.update()
+        order = window_order()
+        self.assertGreater(order.index(self.note.hwnd), order.index(other_hwnd))
+        self.assertLess(order.index(pinned.hwnd), order.index(other_hwnd))
+        self.app.toggle_all()
+        self.app.root.update()
+        for note in (self.note, pinned):
+            self.assertFalse(note.d["visible"])
+            self.assertEqual(note.state(), "withdrawn")
+        self.app.toggle_all()
+        self.app.root.update()
+        order = window_order()
+        for note in (self.note, pinned):
+            self.assertLess(order.index(note.hwnd), order.index(other_hwnd))
+
     def test_note_blank_regions_move_window_and_save_position(self):
         note = self.note
         w, h = note.winfo_width(), note.winfo_height()

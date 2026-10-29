@@ -56,7 +56,6 @@ user32.RegisterHotKey.argtypes = [wintypes.HWND, ctypes.c_int, wintypes.UINT, wi
 user32.RegisterHotKey.restype = wintypes.BOOL
 user32.UnregisterHotKey.argtypes = [wintypes.HWND, ctypes.c_int]
 user32.UnregisterHotKey.restype = wintypes.BOOL
-user32.GetForegroundWindow.restype = wintypes.HWND
 user32.GetFocus.restype = wintypes.HWND
 
 # 小号拖动/缩放光标：Tk 每次指针更新（含 250ms 轮询）都会无条件把部件光标重设回系统标准尺寸
@@ -183,8 +182,7 @@ dwmapi = ctypes.WinDLL("dwmapi")
 dwmapi.DwmSetWindowAttribute.argtypes = [wintypes.HWND, wintypes.DWORD, ctypes.c_void_p, wintypes.DWORD]
 dwmapi.DwmSetWindowAttribute.restype = ctypes.c_long
 
-HWND_BOTTOM = wintypes.HWND(1)
-SWP_NOSIZE, SWP_NOMOVE, SWP_NOACTIVATE = 0x0001, 0x0002, 0x0010
+SWP_NOSIZE, SWP_NOMOVE = 0x0001, 0x0002
 WM_HOTKEY = 0x0312
 HOTKEY_ACTIONS = {"new": (1, "newHotkey", "Ctrl+Alt+N"),
                   "toggle": (2, "toggleHotkey", "Ctrl+Alt+H")}
@@ -596,7 +594,6 @@ class NoteWindow(tk.Toplevel):
         t.bind("<ButtonRelease-1>", self._stop_selection_scroll, add="+")
         t.bind("<Unmap>", self._stop_selection_scroll)
         t.bind("<Unmap>", self._stop_wheel, add="+")
-        self.bind("<FocusOut>", lambda e: self.sink_if_bottom())
 
         self.render()
         self.update_idletasks()
@@ -1657,16 +1654,6 @@ class NoteWindow(tk.Toplevel):
     def apply_z(self):
         top = self.d["z"] == "top"
         self.attributes("-topmost", top)
-        if not top:
-            h = getattr(self, "hwnd", None) or user32.GetParent(self.winfo_id())
-            user32.SetWindowPos(h, HWND_BOTTOM, 0, 0, 0, 0,
-                                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE)
-
-    def sink_if_bottom(self):
-        if self.d["z"] == "bottom" and getattr(self, "hwnd", None):
-            if user32.GetForegroundWindow() != self.hwnd:
-                user32.SetWindowPos(self.hwnd, HWND_BOTTOM, 0, 0, 0, 0,
-                                    SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE)
 
     def hide(self):
         self.d["visible"] = False
@@ -1678,7 +1665,10 @@ class NoteWindow(tk.Toplevel):
         self.deiconify()
         self.overrideredirect(True)
         self._round_window()
+        # 先前移到置顶层，再恢复原状态，确保被其他进程覆盖后也能显示到前面。
+        self.attributes("-topmost", True)
         self.apply_z()
+        self.lift()
 
     def delete_self(self):
         self.app.remove_note(self)
@@ -2370,7 +2360,6 @@ class App:
         self._start_tray()
         self._start_hotkeys()
         self.root.after(120, self._pump)
-        self.root.after(1200, self._enforce_bottom)
         self.root.protocol("WM_DELETE_WINDOW", lambda: None)
 
     # 便签管理
@@ -2682,14 +2671,6 @@ class App:
         except queue.Empty:
             pass
         self.root.after(120, self._pump)
-
-    def _enforce_bottom(self):
-        fg = user32.GetForegroundWindow()
-        for w in self.notes.values():
-            if w.d["z"] == "bottom" and w.d["visible"] and fg != w.hwnd:
-                user32.SetWindowPos(w.hwnd, HWND_BOTTOM, 0, 0, 0, 0,
-                                    SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE)
-        self.root.after(1200, self._enforce_bottom)
 
     # 保存
     def schedule_save(self):
