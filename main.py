@@ -809,7 +809,7 @@ class NoteWindow(tk.Toplevel):
     def _ime_composing(self, widget):
         if getattr(self, "_ime_native_widget", None) == widget:
             return True
-        if widget == self.text and hasattr(self, "_ime_pending") and not self._ime_pending.empty():
+        if hasattr(self, "_ime_pending") and not self._ime_pending.empty():
             return True
         if getattr(self, "_ime_active", False) and self._ime_widget == widget:
             return True
@@ -833,7 +833,7 @@ class NoteWindow(tk.Toplevel):
         def window_proc(handle, message, wparam, lparam):
             # 原生消息可能嵌套在 Tcl 调用中；这里只读 IMM 数据，不能调用 Tk。
             try:
-                if message == 0x0281 and self._ime_target == self.text:  # 正文使用行内预编辑。
+                if message == 0x0281 and self._ime_target is not None:  # 正文与标题均使用行内预编辑。
                     lparam &= ~0x80000000
                 elif message == 0x010D and self._ime_target is not None:
                     self._ime_native_widget = self._ime_target
@@ -1248,6 +1248,7 @@ class NoteWindow(tk.Toplevel):
         self._title_var.trace_add("write", lambda *_: self._draw_chip())
         self.title_chip.pack()
         self._draw_chip()
+        self._bind_ime(e)
         e.focus_force()
         e.select_range(0, "end")
 

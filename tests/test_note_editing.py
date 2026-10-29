@@ -1850,10 +1850,65 @@ class NoteEditingTests(unittest.TestCase):
         entry.insert(0, "中文标题")
         self.app.root.update()
         self.assertEqual(entry.get(), "中文标题")
-        self.assertNotEqual(self.note._ime_target, entry)
+        self.assertEqual(self.note._ime_target, entry)
         entry.event_generate("<Return>")
         self.app.root.update()
         self.assertEqual(self.note.d["title"], "中文标题")
+
+    def test_title_uses_inline_native_ime_without_system_composition_background(self):
+        note = self.note
+        note.d["title"] = "原标题"
+        note.edit_title()
+        self.app.root.update()
+        entry = note._title_editor
+        self.assertEqual(note._ime_target, entry)
+        with patch.object(main.user32, "CallWindowProcW", return_value=0) as forward:
+            note._ime_proc(note.winfo_id(), 0x0281, 1, 0xC000000F)
+            self.assertEqual(forward.call_args.args[-1], 0x4000000F)
+        note._ime_proc(note.winfo_id(), 0x010D, 0, 0)
+        with patch.object(main.imm32, "ImmGetContext", return_value=1), \
+             patch.object(main.imm32, "ImmReleaseContext"), \
+             patch.object(main.imm32, "ImmGetCompositionStringW", return_value=3), \
+             patch.object(note, "_ime_string", return_value="xin"):
+            note._ime_proc(note.winfo_id(), 0x010F, 0, 0x0008)
+        self.assertEqual(entry.get(), "原标题")  # 原生回调只排队，不操作 Tk。
+        note._pump_inline_ime()
+        self.assertEqual(entry.get(), "xin")
+        self.assertEqual(entry.cget("bg"), note._bg)
+        self.assertEqual(note.d["title"], "原标题")
+        with patch.object(main.imm32, "ImmGetContext", return_value=1), \
+             patch.object(main.imm32, "ImmReleaseContext"), \
+             patch.object(note, "_ime_string", return_value="新标题"):
+            note._ime_proc(note.winfo_id(), 0x010F, 0, 0x0800)
+        note._ime_proc(note.winfo_id(), 0x010E, 0, 0)
+        entry.event_generate("<Return>")  # 结果仍在队列时不能提前销毁输入框。
+        self.assertTrue(entry.winfo_exists())
+        note._pump_inline_ime()
+        self.assertEqual(entry.get(), "新标题")
+        entry.event_generate("<Return>")
+        self.app.root.update()
+        self.assertEqual(note.d["title"], "新标题")
+
+    def test_title_focus_out_waits_for_ime_result_or_cancel(self):
+        note = self.note
+        for result in (None, "确认标题"):
+            with self.subTest(result=result):
+                note.d["title"] = "原标题"
+                note.edit_title()
+                self.app.root.update()
+                entry = note._title_editor
+                note._begin_preedit(entry)
+                note._replace_preedit("pinyin", 6)
+                if result is not None:
+                    note._ime_pending.put(("result", entry, result, None))
+                note._ime_pending.put(("end", entry, None, None))
+                self.text.focus_force()
+                entry.event_generate("<FocusOut>")
+                self.assertTrue(entry.winfo_exists())
+                note._pump_inline_ime()
+                self.app.root.update()
+                self.assertEqual(note.d["title"], result or "原标题")
+                self.assertIsNone(note._title_editor)
 
     def test_footer_labels_center_in_their_own_side_regions_at_different_widths(self):
         self.note.status.config(font=(main.UI_FONT, 14))
