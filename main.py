@@ -2,7 +2,7 @@
 """z-note 雏形：常驻托盘的桌面便签（自由文本 + 可勾选待办）。
 运行: python main.py   依赖: pystray (pip install pystray)
 """
-import ctypes, json, math, os, queue, sys, threading, uuid, winreg
+import atexit, ctypes, json, math, os, queue, sys, threading, uuid, winreg
 from copy import deepcopy
 from datetime import datetime
 import tkinter as tk
@@ -52,6 +52,126 @@ user32.UnregisterHotKey.argtypes = [wintypes.HWND, ctypes.c_int]
 user32.UnregisterHotKey.restype = wintypes.BOOL
 user32.GetForegroundWindow.restype = wintypes.HWND
 user32.GetFocus.restype = wintypes.HWND
+
+# 小号拖动/缩放光标：Tk 每次指针更新（含 250ms 轮询）都会无条件把部件光标重设回系统标准尺寸
+# 且绕过拦截，无法在应用内定点替换；改为指针悬停拖动区时临时把系统 move + 四向缩放光标
+# 整体换成 75% 等比版——Tk 缓存的共享句柄会直接渲染替换后的图像，离开拖动区即整体恢复
+try:
+    ctypes.windll.shcore.SetProcessDpiAwareness(1)  # 提前到模块级：光标尺寸要按真实 DPI 取
+except Exception:
+    pass
+user32.LoadCursorW.argtypes = [wintypes.HANDLE, wintypes.HANDLE]
+user32.LoadCursorW.restype = wintypes.HANDLE
+user32.CopyImage.argtypes = [wintypes.HANDLE, wintypes.UINT, ctypes.c_int, ctypes.c_int, wintypes.UINT]
+user32.CopyImage.restype = wintypes.HANDLE
+user32.SetSystemCursor.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+user32.SetSystemCursor.restype = wintypes.BOOL
+user32.SystemParametersInfoW.argtypes = [wintypes.UINT, wintypes.UINT, wintypes.LPVOID, wintypes.UINT]
+user32.SystemParametersInfoW.restype = wintypes.BOOL
+user32.GetKeyState.argtypes = [ctypes.c_int]
+user32.GetKeyState.restype = ctypes.c_short
+SPI_SETICURSORS = 0x0057
+SM_CX, SM_CY = 13, 14                                   # SM_CXCURSOR / SM_CYCURSOR
+user32.SystemParametersInfoW(SPI_SETICURSORS, 0, None, 3)   # 自愈上次异常退出可能残留的替换
+_SWAP_IDS = (32646, 32644, 32645, 32642, 32643)   # move / 左右 / 上下 / ↖↘ / ↗↙
+MOVE_SIZE = max(12, user32.GetSystemMetrics(SM_CX) * 3 // 4)
+_HCUR_SMALL = {oid: user32.CopyImage(user32.LoadCursorW(None, wintypes.HANDLE(oid)), 2, MOVE_SIZE, MOVE_SIZE, 0) for oid in _SWAP_IDS}
+_HCUR_ORIG = {oid: user32.CopyImage(user32.LoadCursorW(None, wintypes.HANDLE(oid)), 2,
+                                    user32.GetSystemMetrics(SM_CX), user32.GetSystemMetrics(SM_CY), 0)
+              for oid in _SWAP_IDS}
+_OUR_HANDLES = {user32.LoadCursorW(None, wintypes.HANDLE(oid)) for oid in _SWAP_IDS}
+
+_DRAG_HWNS = set()                  # 需要小号光标的拖动区控件句柄
+_watch_root = None                  # 看门狗锚点（Tk root），全局只跑一个
+_CURSOR_SWAPPED = False             # 五个系统光标当前是否处于替换态
+
+class _ICONINFO(ctypes.Structure):
+    _fields_ = [("fIcon", wintypes.BOOL), ("xHotspot", wintypes.DWORD), ("yHotspot", wintypes.DWORD),
+                ("hbmMask", wintypes.HBITMAP), ("hbmColor", wintypes.HBITMAP)]
+
+class _BITMAP(ctypes.Structure):
+    _fields_ = [("bmType", ctypes.c_long), ("bmWidth", ctypes.c_long), ("bmHeight", ctypes.c_long),
+                ("bmWidthBytes", ctypes.c_long), ("bmPlanes", ctypes.c_ushort),
+                ("bmBitsPixel", ctypes.c_ushort), ("bmBits", ctypes.c_void_p)]
+
+class _CURSORINFO(ctypes.Structure):
+    _fields_ = [("cbSize", wintypes.DWORD), ("flags", wintypes.DWORD),
+                ("hCursor", wintypes.HANDLE), ("ptScreenPos", wintypes.POINT)]
+
+gdi32 = ctypes.WinDLL("gdi32")
+gdi32.GetObjectW.argtypes = [wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p]
+gdi32.DeleteObject.argtypes = [wintypes.HANDLE]
+user32.GetCursorInfo.argtypes = [ctypes.POINTER(_CURSORINFO)]
+user32.GetIconInfo.argtypes = [wintypes.HANDLE, ctypes.c_void_p]
+user32.WindowFromPoint.argtypes = [wintypes.POINT]
+user32.WindowFromPoint.restype = wintypes.HWND
+
+def _pointer_on_drag():
+    """指针是否位于拖动区上（用 WindowFromPoint 命中测试；Tk 的指针状态在轮询时会瞬时出错）"""
+    pt = wintypes.POINT()
+    return bool(user32.GetCursorPos(ctypes.byref(pt))) and user32.WindowFromPoint(pt) in _DRAG_HWNS
+
+def _cursor_is_small():
+    ci = _CURSORINFO()
+    ci.cbSize = ctypes.sizeof(_CURSORINFO)
+    if not user32.GetCursorInfo(ctypes.byref(ci)) or not ci.hCursor:
+        return True  # 查询失败时不动，避免误替换
+    ii = _ICONINFO()
+    if not user32.GetIconInfo(ci.hCursor, ctypes.byref(ii)):
+        return True
+    bm = _BITMAP()
+    gdi32.GetObjectW(ii.hbmColor, ctypes.sizeof(_BITMAP), ctypes.byref(bm))
+    gdi32.DeleteObject(ii.hbmMask)
+    gdi32.DeleteObject(ii.hbmColor)
+    return (bm.bmWidth, bm.bmHeight) == (MOVE_SIZE, MOVE_SIZE)
+
+def _drag_in_progress():
+    """按住左键且显示的是我们替换过的光标 => 正在拖动/缩放便签，指针出界也不恢复"""
+    ci = _CURSORINFO()
+    ci.cbSize = ctypes.sizeof(_CURSORINFO)
+    return (user32.GetKeyState(0x01) < 0
+            and bool(user32.GetCursorInfo(ctypes.byref(ci))) and ci.hCursor in _OUR_HANDLES)
+
+def _cursor_watch(root):
+    """兜底看门狗：Tk 的 250ms 指针轮询会偶发恢复标准光标，30ms 内纠正回小号"""
+    global _watch_root, _CURSOR_SWAPPED
+    try:
+        if _pointer_on_drag():
+            if not _cursor_is_small():
+                _cursor_small()
+        elif _CURSOR_SWAPPED and not _drag_in_progress():
+            _cursor_restore()
+        root.after(30, lambda: _cursor_watch(root))
+    except Exception:
+        _watch_root = None  # root 已销毁，停止轮询
+
+def _hook_move_cursor(widget):
+    global _watch_root
+    _DRAG_HWNS.add(widget.winfo_id())
+    if _watch_root is None:
+        _watch_root = widget._root()
+        widget.after(30, lambda: _cursor_watch(_watch_root))
+
+def _cursor_small(_e=None):
+    """指针进入拖动区：五个系统光标临时整体替换为小号（SetSystemCursor 会吃掉句柄，故每次复制母本）"""
+    global _CURSOR_SWAPPED
+    for oid in _SWAP_IDS:
+        user32.SetSystemCursor(user32.CopyImage(_HCUR_SMALL[oid], 2, MOVE_SIZE, MOVE_SIZE, 0), oid)
+    _CURSOR_SWAPPED = True
+
+def _cursor_restore(_e=None):
+    """指针离开拖动区：五个系统光标恢复标准尺寸。
+    Tk 的指针轮询会对静止指针发虚假 Leave，拖动中指针出界也不恢复，先确认再动手。"""
+    global _CURSOR_SWAPPED
+    if _e is not None and (_pointer_on_drag() or _drag_in_progress()):
+        _cursor_small()
+        return
+    for oid in _SWAP_IDS:
+        user32.SetSystemCursor(user32.CopyImage(_HCUR_ORIG[oid], 2, user32.GetSystemMetrics(SM_CX),
+                                                user32.GetSystemMetrics(SM_CY), 0), oid)
+    _CURSOR_SWAPPED = False
+
+atexit.register(_cursor_restore)   # 退出时若指针仍悬停在拖动区，Leave 不会再触发，这里兜底恢复
 
 dwmapi = ctypes.WinDLL("dwmapi")
 dwmapi.DwmSetWindowAttribute.argtypes = [wintypes.HWND, wintypes.DWORD, ctypes.c_void_p, wintypes.DWORD]
@@ -409,8 +529,11 @@ class NoteWindow(tk.Toplevel):
         self.bar = tk.Frame(self, bg=self._bg)
         self.status = tk.Label(self, text="", bg=self._bg, fg=QUIET,
                                font=(UI_FONT, 9), padx=0, bd=0)
-        for w in (self.toolbar, spacer, self.title_box, self.bar, self.status):
+        for w in (self.toolbar, spacer, self.title_box, self.bar, self.status, self.cv):
             w.config(cursor="fleur")
+            _hook_move_cursor(w)
+            w.bind("<Enter>", _cursor_small)
+            w.bind("<Leave>", _cursor_restore)
             w.bind("<Button-1>", self._drag_press)
             w.bind("<B1-Motion>", self._drag_move)
             w.bind("<ButtonRelease-1>", self._drag_release)
@@ -1416,6 +1539,9 @@ class SettingsWindow(tk.Toplevel):
         title = tk.Label(header, text="设置", bg=NOTE_BG, fg="#1F2328",
                          font=(UI_FONT, 12, "bold"), cursor="fleur")
         title.pack(side="left")
+        _hook_move_cursor(title)
+        title.bind("<Enter>", _cursor_small)
+        title.bind("<Leave>", _cursor_restore)
         close = tk.Label(header, text="×", bg=NOTE_BG, fg=INK,
                          font=(UI_FONT, 17), cursor="hand2")
         close.pack(side="right", padx=(8, 2))
@@ -2365,10 +2491,6 @@ class App:
 
 def main():
     ensure_single_instance()
-    try:
-        ctypes.windll.shcore.SetProcessDpiAwareness(1)
-    except Exception:
-        pass
     App().root.mainloop()
 
 if __name__ == "__main__":
