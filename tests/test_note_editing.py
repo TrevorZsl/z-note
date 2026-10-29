@@ -1041,6 +1041,34 @@ class NoteEditingTests(unittest.TestCase):
         self.assertEqual(image.getpixel((0, 0))[3], 0)
         self.assertGreater(image.getpixel((size // 4, 1))[3], 0)
 
+    def test_caret_is_unbroken_on_both_sides_of_checkbox(self):
+        note, text = self.note, self.text
+        note.geometry("440x340+120+120")
+        text.configure(insertofftime=0)
+        text.focus_force()
+        for checked in (False, True):
+            note.d["lines"] = [{"type": "todo", "text": "删除行逻辑（三种）", "checked": checked}]
+            note.render()
+            for index in ("1.0", "1.1"):
+                with self.subTest(checked=checked, index=index):
+                    text.mark_set("insert", index)
+                    self.app.root.update()
+                    x, y, width, height = text.bbox(index)
+                    rect = (text.winfo_rootx() + x - 2, text.winfo_rooty() + y,
+                            text.winfo_rootx() + x + 2, text.winfo_rooty() + y + height)
+                    main.dwmapi.DwmFlush()
+                    with_caret = ImageGrab.grab(bbox=rect)
+                    text.configure(insertwidth=0)
+                    self.app.root.update()
+                    main.dwmapi.DwmFlush()
+                    without_caret = ImageGrab.grab(bbox=rect)
+                    difference = ImageChops.difference(with_caret, without_caret)
+                    for row in range(height):
+                        pixels = difference.crop((0, row, 4, row + 1)).getbbox()
+                        self.assertIsNotNone(pixels)
+                        self.assertEqual(pixels[2] - pixels[0], 2)
+                    text.configure(insertwidth=2)
+
     def test_todo_wraps_beside_checkbox_and_centers_one_checkbox_for_long_text(self):
         self.note.geometry("300x500")
         self.note.d["lines"] = [{"type": "todo", "text": "对话发出终止后可以重新编辑" * 2, "checked": False}]

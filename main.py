@@ -524,7 +524,6 @@ class NoteWindow(tk.Toplevel):
         self.text.place(x=0, y=0)
         self.scroll_thumb = VerticalThumb(self, self.body, self._bg)
         self._make_check_images()
-        self.text.tag_config("todo_indent", lmargin2=self._check_images[False].width() + app.base_font.measure(PREFIX_PAD))
         self.text.tag_config("done", font=self.done_font)  # 只加删除线，不改字色
         self.text.tag_config("selection_fill", background="#DCE7F3", foreground="#2B2F36")
         self.text.tag_raise("selection_fill", "sel")
@@ -793,10 +792,15 @@ class NoteWindow(tk.Toplevel):
     def _make_check_images(self):
         size = max(18, round(self.app.base_font.metrics("ascent") * 1.1))
         self._check_images = check_images(self.text, size)
-        self._check_slots = {checked: ImageTk.PhotoImage(Image.new("RGBA", (size, size)), master=self.text)
+        # 原生插入光标跨在字符边界上，勾选框子窗口不能覆盖占位符的左右边界。
+        self._check_margin = max(1, int(self.text.cget("insertwidth")))
+        slot_width = size + 2 * self._check_margin
+        self._check_slots = {checked: ImageTk.PhotoImage(Image.new("RGBA", (slot_width, size)), master=self.text)
                              for checked in (False, True)}
-        if hasattr(self, "_checkbox_widgets"):
-            self.text.tag_config("todo_indent", lmargin2=size + self.app.base_font.measure(PREFIX_PAD))
+        # Text 在左内边距处裁切光标，首行也要留出半个光标的绘制宽度。
+        caret_margin = self._check_margin // 2
+        self.text.tag_config("todo_indent", lmargin1=caret_margin,
+                             lmargin2=caret_margin + slot_width + self.app.base_font.measure(PREFIX_PAD))
 
     def _restyle(self):
         for b in self._tool_btns:
@@ -1099,7 +1103,8 @@ class NoteWindow(tk.Toplevel):
                         self._checkbox_widgets.append(box)
                     used_boxes += 1
                     box._todo_row = row
-                    box.place(x=int(self.text.cget("padx")), y=y, width=size, height=size,
+                    box.place(x=int(self.text.cget("padx")) + self._check_margin + self._check_margin // 2,
+                              y=y, width=size, height=size,
                               bordermode="ignore")
                     box.lift()
                     box.bind("<Button-1>", lambda _e, r=row-1: self.toggle_done(r))
