@@ -6,7 +6,7 @@ import atexit, ctypes, json, math, os, queue, sys, threading, time, uuid, winreg
 from copy import deepcopy
 from datetime import datetime
 import tkinter as tk
-from _tkinter import DONT_WAIT, WINDOW_EVENTS
+from _tkinter import DONT_WAIT, IDLE_EVENTS, WINDOW_EVENTS
 from tkinter import font as tkfont, messagebox
 from ctypes import wintypes
 
@@ -42,6 +42,8 @@ kernel32.WaitForSingleObject.argtypes = [wintypes.HANDLE, wintypes.DWORD]
 kernel32.WaitForSingleObject.restype = wintypes.DWORD
 user32.SetWindowPos.argtypes = [wintypes.HWND, wintypes.HWND, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int, wintypes.UINT]
 user32.SetWindowPos.restype = wintypes.BOOL
+user32.RedrawWindow.argtypes = [wintypes.HWND, ctypes.c_void_p, wintypes.HANDLE, wintypes.UINT]
+user32.RedrawWindow.restype = wintypes.BOOL
 user32.ShowWindow.argtypes = [wintypes.HWND, ctypes.c_int]
 user32.ShowWindow.restype = wintypes.BOOL
 user32.GetWindowLongPtrW.argtypes = [wintypes.HWND, ctypes.c_int]
@@ -566,7 +568,7 @@ class NoteWindow(tk.Toplevel):
         self._bind_ime(self.text)
         self._draw_chip()
 
-        self.bind("<Configure>", lambda e: self._relayout())
+        self.bind("<Configure>", lambda e: self._relayout() if e.widget == self else None)
         self.cv.bind("<Motion>", self._edge_cursor)
         self.cv.bind("<Button-1>", self._edge_press)
         self.cv.bind("<B1-Motion>", self._edge_move)
@@ -1622,7 +1624,24 @@ class NoteWindow(tk.Toplevel):
         if t:
             h = max(230, h0 - dy)
             y = y0 + h0 - h
-        self.geometry(f"{w}x{h}+{x}+{y}")
+        # 仅在这一帧布局期间启用子窗口合成，避免 Text 和勾选框分批出现在屏幕上。
+        # 常驻 WS_EX_COMPOSITED 会使 Tk 的 Expose 事件不断循环。
+        style = user32.GetWindowLongPtrW(self.hwnd, -20)
+        user32.SetWindowLongPtrW(self.hwnd, -20, style | 0x02000000)
+        try:
+            # 左/上沿缩放同时改变原点，不能把旧客户区像素复制到新位置。
+            user32.SetWindowPos(self.hwnd, None, x, y, w, h,
+                                0x0004 | 0x0010 | 0x0100)  # NOZORDER | NOACTIVATE | NOCOPYBITS
+            self.update_idletasks()
+            user32.RedrawWindow(self.hwnd, None, None, 0x0001 | 0x0080 | 0x0100)
+            # RDW_INVALIDATE | RDW_ALLCHILDREN | RDW_UPDATENOW
+        finally:
+            user32.SetWindowLongPtrW(self.hwnd, -20, style)
+        user32.RedrawWindow(self.hwnd, None, None, 0x0001 | 0x0080 | 0x0100)
+        self.text.event_generate("<Expose>", x=0, y=0,
+                                 width=self.text.winfo_width(), height=self.text.winfo_height())
+        while self.tk.dooneevent(WINDOW_EVENTS | IDLE_EVENTS | DONT_WAIT):
+            pass
         return "break"
 
     def _edge_release(self, _e):

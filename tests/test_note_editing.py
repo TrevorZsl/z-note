@@ -163,6 +163,53 @@ class NoteEditingTests(unittest.TestCase):
         self.assertEqual(note.d["lines"][1]["checked"], not checked)
         self.assertEqual((note.winfo_x(), note.winfo_y()), (x, y))
 
+    def test_top_and_left_resize_submit_complete_frames(self):
+        note = self.note
+        note.d["lines"] = [
+            {"type": "todo", "text": f"待办 {i} " + "需要处理的事情" * (i % 3 + 1),
+             "checked": i % 2 == 0} for i in range(12)]
+        note.render()
+        self.text.configure(insertwidth=0)
+        self.text.tag_add("sel", "1.3", "1.end")
+        note.lift()
+
+        def capture():
+            main.dwmapi.DwmFlush()
+            x, y = note.winfo_rootx(), note.winfo_rooty()
+            return ImageGrab.grab(bbox=(x + 24, y + 6,
+                                       x + note.winfo_width() - 24,
+                                       y + note.winfo_height() - 6))
+
+        for edge in ("top", "left", "corner"):
+            note.geometry("440x440+180+180")
+            self.app.root.update()
+            x = 2 if edge != "top" else 220
+            y = 2 if edge != "left" else 220
+            press = type("Pointer", (), {"x": x, "y": y,
+                                          "x_root": 180 + x, "y_root": 180 + y})()
+            note._edge_press(press)
+            for delta in (-45, 30, -20, 250, 0):
+                with self.subTest(edge=edge, delta=delta):
+                    move = type("Pointer", (), {
+                        "x_root": press.x_root + (delta if edge != "top" else 0),
+                        "y_root": press.y_root + (delta if edge != "left" else 0)})()
+                    note._edge_move(move)
+                    self.assertEqual(note.winfo_width(),
+                                     max(280, 440 - delta) if edge != "top" else 440)
+                    self.assertEqual(note.winfo_height(),
+                                     max(230, 440 - delta) if edge != "left" else 440)
+                    self.assertEqual(note.winfo_x() + note.winfo_width(), 620)
+                    self.assertEqual(note.winfo_y() + note.winfo_height(), 620)
+                    frame = capture()
+                    # 强制全量重画应与刚提交的缩放帧一致，不能靠后续 Expose 修补残影。
+                    note.text.event_generate("<Expose>", x=0, y=0,
+                                             width=self.text.winfo_width(),
+                                             height=self.text.winfo_height())
+                    self.app.root.update()
+                    self.assertIsNone(ImageChops.difference(frame, capture()).getbbox())
+            note._edge_release(None)
+            self.assertEqual((note.d["w"], note.d["h"]), (440, 440))
+
     def test_typing_keeps_native_text_window_visible_during_layout(self):
         self.note.d["lines"] = [{"type": "text", "text": "", "checked": False}]
         self.note.render()
