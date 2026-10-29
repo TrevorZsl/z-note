@@ -31,10 +31,6 @@ INK, QUIET = "#6B7280", "#666D75"      # 图标与状态栏的墨色（冷灰单
 
 # ---------- Win32 ----------
 user32 = ctypes.WinDLL("user32")
-user32.SendMessageW.argtypes = [wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM]
-user32.SendMessageW.restype = wintypes.LPARAM
-user32.RedrawWindow.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.RECT), wintypes.HRGN, wintypes.UINT]
-user32.RedrawWindow.restype = wintypes.BOOL
 kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
 kernel32.CreateEventW.argtypes = [ctypes.c_void_p, wintypes.BOOL, wintypes.BOOL, wintypes.LPCWSTR]
 kernel32.CreateEventW.restype = wintypes.HANDLE
@@ -1007,15 +1003,11 @@ class NoteWindow(tk.Toplevel):
         if self._layout_busy:
             return
         self._layout_busy = True
-        hwnd = self.text.winfo_id()
-        user32.SendMessageW(hwnd, 0x000B, 0, 0)  # WM_SETREDRAW：缓冲段切换期间不展示中间布局。
         try:
             self._layout_text()
             self.body.update_idletasks()
         finally:
             self._layout_busy = False
-            user32.SendMessageW(hwnd, 0x000B, 1, 0)
-            user32.RedrawWindow(hwnd, None, None, 0x0081)  # RDW_INVALIDATE | RDW_ALLCHILDREN
         if self._layout_pending:
             self._layout_pending = False
             self._queue_strikes()

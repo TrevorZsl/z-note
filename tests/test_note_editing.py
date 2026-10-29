@@ -163,6 +163,32 @@ class NoteEditingTests(unittest.TestCase):
         self.assertEqual(note.d["lines"][1]["checked"], not checked)
         self.assertEqual((note.winfo_x(), note.winfo_y()), (x, y))
 
+    def test_typing_keeps_native_text_window_visible_during_layout(self):
+        self.note.d["lines"] = [{"type": "text", "text": "", "checked": False}]
+        self.note.render()
+        self.app.root.update()
+        layout = self.note._layout_text
+        visible = []
+
+        def record_layout():
+            visible.append(bool(main.user32.GetWindowLongPtrW(
+                self.text.winfo_id(), -16) & 0x10000000))  # WS_VISIBLE
+            layout()
+
+        with patch.object(self.note, "_layout_text", side_effect=record_layout):
+            for char in "abc":
+                self.text.insert("insert", char)
+                self.note._on_keyrelease(None)
+                self.app.root.update()
+            self.note._begin_preedit(self.text)
+            self.note._replace_preedit("zhong", 5)
+            self.app.root.update()
+            self.note._finish_preedit("中")
+            self.app.root.update()
+        self.assertTrue(visible)
+        self.assertTrue(all(visible), visible)
+        self.assertEqual(self.note.d["lines"][0]["text"], "abc中")
+
     def test_body_preedit_is_inline_and_only_confirmed_text_is_saved(self):
         original = self.note.d["lines"][1]["text"]
         self.text.mark_set("insert", "2.end")
