@@ -577,6 +577,12 @@ class NoteWindow(tk.Toplevel):
         t.bind("<KeyRelease>", self._on_keyrelease)
         t.bind("<KeyPress-Return>", self._on_enter)
         t.bind("<KeyPress-BackSpace>", self._on_backspace)
+        t.bind("<<Cut>>", lambda e: self._clipboard_edit("tk_textCut"))
+        t.bind("<<Paste>>", lambda e: self._clipboard_edit("tk_textPaste"))
+        t.bind("<<Undo>>", lambda e: self._undo_edit())
+        t.bind("<<Redo>>", lambda e: self._undo_edit(redo=True))
+        t.bind("<Control-a>", self._select_all)
+        t.bind("<Control-Shift-Z>", lambda e: self._undo_edit(redo=True))
         t.bind("<Prior>", self._page_key)
         t.bind("<Next>", self._page_key)
         t.bind("<Button-1>", self._on_click)
@@ -1292,6 +1298,7 @@ class NoteWindow(tk.Toplevel):
         restored = self.text.dlineinfo(view)
         if top and restored:
             self._scroll_to(scroll_y + restored[1] + self._chunk_start - top[1] - old_chunk)
+        self._remember_edit()
 
     @staticmethod
     def _prefix_len(ln):
@@ -1309,6 +1316,53 @@ class NoteWindow(tk.Toplevel):
         self._layout_footer()
 
     # ---- 编辑事件 ----
+    def _remember_edit(self):
+        state = (deepcopy(self.d["lines"]), self.text.index("insert"))
+        if not hasattr(self, "_edit_history"):
+            self._edit_history, self._edit_redo = [state], []
+        elif self._edit_history[-1][0] != state[0]:
+            self._edit_history.append(state)
+            self._edit_redo.clear()
+        else:
+            self._edit_history[-1] = state
+
+    def _undo_edit(self, redo=False):
+        if self._ime_composing(self.text):
+            return "break"
+        self._sync_lines_from_text()
+        if redo:
+            if not self._edit_redo:
+                return "break"
+            state = self._edit_redo.pop()
+            self._edit_history.append(state)
+        else:
+            if len(self._edit_history) < 2:
+                return "break"
+            self._edit_redo.append(self._edit_history.pop())
+            state = self._edit_history[-1]
+        self.d["lines"] = deepcopy(state[0])
+        self.render(keep_cursor=False)
+        self.text.mark_set("insert", state[1])
+        self._see_text("insert")
+        self.d["editedAt"] = datetime.now().isoformat(timespec="microseconds")
+        self.app.schedule_save()
+        return "break"
+
+    def _clipboard_edit(self, command):
+        if self._ime_composing(self.text):
+            return "break"
+        self._sync_lines_from_text()
+        if command == "tk_textPaste" and self.text.tag_ranges("sel"):
+            self.text.mark_set("insert", "sel.first")
+        self.text.tk.call(command, self.text)
+        self._on_keyrelease(None)
+        return "break"
+
+    def _select_all(self, _event):
+        self.text.tag_add("sel", "1.0", "end-1c")
+        self.text.mark_set("insert", "end-1c")
+        return "break"
+
     def _paint_selection(self, _event=None):
         # 原生选区保留复制/删除语义；背景只画文字，避开勾选框和换行后的空白。
         t = self.text
@@ -1356,6 +1410,7 @@ class NoteWindow(tk.Toplevel):
                 if line["type"] == "todo":
                     t.tag_add("todo_indent", f"{row}.0", f"{row}.end")
             self.update_status()
+        self._remember_edit()
 
     def _on_keyrelease(self, _e):
         if self._ime_composing(self.text):

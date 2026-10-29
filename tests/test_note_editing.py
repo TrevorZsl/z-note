@@ -236,6 +236,103 @@ class NoteEditingTests(unittest.TestCase):
         self.assertTrue(all(visible), visible)
         self.assertEqual(self.note.d["lines"][0]["text"], "abc中")
 
+    def test_clipboard_shortcuts_sync_immediately_and_support_undo_redo(self):
+        from copy import deepcopy
+        note, text = self.note, self.text
+        original = [{"type": "todo", "text": "原来的待办", "checked": True},
+                    {"type": "todo", "text": "下一项", "checked": False}]
+        note.d["lines"] = deepcopy(original)
+        note.render()
+        text.focus_force()
+        self.app.root.update()
+        try:
+            clipboard = text.clipboard_get()
+        except main.tk.TclError:
+            clipboard = None
+        try:
+            text.clipboard_clear()
+            text.clipboard_append("粘贴第一行\n第二行")
+            text.tag_add("sel", "1.3", "1.end")
+            text.event_generate("<Control-v>")
+            pasted = deepcopy(note.d["lines"])
+            self.assertEqual([line["text"] for line in pasted],
+                             ["粘贴第一行", "第二行", "下一项"])
+            self.assertTrue(pasted[0]["checked"])
+            text.event_generate("<Control-z>")
+            self.assertEqual(note.d["lines"], original)
+            self.assertEqual(len(text.dump("1.0", "end", image=True)), 2)
+            text.event_generate("<Control-y>")
+            self.assertEqual(note.d["lines"], pasted)
+            text.event_generate("<Control-z>")
+            text.event_generate("<Control-Shift-Z>")
+            self.assertEqual(note.d["lines"], pasted)
+            text.tag_remove("sel", "1.0", "end")
+            text.tag_add("sel", "1.3", "1.end")
+            text.event_generate("<Control-c>")
+            self.assertEqual(text.clipboard_get(), "粘贴第一行")
+            text.event_generate("<Control-x>")
+            self.assertEqual(note.d["lines"][0]["text"], "")
+            text.event_generate("<Control-z>")
+            self.assertEqual(note.d["lines"], pasted)
+            text.event_generate("<Control-a>")
+            self.assertEqual(tuple(map(str, text.tag_ranges("sel"))),
+                             ("1.0", text.index("end-1c")))
+            text.clipboard_clear()
+            text.clipboard_append("替换所有内容")
+            text.event_generate("<Control-v>")
+            self.assertEqual(note.d["lines"], [
+                {"type": "text", "text": "替换所有内容", "checked": False}])
+            text.event_generate("<Control-z>")
+            self.assertEqual(note.d["lines"], pasted)
+        finally:
+            text.clipboard_clear()
+            if clipboard is not None:
+                text.clipboard_append(clipboard)
+
+    def test_undo_restores_todo_structure_and_new_edit_clears_redo(self):
+        from copy import deepcopy
+        note, text = self.note, self.text
+        note.d["lines"] = [{"type": "todo", "text": "第一项", "checked": True}]
+        note.render()
+        original = deepcopy(note.d["lines"])
+        text.mark_set("insert", "1.end")
+        note._on_enter(None)
+        split = deepcopy(note.d["lines"])
+        note._undo_edit()
+        self.assertEqual(note.d["lines"], original)
+        note._undo_edit(redo=True)
+        self.assertEqual(note.d["lines"], split)
+        note._on_backspace(None)
+        self.assertEqual(note.d["lines"], original)
+        note._undo_edit()
+        self.assertEqual(note.d["lines"], split)
+        text.insert("insert", "新的输入")
+        note._on_keyrelease(None)
+        edited = deepcopy(note.d["lines"])
+        note._undo_edit(redo=True)
+        self.assertEqual(note.d["lines"], edited)
+        note.toggle_done(0)
+        note._undo_edit()
+        self.assertTrue(note.d["lines"][0]["checked"])
+
+    def test_undo_records_confirmed_ime_text_without_preedit(self):
+        from copy import deepcopy
+        note, text = self.note, self.text
+        original = deepcopy(note.d["lines"])
+        text.mark_set("insert", "2.end")
+        note._begin_preedit(text)
+        note._replace_preedit("zhong", 5)
+        note._undo_edit()
+        self.assertEqual(note.d["lines"], original)
+        note._finish_preedit("中")
+        self.app.root.update()
+        confirmed = deepcopy(note.d["lines"])
+        self.assertEqual(confirmed[1]["text"], original[1]["text"] + "中")
+        note._undo_edit()
+        self.assertEqual(note.d["lines"], original)
+        note._undo_edit(redo=True)
+        self.assertEqual(note.d["lines"], confirmed)
+
     def test_body_preedit_is_inline_and_only_confirmed_text_is_saved(self):
         original = self.note.d["lines"][1]["text"]
         self.text.mark_set("insert", "2.end")
