@@ -23,6 +23,7 @@ NOTE_BG, NOTE_BORDER = "#FFFFFF", "#DFE2E6"
 T_COLOR = "#010203"   # 窗口透明色键（圆角外的部分透出去）
 RADIUS = 20
 EDGE = 7                              # 窗口边缘可拖拽调大小的宽度
+CORNER = RADIUS + 4                   # 四角斜向拉伸热区：整个圆角区都能触发，比 EDGE 好按
 ICON_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets", "icons")
 PREFIX_PAD = "  "                       # 勾选框后跟 2 个空格
 INK, QUIET = "#6B7280", "#666D75"      # 图标与状态栏的墨色（冷灰单色系）
@@ -1366,7 +1367,12 @@ class NoteWindow(tk.Toplevel):
     # ---- 四边八向调整大小 ----
     def _edge_hit(self, x, y):
         w, h = self.winfo_width(), self.winfo_height()
-        return x < EDGE, x > w - EDGE, y < EDGE, y > h - EDGE  # 左 右 上 下
+        l, r, t, b = x < EDGE, x > w - EDGE, y < EDGE, y > h - EDGE  # 左 右 上 下
+        if (x < CORNER or x > w - CORNER) and (y < CORNER or y > h - CORNER):
+            # 圆角区整块判定为斜向，光标与拉伸方向随所在角自动匹配
+            l, r = x < w / 2, x >= w / 2
+            t, b = y < h / 2, y >= h / 2
+        return l, r, t, b
 
     def _edge_cursor(self, e):
         l, r, t, b = self._edge_hit(e.x, e.y)
