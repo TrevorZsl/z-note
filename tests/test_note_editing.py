@@ -846,6 +846,25 @@ class NoteEditingTests(unittest.TestCase):
         self.assertEqual(self.note._checkbox_widgets[0].cget("bg"), self.note._bg)
         self.assertFalse(self.note._selection_masks)
 
+    def test_scrolling_reuses_checkbox_widgets_instead_of_recreating(self):
+        self.note.geometry("300x300")
+        self.note.d["lines"] = [{"type": "todo", "text": f"待办{i}", "checked": bool(i % 2)}
+                                for i in range(30)]
+        self.note.render()
+        self.app.root.update()
+        first_pass = list(self.note._checkbox_widgets)
+        self.assertGreater(len(first_pass), 1)
+        self.text.yview_scroll(60, "units")
+        self.app.root.update()
+        for box in self.note._checkbox_widgets:
+            self.assertIn(box, first_pass)
+        self.text.yview_scroll(-60, "units")
+        self.app.root.update()
+        for box in self.note._checkbox_widgets:
+            self.assertIn(box, first_pass)
+        self.note._checkbox_widgets[0].event_generate("<Button-1>")
+        self.assertTrue(self.note.d["lines"][0]["checked"])
+
     def test_checkbox_does_not_move_as_its_line_is_clipped_at_bottom(self):
         self.note.geometry("300x500")
         self.app.base_font.configure(size=16)

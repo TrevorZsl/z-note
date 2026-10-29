@@ -865,15 +865,8 @@ class NoteWindow(tk.Toplevel):
 
     def _draw_strikes(self):
         self._strike_job = None
-        for widget in self._strike_widgets:
-            widget.destroy()
-        self._strike_widgets.clear()
-        for widget in self._selection_masks:
-            widget.destroy()
-        self._selection_masks.clear()
-        for widget in self._checkbox_widgets:
-            widget.destroy()
-        self._checkbox_widgets.clear()
+        # 滚动时复用控件只挪位置，整批销毁重建会让勾选框先消失再出现（闪烁）。
+        used_masks = used_boxes = used_bars = 0
         for row, line in enumerate(self.d["lines"], 1):
             if line["type"] == "todo":
                 # Tk 会把软换行的选区背景画进左边距，盖回勾选框旁的留白。
@@ -889,16 +882,20 @@ class NoteWindow(tk.Toplevel):
                             break
                         start = next_start
                     if top is not None:
-                        mask = tk.Frame(self.text, bg=self._bg)
+                        if used_masks < len(self._selection_masks):
+                            mask = self._selection_masks[used_masks]
+                        else:
+                            mask = tk.Frame(self.text, bg=self._bg)
+                            for event in ("<Button-1>", "<B1-Motion>", "<ButtonRelease-1>"):
+                                mask.bind(event, lambda e, sequence=event: self.text.event_generate(
+                                    sequence, x=e.x_root - self.text.winfo_rootx(),
+                                    y=e.y_root - self.text.winfo_rooty(), time=e.time, state=e.state))
+                            self._selection_masks.append(mask)
+                        used_masks += 1
                         mask.place(x=int(self.text.cget("padx")), y=top,
                                    width=int(self.text.tag_cget("todo_indent", "lmargin2")),
                                    height=bottom - top, bordermode="ignore")
                         mask.lift()
-                        for event in ("<Button-1>", "<B1-Motion>", "<ButtonRelease-1>"):
-                            mask.bind(event, lambda e, sequence=event: self.text.event_generate(
-                                sequence, x=e.x_root - self.text.winfo_rootx(),
-                                y=e.y_root - self.text.winfo_rooty(), time=e.time, state=e.state))
-                        self._selection_masks.append(mask)
                 size = self._check_images[False].width()
                 count = self.text.count(f"{row}.0", f"{row}.end", "displaylines")
                 middle_index = (f"{row}.0 +{(count[0] + 1) // 2} display lines"
@@ -915,13 +912,19 @@ class NoteWindow(tk.Toplevel):
                 y = (middle_y + (0 if count and count[0] % 2 else full_height // 2) - size // 2
                      if middle_y is not None else None)
                 if y is not None and -size < y < self.text.winfo_height():
-                    box = tk.Label(self.text, image=self._check_images[line["checked"]],
-                                   bg=self._bg, bd=0, cursor="hand2")
+                    image = self._check_images[line["checked"]]
+                    if used_boxes < len(self._checkbox_widgets):
+                        box = self._checkbox_widgets[used_boxes]
+                        if str(box.cget("image")) != str(image):
+                            box.configure(image=image)
+                    else:
+                        box = tk.Label(self.text, image=image, bg=self._bg, bd=0, cursor="hand2")
+                        self._checkbox_widgets.append(box)
+                    used_boxes += 1
                     box.place(x=int(self.text.cget("padx")), y=y, width=size, height=size,
                               bordermode="ignore")
                     box.lift()
                     box.bind("<Button-1>", lambda _e, r=row-1: self.toggle_done(r))
-                    self._checkbox_widgets.append(box)
             if line["type"] != "todo" or not line["checked"]:
                 continue
             start = f"{row}.{self._prefix_len(line)}"
@@ -934,21 +937,33 @@ class NoteWindow(tk.Toplevel):
                 last = self.text.bbox(f"{stop}-1c") if self.text.compare(stop, ">", start) else None
                 if first and last:
                     thickness = max(2, round(self.done_font.metrics("ascent") * 0.12))
-                    bar = tk.Frame(self.text, bg="#505761", height=thickness, cursor="xterm")
+                    if used_bars < len(self._strike_widgets):
+                        bar = self._strike_widgets[used_bars]
+                    else:
+                        bar = tk.Frame(self.text, bg="#505761", height=thickness, cursor="xterm")
+                        for event in ("<Button-1>", "<B1-Motion>", "<ButtonRelease-1>"):
+                            bar.bind(event, lambda e, sequence=event: self.text.event_generate(
+                                sequence, x=e.x_root - self.text.winfo_rootx(),
+                                y=e.y_root - self.text.winfo_rooty(), time=e.time, state=e.state))
+                        self._strike_widgets.append(bar)
+                    used_bars += 1
                     display = self.text.dlineinfo(start)
                     baseline = display[1] + display[4]
                     middle = baseline - round(self.done_font.metrics("ascent") * 0.33)
                     bar.place(x=first[0], y=middle - thickness // 2,
                               width=max(1, last[0] + last[2] - first[0]),
                               height=thickness, bordermode="ignore")
-                    for event in ("<Button-1>", "<B1-Motion>", "<ButtonRelease-1>"):
-                        bar.bind(event, lambda e, sequence=event: self.text.event_generate(
-                            sequence, x=e.x_root - self.text.winfo_rootx(),
-                            y=e.y_root - self.text.winfo_rooty(), time=e.time, state=e.state))
-                    self._strike_widgets.append(bar)
                 if self.text.compare(next_start, "<=", start):
                     break
                 start = next_start
+
+        # 这次没排上的控件回收掉，池子始终只留当前需要的。
+        for pool, used in ((self._selection_masks, used_masks),
+                           (self._checkbox_widgets, used_boxes),
+                           (self._strike_widgets, used_bars)):
+            for widget in pool[used:]:
+                widget.destroy()
+            del pool[used:]
 
         if self._selection_masks:
             self.after_idle(lambda: [w.lift() for w in self._selection_masks + self._checkbox_widgets
