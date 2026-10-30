@@ -109,17 +109,17 @@ class NoteEditingTests(unittest.TestCase):
             "root.geometry('300x240+30+30'); root.update(); "
             "print(root.winfo_id(), flush=True); root.mainloop()")],
             stdout=subprocess.PIPE, text=True)
-        def close_other():
-            other.terminate()
-            other.wait(timeout=5)
-            other.stdout.close()
-        self.addCleanup(close_other)
+        def close_other(process):
+            process.terminate()
+            process.wait(timeout=5)
+            process.stdout.close()
+        self.addCleanup(close_other, other)
         other_id = int(other.stdout.readline())
         other_hwnd = main.user32.GetParent(other_id) or other_id
-        def raise_other():
+        def raise_other(hwnd=other_hwnd):
             for layer in (-1, -2):  # HWND_TOPMOST / HWND_NOTOPMOST
                 self.assertTrue(main.user32.SetWindowPos(
-                    other_hwnd, layer, 0, 0, 0, 0, main.SWP_NOMOVE | main.SWP_NOSIZE | 0x10))
+                    hwnd, layer, 0, 0, 0, 0, main.SWP_NOMOVE | main.SWP_NOSIZE | 0x10))
         self.app.hide_all()
         raise_other()
         self.app.root.update()
@@ -153,6 +153,110 @@ class NoteEditingTests(unittest.TestCase):
         order = window_order()
         for note in (self.note, pinned):
             self.assertLess(order.index(note.hwnd), order.index(other_hwnd))
+
+        second = subprocess.Popen(other.args, stdout=subprocess.PIPE, text=True)
+        self.addCleanup(close_other, second)
+        second_id = int(second.stdout.readline())
+        second_hwnd = main.user32.GetParent(second_id) or second_id
+        raise_other(second_hwnd)
+        self.app.root.update()
+        order = window_order()
+        self.assertLess(order.index(pinned.hwnd), order.index(second_hwnd))
+        self.assertLess(order.index(second_hwnd), order.index(self.note.hwnd))
+        self.assertLess(order.index(self.note.hwnd), order.index(other_hwnd))
+
+        main.user32.ShowWindow(second_hwnd, 3)  # SW_MAXIMIZE
+        self.app.root.after(300, self.app.root.quit)
+        self.app.root.mainloop()
+        order = window_order()
+        self.assertLess(order.index(second_hwnd), order.index(self.note.hwnd))
+        self.assertLess(order.index(self.note.hwnd), order.index(other_hwnd))
+        self.assertLess(order.index(pinned.hwnd), order.index(second_hwnd))
+        main.user32.ShowWindow(second_hwnd, 9)  # SW_RESTORE
+
+        pinned.set_z("bottom")
+        self.app.root.update()
+        self.assertFalse(main.user32.GetWindowLongPtrW(pinned.hwnd, -20) & 0x8)
+        self.assertLess(window_order().index(self.note.hwnd), window_order().index(other_hwnd))
+        self.app.show_all()
+        self.app.root.update()
+        for note in (self.note, pinned):
+            self.assertLess(window_order().index(note.hwnd), window_order().index(second_hwnd))
+
+    def test_minimizing_foreground_window_activates_normal_note_above_older_window(self):
+        windows = [main.tk.Toplevel(self.app.root) for _ in range(2)]
+        for window in windows:
+            window.geometry("300x240+30+30")
+        self.note.set_z("bottom")
+        self.app.root.update()
+        older, foreground = windows
+        older.focus_force()
+        self.app.root.update()
+        self.app.show_all()
+        foreground.focus_force()
+        self.app.root.update()
+        hwnd = main.user32.GetParent(foreground.winfo_id()) or foreground.winfo_id()
+        main.user32.GetForegroundWindow.restype = main.wintypes.HWND
+        if main.user32.GetForegroundWindow() != hwnd:
+            self.skipTest("Windows 未授予测试进程前台权限；需在交互式窗口中验证激活顺序")
+        main.user32.PostMessageW(hwnd, 0x0112, 0xF030, 0)  # SC_MAXIMIZE
+        self.app.root.after(200, self.app.root.quit)
+        self.app.root.mainloop()
+        main.user32.PostMessageW(hwnd, 0x0112, 0xF020, 0)  # SC_MINIMIZE
+        self.app.root.after(300, self.app.root.quit)
+        self.app.root.mainloop()
+        self.assertTrue(main.user32.IsIconic(hwnd))
+        self.assertEqual(main.user32.GetForegroundWindow(), self.note.hwnd)
+        order = []
+        callback = main.ctypes.WINFUNCTYPE(main.wintypes.BOOL, main.wintypes.HWND,
+                                          main.wintypes.LPARAM)(lambda h, _: order.append(h) or True)
+        main.user32.EnumWindows(callback, 0)
+        older_hwnd = main.user32.GetParent(older.winfo_id()) or older.winfo_id()
+        self.assertLess(order.index(self.note.hwnd), order.index(older_hwnd))
+
+    def test_normal_note_show_and_unpin_keep_other_notes_pinned(self):
+        pinned = self.app.new_note()
+        pinned.set_z("top")
+        normal = self.app.new_note()
+        for _ in range(2):
+            normal.show()
+            self.note.set_z("bottom")
+            self.note.set_z("top")
+            self.note.set_z("bottom")
+            self.app.hide_all()
+            self.app.show_all()
+            self.app.root.update()
+            self.assertTrue(main.user32.GetWindowLongPtrW(pinned.hwnd, -20) & 0x8)
+            for note in (normal, self.note):
+                self.assertFalse(main.user32.GetWindowLongPtrW(note.hwnd, -20) & 0x8)
+
+    def test_activating_pinned_note_does_not_raise_normal_note_with_it(self):
+        self.note.set_z("bottom")
+        pinned = self.app.new_note()
+        pinned.set_z("top")
+        blocker = main.tk.Toplevel(self.app.root)
+        blocker.geometry("300x240+30+30")
+        self.app.root.update()
+        blocker.lift()
+        self.app.root.update()
+        blocker_hwnd = main.user32.GetParent(blocker.winfo_id()) or blocker.winfo_id()
+
+        def order():
+            handles = []
+            callback = main.ctypes.WINFUNCTYPE(main.wintypes.BOOL, main.wintypes.HWND,
+                main.wintypes.LPARAM)(lambda h, _: handles.append(h) or True)
+            main.user32.EnumWindows(callback, 0)
+            return handles
+
+        before = order()
+        self.assertGreater(before.index(self.note.hwnd), before.index(blocker_hwnd))
+        pinned.text.focus_force()
+        self.app.root.update()
+        after = order()
+        self.assertGreater(after.index(self.note.hwnd), after.index(blocker_hwnd))
+        self.assertLess(after.index(pinned.hwnd), after.index(blocker_hwnd))
+        self.assertNotEqual(main.user32.GetWindowLongPtrW(self.note.hwnd, -8),
+                            main.user32.GetWindowLongPtrW(pinned.hwnd, -8))
 
     def test_note_blank_regions_move_window_and_save_position(self):
         note = self.note
@@ -515,8 +619,12 @@ class NoteEditingTests(unittest.TestCase):
                 hwnd = main.user32.GetParent(note.winfo_id()) or note.winfo_id()
                 style = main.user32.GetWindowLongPtrW(hwnd, -20)
                 self.assertEqual(note.hwnd, hwnd)
-                self.assertTrue(style & 0x80)  # WS_EX_TOOLWINDOW
+                self.assertFalse(style & 0x80)  # WS_EX_TOOLWINDOW 会导致便签被跳过。
                 self.assertFalse(style & 0x40000)  # WS_EX_APPWINDOW
+                owner = main.user32.GetWindowLongPtrW(hwnd, -8)  # GWLP_HWNDPARENT
+                self.assertEqual(owner, note._owner_hwnd)
+                self.assertTrue(main.user32.IsWindow(owner))
+                self.assertFalse(main.user32.IsWindowVisible(owner))
                 note.hide()
                 note.show()
                 self.app.root.update()
@@ -525,6 +633,13 @@ class NoteEditingTests(unittest.TestCase):
         self.assertTrue(style & 0x40000)
         self.assertFalse(style & 0x80)
         settings.destroy()
+
+    def test_destroying_note_releases_its_hidden_owner(self):
+        note = self.app.new_note()
+        owner = note._owner_hwnd
+        self.assertTrue(main.user32.IsWindow(owner))
+        note.destroy()
+        self.assertFalse(main.user32.IsWindow(owner))
 
     def test_settings_slider_and_window_drag(self):
         settings = main.SettingsWindow(self.app)

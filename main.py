@@ -50,6 +50,11 @@ user32.GetWindowLongPtrW.argtypes = [wintypes.HWND, ctypes.c_int]
 user32.GetWindowLongPtrW.restype = ctypes.c_ssize_t
 user32.GetParent.argtypes = [wintypes.HWND]
 user32.GetParent.restype = wintypes.HWND
+user32.CreateWindowExW.argtypes = [wintypes.DWORD, wintypes.LPCWSTR, wintypes.LPCWSTR,
+    wintypes.DWORD, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int,
+    wintypes.HWND, wintypes.HMENU, wintypes.HINSTANCE, wintypes.LPVOID]
+user32.CreateWindowExW.restype = wintypes.HWND
+user32.DestroyWindow.argtypes = [wintypes.HWND]
 user32.RegisterHotKey.argtypes = [wintypes.HWND, ctypes.c_int, wintypes.UINT, wintypes.UINT]
 user32.RegisterHotKey.restype = wintypes.BOOL
 user32.UnregisterHotKey.argtypes = [wintypes.HWND, ctypes.c_int]
@@ -472,7 +477,6 @@ class NoteWindow(tk.Toplevel):
         self.geometry(f"{data['w']}x{data['h']}+{data['x']}+{data['y']}")
         self.attributes("-alpha", data["opacity"])
         self.overrideredirect(True)
-        self.attributes("-toolwindow", True)
 
         # 画布画圆角底板，控件都放圆角内部
         self.cv = tk.Canvas(self, bg=self._bg, highlightthickness=0, bd=0)
@@ -614,6 +618,11 @@ class NoteWindow(tk.Toplevel):
         self.update_idletasks()
         self._relayout()
         self.hwnd = user32.GetParent(self.winfo_id()) or self.winfo_id()
+        # 每张便签独立成组，激活一张时不能连带前移其他便签。
+        self._owner_hwnd = user32.CreateWindowExW(
+            0, "STATIC", None, 0x80000000, 0, 0, 0, 0, None, None, None, None)
+        if not self._owner_hwnd:
+            raise ctypes.WinError()
         self._round_window()
         self._install_inline_ime()
         self.apply_z()
@@ -803,6 +812,7 @@ class NoteWindow(tk.Toplevel):
             self.after_cancel(self._ime_pump_job)
             user32.SetWindowLongPtrW(self.winfo_id(), -4, self._ime_old_proc)
         super().destroy()
+        user32.DestroyWindow(self._owner_hwnd)
 
     def _round_window(self):
         # 由 DWM 抗锯齿裁切外框，避免透明色键的硬像素边缘。
@@ -1796,6 +1806,10 @@ class NoteWindow(tk.Toplevel):
     def apply_z(self):
         top = self.d["z"] == "top"
         self.attributes("-topmost", top)
+        # 隐藏的所有者可隐藏任务栏；工具窗口会被最小化后的激活顺序跳过。
+        user32.SetWindowLongPtrW(self.hwnd, -8, self._owner_hwnd)  # GWLP_HWNDPARENT
+        style = user32.GetWindowLongPtrW(self.hwnd, -20)
+        user32.SetWindowLongPtrW(self.hwnd, -20, style & ~0x80)  # WS_EX_TOOLWINDOW
 
     def hide(self):
         self.d["visible"] = False
