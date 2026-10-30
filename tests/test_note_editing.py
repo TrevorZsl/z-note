@@ -1379,6 +1379,33 @@ class NoteEditingTests(unittest.TestCase):
             if clipboard is not None:
                 text.clipboard_append(clipboard)
 
+    def test_clicking_outside_checkbox_does_not_toggle_todo(self):
+        note, text = self.note, self.text
+        note.geometry("340x500")
+        for content in ("abc", "long text " * 20):
+            note.d["lines"] = [{"type": "todo", "text": content, "checked": False}]
+            note.render()
+            self.app.root.update()
+            box = note._checkbox_widgets[0]
+            x, y = box.winfo_x(), box.winfo_y()
+            width, height = box.winfo_width(), box.winfo_height()
+            points = ((x - 1, y + height // 2),
+                      (x + width + 2, y + height // 2),
+                      (x + width // 2, y - 1),
+                      (x + width // 2, y + height + 1))
+            for px, py in points:
+                with self.subTest(content=content, point=(px, py)):
+                    text.event_generate("<Button-1>", x=px, y=py)
+                    text.event_generate("<ButtonRelease-1>", x=px, y=py)
+                    self.app.root.update()
+                    self.assertFalse(note.d["lines"][0]["checked"])
+                    self.assertGreaterEqual(int(text.index("insert").split(".")[1]), 3)
+            for px, py in ((width // 2, height // 2), (1, height // 2)):
+                checked = note.d["lines"][0]["checked"]
+                box.event_generate("<Button-1>", x=px, y=py)
+                self.app.root.update()
+                self.assertEqual(note.d["lines"][0]["checked"], not checked)
+
     def test_todo_wraps_beside_checkbox_and_centers_one_checkbox_for_long_text(self):
         self.note.geometry("300x500")
         self.note.d["lines"] = [{"type": "todo", "text": "对话发出终止后可以重新编辑" * 2, "checked": False}]

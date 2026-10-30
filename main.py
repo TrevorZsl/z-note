@@ -1536,19 +1536,6 @@ class NoteWindow(tk.Toplevel):
 
     def _on_click(self, e):
         self.focus_set(); self.text.focus_set()
-        try:
-            row, col = self._row_col(self.text.index(f"@{e.x},{e.y}"))
-        except Exception:
-            return None
-        lines = self.d["lines"]
-        if row >= len(lines):
-            return None
-        ln = lines[row]
-        pre = self._prefix_len(ln)
-        if pre and col < pre:  # 点在勾选框上
-            self.toggle_done(row)
-            return "break"
-        return None
 
     def _on_rightclick(self, e):
         self.focus_set(); self.text.focus_set()
