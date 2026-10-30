@@ -1223,120 +1223,118 @@ class NoteEditingTests(unittest.TestCase):
         self.assertEqual(image.getpixel((0, 0))[3], 0)
         self.assertGreater(image.getpixel((size // 4, 1))[3], 0)
 
-    def test_caret_is_unbroken_on_both_sides_of_checkbox(self):
-        note, text = self.note, self.text
-        note.geometry("440x340+120+120")
-        text.configure(insertofftime=0)
-        text.focus_force()
-        for checked in (False, True):
-            note.d["lines"] = [{"type": "todo", "text": "删除行逻辑（三种）", "checked": checked}]
-            note.render()
-            for index in ("1.0", "1.1"):
-                with self.subTest(checked=checked, index=index):
-                    text.mark_set("insert", index)
-                    self.app.root.update()
-                    note._update_prefix_caret()
-                    self.app.root.update()
-                    caret = note._prefix_caret
-                    x, y, height = caret.winfo_x() + 1, caret.winfo_y(), caret.winfo_height()
-                    rect = (text.winfo_rootx() + x - 2, text.winfo_rooty() + y,
-                            text.winfo_rootx() + x + 2, text.winfo_rooty() + y + height)
-                    main.dwmapi.DwmFlush()
-                    with_caret = ImageGrab.grab(bbox=rect)
-                    text.configure(insertwidth=0)
-                    note._update_prefix_caret()
-                    self.app.root.update()
-                    main.dwmapi.DwmFlush()
-                    without_caret = ImageGrab.grab(bbox=rect)
-                    difference = ImageChops.difference(with_caret, without_caret)
-                    for row in range(height):
-                        pixels = difference.crop((0, row, 4, row + 1)).getbbox()
-                        self.assertIsNotNone(pixels)
-                        self.assertEqual(pixels[2] - pixels[0], 2)
-                    text.configure(insertwidth=2)
+    def test_new_and_restored_todo_cursor_starts_after_checkbox(self):
+        note = self.app.new_note()
+        self.assertEqual(note.text.index("insert"), "1.3")
+        note.text.focus_force()
+        self.app.root.update()
+        note.text.event_generate("<KeyPress-a>")
+        note.text.event_generate("<KeyRelease-a>")
+        self.assertEqual(note.d["lines"], [
+            {"type": "todo", "text": "a", "checked": False}])
+        restored = main.NoteWindow(self.app, dict(note.d))
+        try:
+            self.assertEqual(restored.text.index("insert"), "1.3")
+        finally:
+            restored.destroy()
 
-    def test_prefix_arrows_skip_padding_and_preserve_shift_selection(self):
+    def test_todo_navigation_cannot_enter_checkbox_prefix(self):
         note, text = self.note, self.text
-        note.d["lines"] = [{"type": "todo", "text": "发送出消息的时候页面默认回到最上方", "checked": False}]
+        note.d["lines"] = [
+            {"type": "todo", "text": "abc", "checked": False},
+            {"type": "todo", "text": "", "checked": True}]
         note.render()
         text.focus_force()
         self.app.root.update()
-        text.mark_set("insert", "1.3")
-        for sequence, expected in (("<Left>", "1.1"), ("<Left>", "1.0"),
-                                   ("<Right>", "1.1"), ("<Right>", "1.3"),
-                                   ("<Right>", "1.4")):
-            text.event_generate(sequence)
-            self.app.root.update()
-            if expected in ("1.0", "1.1"):
-                self.assertTrue(note._prefix_caret.winfo_manager())
-            else:
-                self.assertFalse(note._prefix_caret.winfo_manager())
-            text.event_generate("<KeyRelease>")
-            self.app.root.update()
-            self.assertEqual(text.index("insert"), expected)
+        for sequence in ("<Left>", "<Shift-Left>", "<Control-Left>",
+                         "<Home>", "<Control-Home>", "<Up>", "<Down>"):
+            with self.subTest(sequence=sequence):
+                text.tag_remove("sel", "1.0", "end")
+                text.mark_set("insert", "1.3")
+                text.event_generate(sequence)
+                # 不等待 idle：连续按键也不能在前缀里输入。
+                self.assertGreaterEqual(int(text.index("insert").split(".")[1]), 3)
+        text.tag_remove("sel", "1.0", "end")
         text.mark_set("insert", "1.3")
         text.event_generate("<Shift-Left>")
-        self.app.root.update()
-        self.assertEqual(text.index("insert"), "1.1")
-        self.assertEqual(tuple(map(str, text.tag_ranges("sel"))), ("1.1", "1.3"))
-        text.event_generate("<Shift-Right>")
-        self.app.root.update()
-        self.assertEqual(text.index("insert"), "1.3")
         self.assertFalse(text.tag_ranges("sel"))
-        self.assertEqual(note.d["lines"][0]["text"], "发送出消息的时候页面默认回到最上方")
+        text.mark_set("insert", "1.4")
+        text.event_generate("<Shift-Left>")
+        self.assertEqual(tuple(map(str, text.tag_ranges("sel"))), ("1.3", "1.4"))
+        text.event_generate("<Shift-Right>")
+        self.assertFalse(text.tag_ranges("sel"))
+        text.event_generate("<Control-a>")
+        self.assertEqual(tuple(map(str, text.tag_ranges("sel"))), ("1.0", "2.3"))
 
-    def test_multiline_prefix_caret_tracks_checkbox_and_restores_native_text_caret(self):
-        note, text = self.note, self.text
-        note.geometry("300x500")
-        text.focus_force()
-        for checked in (False, True):
-            note.d["lines"] = [{"type": "todo", "text": "发送出消息的时候页面默认回到最上方" * 4,
-                                "checked": checked}]
-            note.render()
-            self.app.root.update()
-            box = note._checkbox_widgets[0]
-            for index in ("1.0", "1.1", "1.2"):
-                text.mark_set("insert", index)
-                note._update_prefix_caret()
-                self.app.root.update_idletasks()
-                caret = note._prefix_caret
-                self.assertEqual(caret.winfo_y(), box.winfo_y())
-                self.assertEqual(caret.winfo_height(), box.winfo_height())
-                if index == "1.0":
-                    self.assertLessEqual(caret.winfo_x() + caret.winfo_width(), box.winfo_x())
-                else:
-                    self.assertGreaterEqual(caret.winfo_x(), box.winfo_x() + box.winfo_width())
-                self.assertEqual(text.cget("insertbackground"), note._bg)
-            text.mark_set("insert", "1.3")
-            note._update_prefix_caret()
-            self.assertFalse(note._prefix_caret.winfo_manager())
-            self.assertEqual(text.cget("insertbackground"), note._caret_color)
-        text.mark_set("insert", "1.0")
-        note._update_prefix_caret()
-        note._blink_prefix_caret()
-        self.assertEqual(note._prefix_caret.cget("bg"), note._bg)
-        note._update_prefix_caret()
-        note.title_box.focus_force()
-        self.app.root.update()
-        self.assertFalse(note._prefix_caret.winfo_manager())
-        self.assertIsNone(note._prefix_caret_job)
-
-    def test_prefix_navigation_scrolls_to_checkbox_in_long_todo(self):
-        note, text = self.note, self.text
-        note.geometry("300x250")
-        note.d["lines"] = [{"type": "todo", "text": "啊" * 140, "checked": False}]
-        note.render()
+    def test_first_todo_backspace_does_not_delete_checkbox(self):
+        note = self.app.new_note()
+        text = note.text
         text.focus_force()
         self.app.root.update()
         text.mark_set("insert", "1.3")
-        text.event_generate("<Left>")
-        text.event_generate("<KeyRelease>")
+        for _ in range(4):
+            text.event_generate("<BackSpace>")
+            text.event_generate("<KeyRelease-BackSpace>")
+        self.assertEqual(text.index("insert"), "1.3")
+        self.assertEqual(note.d["lines"], [
+            {"type": "todo", "text": "", "checked": False}])
+        self.assertEqual(len(text.dump("1.0", "end", image=True)), 1)
+
+    def test_mouse_and_home_keep_cursor_in_todo_body_before_typing(self):
+        note, text = self.note, self.text
+        note.d["lines"] = [{"type": "todo", "text": "abc", "checked": False}]
+        note.render()
+        text.focus_force()
         self.app.root.update()
-        caret = note._prefix_caret
-        self.assertTrue(caret.winfo_manager())
-        self.assertGreaterEqual(caret.winfo_rooty(), note.body.winfo_rooty())
-        self.assertLessEqual(caret.winfo_rooty() + caret.winfo_height(),
-                             note.body.winfo_rooty() + note.body.winfo_height())
+        box = text.bbox("1.0")
+        text.event_generate("<B1-Motion>", x=box[0], y=box[1])
+        self.assertEqual(text.index("insert"), "1.3")
+        text.tag_remove("sel", "1.0", "end")
+        text.event_generate("<Home>")
+        text.event_generate("<KeyPress-x>")
+        text.event_generate("<KeyRelease-x>")
+        self.assertEqual(note.d["lines"][0]["type"], "todo")
+        self.assertEqual(note.d["lines"][0]["text"], "xabc")
+        text.event_generate("<Home>")
+        note._begin_preedit(text)
+        note._replace_preedit("zhong", 5)
+        note._finish_preedit("中")
+        self.app.root.update()
+        self.assertEqual(note.d["lines"][0]["type"], "todo")
+        self.assertEqual(note.d["lines"][0]["text"], "中xabc")
+
+    def test_paste_after_home_preserves_todo_and_plain_text_navigation(self):
+        note, text = self.note, self.text
+        note.d["lines"] = [
+            {"type": "todo", "text": "abc", "checked": False},
+            {"type": "text", "text": "plain", "checked": False}]
+        note.render()
+        text.focus_force()
+        self.app.root.update()
+        try:
+            clipboard = text.clipboard_get()
+        except main.tk.TclError:
+            clipboard = None
+        try:
+            text.clipboard_clear()
+            text.clipboard_append("pasted")
+            text.mark_set("insert", "1.end")
+            text.event_generate("<Home>")
+            text.event_generate("<<Paste>>")
+            self.assertEqual(note.d["lines"][0],
+                             {"type": "todo", "text": "pastedabc", "checked": False})
+            text.event_generate("<<Undo>>")
+            self.assertEqual(note.d["lines"][0]["text"], "abc")
+            text.mark_set("insert", "2.end")
+            text.event_generate("<Home>")
+            self.assertEqual(text.index("insert"), "2.0")
+            text.mark_set("insert", "1.end")
+            text.event_generate("<Shift-Down>")
+            self.assertTrue(text.tag_ranges("sel"))
+        finally:
+            text.clipboard_clear()
+            if clipboard is not None:
+                text.clipboard_append(clipboard)
 
     def test_todo_wraps_beside_checkbox_and_centers_one_checkbox_for_long_text(self):
         self.note.geometry("300x500")
