@@ -49,6 +49,14 @@ class NoteEditingTests(unittest.TestCase):
         self.assertEqual((note.d["w"], note.d["h"]), (543, 477))
         self.assertEqual((note.winfo_width(), note.winfo_height()), (543, 477))
 
+    def test_new_note_is_visible_without_pinning(self):
+        note = self.app.new_note()
+        self.app.root.update()
+        self.assertEqual(note.d["z"], "bottom")
+        self.assertFalse(note.attributes("-topmost"))
+        self.assertTrue(note.d["visible"])
+        self.assertEqual(note.state(), "normal")
+
     def test_startup_display_setting_controls_raising_and_preserves_pinning(self):
         from copy import deepcopy
         original = deepcopy(self.note.d)
@@ -94,6 +102,7 @@ class NoteEditingTests(unittest.TestCase):
             return handles
 
         pinned = self.app.new_note()
+        pinned.set_z("top")
         self.note.set_z("bottom")
         other = subprocess.Popen([sys.executable, "-c", (
             "import tkinter as tk; root = tk.Tk(); "
