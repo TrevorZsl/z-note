@@ -553,6 +553,13 @@ class NoteWindow(tk.Toplevel):
         self._strike_widgets = []
         self._selection_masks = []
         self._checkbox_widgets = []
+        self._caret_color = self.text.cget("insertbackground")
+        self._prefix_caret = tk.Frame(self.text, bg=self._caret_color)
+        for sequence in ("<Button-1>", "<B1-Motion>", "<ButtonRelease-1>", "<MouseWheel>"):
+            self._prefix_caret.bind(sequence, lambda e, sequence=sequence: self.text.event_generate(
+                sequence, x=e.x_root - self.text.winfo_rootx(), y=e.y_root - self.text.winfo_rooty(),
+                state=e.state, **({"delta": e.delta} if sequence == "<MouseWheel>" else {})))
+        self._prefix_caret_job = None
         self._document_height = 0
         self._content_height = 1
         self._chunk_start = 0
@@ -577,6 +584,10 @@ class NoteWindow(tk.Toplevel):
         t.bind("<KeyRelease>", self._on_keyrelease)
         t.bind("<KeyPress-Return>", self._on_enter)
         t.bind("<KeyPress-BackSpace>", self._on_backspace)
+        for sequence in ("<Left>", "<Right>", "<Shift-Left>", "<Shift-Right>"):
+            t.bind(sequence, self._prefix_arrow)
+        for sequence in ("<KeyPress>", "<KeyRelease>", "<ButtonRelease-1>", "<FocusIn>", "<FocusOut>"):
+            t.bind(sequence, lambda e: self.after_idle(self._update_prefix_caret), add="+")
         t.bind("<<Cut>>", lambda e: self._clipboard_edit("tk_textCut"))
         t.bind("<<Paste>>", lambda e: self._clipboard_edit("tk_textPaste"))
         t.bind("<<Undo>>", lambda e: self._undo_edit())
@@ -725,6 +736,13 @@ class NoteWindow(tk.Toplevel):
             self._chunk_start = round(self.text.yview()[0] * self._document_height)
             box = self.text.bbox(index)
         if box:
+            if self.text.compare(index, "==", "insert"):
+                row, col = self._row_col(self.text.index("insert"))
+                if col < self._prefix_len(self.d["lines"][row]) and row + 1 in self._row_layout:
+                    height, offset = self._row_layout[row + 1]
+                    size = self._check_images[False].width()
+                    box = (box[0], int(self.text.cget("pady")) + offset - self._chunk_start +
+                           height // 2 - size // 2, box[2], size)
             top, pad = self.body.canvasy(0), int(self.text.cget("pady"))
             y = box[1] + self._chunk_start
             if y < top + pad:
@@ -774,6 +792,8 @@ class NoteWindow(tk.Toplevel):
         return "break"
 
     def destroy(self):
+        if self._prefix_caret_job is not None:
+            self.after_cancel(self._prefix_caret_job)
         self._stop_wheel()
         self._stop_selection_scroll()
         if getattr(self, "_strike_job", None):
@@ -1159,6 +1179,55 @@ class NoteWindow(tk.Toplevel):
         if self._selection_masks:
             self.after_idle(lambda: [w.lift() for w in self._selection_masks + self._checkbox_widgets
                                      if w.winfo_exists()])
+        self._update_prefix_caret()
+
+    def _prefix_arrow(self, event):
+        self.after_idle(self._update_prefix_caret)
+        if event.state & 0x000c or self._ime_composing(self.text):
+            return
+        row, col = self._row_col(self.text.index("insert"))
+        pre = self._prefix_len(self.d["lines"][row])
+        if pre and ((event.keysym == "Left" and 1 < col <= pre) or
+                    (event.keysym == "Right" and 1 <= col < pre)):
+            target = f"{row+1}.{1 if event.keysym == 'Left' else pre}"
+            command = "tk::TextKeySelect" if event.state & 1 else "tk::TextSetCursor"
+            self.text.tk.call(command, self.text, target)
+            return "break"
+
+    def _update_prefix_caret(self):
+        if self._prefix_caret_job is not None:
+            self.after_cancel(self._prefix_caret_job)
+            self._prefix_caret_job = None
+        self._prefix_caret.place_forget()
+        self.text.configure(insertbackground=self._caret_color)
+        row, col = self._row_col(self.text.index("insert"))
+        if (self.text.focus_get() != self.text or row >= len(self.d["lines"]) or
+                not 0 <= col < self._prefix_len(self.d["lines"][row]) or
+                self._ime_composing(self.text)):
+            return
+        box = next((box for box in self._checkbox_widgets if box._todo_row == row + 1), None)
+        if box is None:
+            return
+        # 前缀的插入位置属于整条待办的复选框，不属于首个文字显示行。
+        self.text.configure(insertbackground=self._bg)
+        width = int(self.text.cget("insertwidth"))
+        if not width:
+            return
+        geometry = {key: int(box.place_info()[key]) for key in ("x", "y", "width", "height")}
+        x = geometry["x"] - self._check_margin if col == 0 else geometry["x"] + geometry["width"] + self._check_margin
+        self._prefix_caret.place(x=x - width // 2, y=geometry["y"],
+                                 width=width, height=geometry["height"], bordermode="ignore")
+        self._prefix_caret.configure(bg=self._caret_color)
+        self._prefix_caret.lift()
+        if int(self.text.cget("insertofftime")):
+            self._prefix_caret_job = self.after(int(self.text.cget("insertontime")), self._blink_prefix_caret)
+
+    def _blink_prefix_caret(self):
+        self._prefix_caret_job = None
+        visible = self._prefix_caret.cget("bg") == self._caret_color
+        self._prefix_caret.configure(bg=self._bg if visible else self._caret_color)
+        delay = int(self.text.cget("insertofftime" if visible else "insertontime"))
+        self._prefix_caret_job = self.after(max(1, delay), self._blink_prefix_caret)
 
     # ---- 底部添加条 ----
     def add_todo(self):

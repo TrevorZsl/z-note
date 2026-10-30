@@ -1120,12 +1120,16 @@ class NoteEditingTests(unittest.TestCase):
                 with self.subTest(checked=checked, index=index):
                     text.mark_set("insert", index)
                     self.app.root.update()
-                    x, y, width, height = text.bbox(index)
+                    note._update_prefix_caret()
+                    self.app.root.update()
+                    caret = note._prefix_caret
+                    x, y, height = caret.winfo_x() + 1, caret.winfo_y(), caret.winfo_height()
                     rect = (text.winfo_rootx() + x - 2, text.winfo_rooty() + y,
                             text.winfo_rootx() + x + 2, text.winfo_rooty() + y + height)
                     main.dwmapi.DwmFlush()
                     with_caret = ImageGrab.grab(bbox=rect)
                     text.configure(insertwidth=0)
+                    note._update_prefix_caret()
                     self.app.root.update()
                     main.dwmapi.DwmFlush()
                     without_caret = ImageGrab.grab(bbox=rect)
@@ -1135,6 +1139,89 @@ class NoteEditingTests(unittest.TestCase):
                         self.assertIsNotNone(pixels)
                         self.assertEqual(pixels[2] - pixels[0], 2)
                     text.configure(insertwidth=2)
+
+    def test_prefix_arrows_skip_padding_and_preserve_shift_selection(self):
+        note, text = self.note, self.text
+        note.d["lines"] = [{"type": "todo", "text": "发送出消息的时候页面默认回到最上方", "checked": False}]
+        note.render()
+        text.focus_force()
+        self.app.root.update()
+        text.mark_set("insert", "1.3")
+        for sequence, expected in (("<Left>", "1.1"), ("<Left>", "1.0"),
+                                   ("<Right>", "1.1"), ("<Right>", "1.3"),
+                                   ("<Right>", "1.4")):
+            text.event_generate(sequence)
+            self.app.root.update()
+            if expected in ("1.0", "1.1"):
+                self.assertTrue(note._prefix_caret.winfo_manager())
+            else:
+                self.assertFalse(note._prefix_caret.winfo_manager())
+            text.event_generate("<KeyRelease>")
+            self.app.root.update()
+            self.assertEqual(text.index("insert"), expected)
+        text.mark_set("insert", "1.3")
+        text.event_generate("<Shift-Left>")
+        self.app.root.update()
+        self.assertEqual(text.index("insert"), "1.1")
+        self.assertEqual(tuple(map(str, text.tag_ranges("sel"))), ("1.1", "1.3"))
+        text.event_generate("<Shift-Right>")
+        self.app.root.update()
+        self.assertEqual(text.index("insert"), "1.3")
+        self.assertFalse(text.tag_ranges("sel"))
+        self.assertEqual(note.d["lines"][0]["text"], "发送出消息的时候页面默认回到最上方")
+
+    def test_multiline_prefix_caret_tracks_checkbox_and_restores_native_text_caret(self):
+        note, text = self.note, self.text
+        note.geometry("300x500")
+        text.focus_force()
+        for checked in (False, True):
+            note.d["lines"] = [{"type": "todo", "text": "发送出消息的时候页面默认回到最上方" * 4,
+                                "checked": checked}]
+            note.render()
+            self.app.root.update()
+            box = note._checkbox_widgets[0]
+            for index in ("1.0", "1.1", "1.2"):
+                text.mark_set("insert", index)
+                note._update_prefix_caret()
+                self.app.root.update_idletasks()
+                caret = note._prefix_caret
+                self.assertEqual(caret.winfo_y(), box.winfo_y())
+                self.assertEqual(caret.winfo_height(), box.winfo_height())
+                if index == "1.0":
+                    self.assertLessEqual(caret.winfo_x() + caret.winfo_width(), box.winfo_x())
+                else:
+                    self.assertGreaterEqual(caret.winfo_x(), box.winfo_x() + box.winfo_width())
+                self.assertEqual(text.cget("insertbackground"), note._bg)
+            text.mark_set("insert", "1.3")
+            note._update_prefix_caret()
+            self.assertFalse(note._prefix_caret.winfo_manager())
+            self.assertEqual(text.cget("insertbackground"), note._caret_color)
+        text.mark_set("insert", "1.0")
+        note._update_prefix_caret()
+        note._blink_prefix_caret()
+        self.assertEqual(note._prefix_caret.cget("bg"), note._bg)
+        note._update_prefix_caret()
+        note.title_box.focus_force()
+        self.app.root.update()
+        self.assertFalse(note._prefix_caret.winfo_manager())
+        self.assertIsNone(note._prefix_caret_job)
+
+    def test_prefix_navigation_scrolls_to_checkbox_in_long_todo(self):
+        note, text = self.note, self.text
+        note.geometry("300x250")
+        note.d["lines"] = [{"type": "todo", "text": "啊" * 140, "checked": False}]
+        note.render()
+        text.focus_force()
+        self.app.root.update()
+        text.mark_set("insert", "1.3")
+        text.event_generate("<Left>")
+        text.event_generate("<KeyRelease>")
+        self.app.root.update()
+        caret = note._prefix_caret
+        self.assertTrue(caret.winfo_manager())
+        self.assertGreaterEqual(caret.winfo_rooty(), note.body.winfo_rooty())
+        self.assertLessEqual(caret.winfo_rooty() + caret.winfo_height(),
+                             note.body.winfo_rooty() + note.body.winfo_height())
 
     def test_todo_wraps_beside_checkbox_and_centers_one_checkbox_for_long_text(self):
         self.note.geometry("300x500")
