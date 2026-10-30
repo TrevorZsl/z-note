@@ -2,7 +2,7 @@
 """z-note 雏形：常驻托盘的桌面便签（自由文本 + 可勾选待办）。
 运行: python main.py   依赖: pystray (pip install pystray)
 """
-import atexit, ctypes, json, math, os, queue, sys, threading, time, uuid, winreg
+import atexit, ctypes, json, math, os, queue, sys, time, uuid, winreg
 from copy import deepcopy
 from datetime import datetime
 import tkinter as tk
@@ -15,7 +15,6 @@ from PIL import Image, ImageDraw, ImageFont, ImageTk
 
 APP_NAME = "z-note"
 UI_FONT = "Times New Roman"
-DEV_TAKEOVER_EVENT = "z-note-dev-takeover"
 DATA_DIR = os.path.join(os.environ.get("APPDATA", "."), "z-note")
 DATA_FILE = os.path.join(DATA_DIR, "notes.json")
 BACKUP_DIR = os.path.join(DATA_DIR, "backup")
@@ -32,14 +31,6 @@ INK, QUIET = "#6B7280", "#666D75"      # 图标与状态栏的墨色（冷灰单
 # ---------- Win32 ----------
 user32 = ctypes.WinDLL("user32")
 kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-kernel32.CreateEventW.argtypes = [ctypes.c_void_p, wintypes.BOOL, wintypes.BOOL, wintypes.LPCWSTR]
-kernel32.CreateEventW.restype = wintypes.HANDLE
-kernel32.OpenEventW.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.LPCWSTR]
-kernel32.OpenEventW.restype = wintypes.HANDLE
-kernel32.SetEvent.argtypes = [wintypes.HANDLE]
-kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
-kernel32.WaitForSingleObject.argtypes = [wintypes.HANDLE, wintypes.DWORD]
-kernel32.WaitForSingleObject.restype = wintypes.DWORD
 user32.SetWindowPos.argtypes = [wintypes.HWND, wintypes.HWND, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int, wintypes.UINT]
 user32.SetWindowPos.restype = wintypes.BOOL
 user32.RedrawWindow.argtypes = [wintypes.HWND, ctypes.c_void_p, wintypes.HANDLE, wintypes.UINT]
@@ -235,12 +226,6 @@ def cursor_pos():
 def ensure_single_instance():
     kernel32.CreateMutexW(None, wintypes.BOOL(False), "z-note-singleton-mutex")
     if ctypes.get_last_error() == 183:  # ERROR_ALREADY_EXISTS
-        if os.getenv("Z_NOTE_DEV"):
-            event = kernel32.OpenEventW(0x0002, False, DEV_TAKEOVER_EVENT)
-            if event:
-                kernel32.SetEvent(event)
-                kernel32.CloseHandle(event)
-            os._exit(75 if event else 76)
         r = tk.Tk(); r.withdraw()
         messagebox.showinfo(APP_NAME, "z-note 已经在运行了（看系统托盘）。")
         os._exit(0)
@@ -405,7 +390,7 @@ class ToolButton(tk.Canvas):
     def __init__(self, master, icon, get_tip, cmd, bg, size=30):
         super().__init__(master, width=size, height=size, bg=bg,
                          highlightthickness=0, bd=0, cursor="hand2")
-        self._bg, self._active, self._cmd = bg, False, cmd
+        self._bg, self._active = bg, False
         self._image = load_icon(self, icon)
         self._active_image = load_icon(self, icon, active=True) if icon == "pin" else self._image
         r = 13
@@ -2472,8 +2457,6 @@ class App:
             tkfont.nametofont(name, root=self.root).configure(family=UI_FONT)
         self.notes = {}
         self._save_job = None
-        self._dev_mtime = os.path.getmtime(__file__) if os.getenv("Z_NOTE_DEV") else None
-        self._takeover_event = kernel32.CreateEventW(None, False, False, DEV_TAKEOVER_EVENT)
         self._cascade = 0
         self.settings_win = None
         self.show_notes = self.data["settings"]["showOnStartup"]
@@ -2769,10 +2752,6 @@ class App:
         return None
 
     def _pump(self):
-        if self._takeover_event and kernel32.WaitForSingleObject(self._takeover_event, 0) == 0:
-            self.quit()
-        if self._dev_mtime is not None and os.path.getmtime(__file__) != self._dev_mtime:
-            self.quit(75)
         try:
             while True:
                 act = self.q.get_nowait()
@@ -2821,7 +2800,7 @@ class App:
         except Exception:
             pass
 
-    def quit(self, exit_code=0):
+    def quit(self):
         for w in self.notes.values():
             w.d["x"], w.d["y"] = w.winfo_x(), w.winfo_y()
         self.save_now()
@@ -2830,7 +2809,7 @@ class App:
         except Exception:
             pass
         self.root.destroy()
-        os._exit(exit_code)
+        os._exit(0)
 
 def main():
     ensure_single_instance()
