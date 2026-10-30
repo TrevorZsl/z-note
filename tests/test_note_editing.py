@@ -5,6 +5,7 @@ from unittest.mock import patch
 from PIL import ImageChops, ImageGrab
 
 import main
+import storage
 
 
 class NoteEditingTests(unittest.TestCase):
@@ -1157,14 +1158,14 @@ class NoteEditingTests(unittest.TestCase):
         self.assertEqual(len(self.app.data["archives"]), 1)
         self.note.delete_self()
         with tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parent) as folder, \
-             patch.object(main, "DATA_DIR", folder), \
-             patch.object(main, "DATA_FILE", str(Path(folder)/"notes.json")):
-            self.patches[1].stop()
+             patch.object(storage, "DATA_DIR", folder), \
+             patch.object(storage, "DATA_FILE", str(Path(folder)/"notes.json")):
+            self.patches[2].stop()
             try:
                 main.save_data(self.app.data)
                 saved = json.loads((Path(folder)/"notes.json").read_text(encoding="utf-8"))
             finally:
-                self.patches[1].start()
+                self.patches[2].start()
         self.assertEqual(saved["archives"], self.app.data["archives"])
         self.assertEqual(saved["deletedNotes"], self.app.data["deletedNotes"])
 
