@@ -607,7 +607,7 @@ class NoteWindow(tk.Toplevel):
         self._install_inline_ime()
         self.apply_z()
         self._restyle()
-        if not (data.get("visible", True) and app.show_notes):
+        if not data.get("visible", True):
             self.withdraw()
 
     def _relayout(self):
@@ -2467,6 +2467,8 @@ class App:
                 d["z"] = "top"
             w = NoteWindow(self, d)
             self.notes[d["id"]] = w
+        if self.show_notes:
+            self.show_all()
 
     def update_fonts(self):
         self.base_font.config(size=self.data["settings"]["fontSize"])

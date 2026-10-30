@@ -49,6 +49,38 @@ class NoteEditingTests(unittest.TestCase):
         self.assertEqual((note.d["w"], note.d["h"]), (543, 477))
         self.assertEqual((note.winfo_width(), note.winfo_height()), (543, 477))
 
+    def test_startup_display_setting_controls_raising_and_preserves_pinning(self):
+        from copy import deepcopy
+        original = deepcopy(self.note.d)
+        for show_on_startup in (True, False):
+            with self.subTest(show_on_startup=show_on_startup):
+                for note in self.app.notes.values():
+                    note.destroy()
+                self.app.notes.clear()
+                self.app.data["notes"] = [
+                    dict(deepcopy(original), id=f"{z}-{visible}", z=z, visible=visible)
+                    for z in ("top", "bottom") for visible in (True, False)]
+                self.app.show_notes = show_on_startup
+                with patch.object(main.NoteWindow, "show", autospec=True,
+                                  side_effect=main.NoteWindow.show) as show:
+                    self.app._restore_notes()
+                self.app.root.update()
+                self.assertEqual(show.call_count, 4 if show_on_startup else 0)
+                for note_id, note in self.app.notes.items():
+                    z, was_visible = note_id.split("-")
+                    visible = show_on_startup or was_visible == "True"
+                    self.assertEqual(note.d["visible"], visible)
+                    self.assertEqual(note.state(), "normal" if visible else "withdrawn")
+                    self.assertEqual(note.d["z"], z)
+                    self.assertEqual(bool(note.attributes("-topmost")), z == "top")
+
+    def test_first_startup_shows_welcome_note_by_default(self):
+        self.assertTrue(main.DEFAULT_SETTINGS["showOnStartup"])
+        self.assertTrue(self.app.show_notes)
+        self.assertTrue(self.note.d["visible"])
+        self.assertEqual(self.note.state(), "normal")
+        self.assertTrue(self.note.attributes("-topmost"))
+
     def test_show_all_raises_notes_and_preserves_pinning(self):
         import subprocess
         import sys
