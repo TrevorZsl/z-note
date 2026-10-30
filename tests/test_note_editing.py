@@ -539,6 +539,37 @@ class NoteEditingTests(unittest.TestCase):
         self.assertEqual(self.note.d["lines"][1]["text"], original + "中")
         self.assertFalse(self.text.tag_ranges("ime_preedit"))
 
+    def test_wrapped_preedit_preserves_todo_indentation(self):
+        note, text = self.note, self.text
+        note.geometry("340x500")
+        for kind, original, checked in (("todo", "abc", False), ("todo", "", False),
+                                        ("todo", "abc", True), ("text", "abc", False)):
+            with self.subTest(kind=kind, original=original, checked=checked):
+                note.d["lines"] = [{"type": kind, "text": original, "checked": checked}]
+                note.render()
+                text.mark_set("insert", "1.end")
+                self.app.root.update()
+                body_start = "1.3" if kind == "todo" else "1.0"
+                left = text.bbox(body_start)[0]
+                note._begin_preedit(text)
+                for preedit in ("da'shi'da'shi'de" * 4, "pinyin" * 14):
+                    note._replace_preedit(preedit)
+                    self.app.root.update()
+                    index = text.index(f"{body_start} +1 display lines display linestart")
+                    self.assertLess(int(index.split(".")[1]), int(text.index("1.end").split(".")[1]))
+                    self.assertGreaterEqual(text.bbox(index)[0], left)
+                    self.assertEqual("todo_indent" in text.tag_names(index), kind == "todo")
+                    self.assertEqual(note.d["lines"][0]["text"], original)
+                note._finish_preedit()
+                self.app.root.update()
+                self.assertEqual(text.get(body_start, "1.end"), original)
+                note._begin_preedit(text)
+                note._replace_preedit("pinyin" * 14)
+                note._finish_preedit("\u786e\u8ba4")
+                self.app.root.update()
+                self.assertEqual(note.d["lines"][0],
+                                 {"type": kind, "text": original + "\u786e\u8ba4", "checked": checked})
+
     def test_cancel_restores_selected_text(self):
         original = self.text.get("2.3", "2.end")
         self.text.tag_add("sel", "2.3", "2.end")

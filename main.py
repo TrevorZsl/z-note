@@ -954,7 +954,10 @@ class NoteWindow(tk.Toplevel):
         cursor = length if cursor is None else max(0, min(cursor, length))
         if widget == self.text:
             widget.delete(start, f"{start}+{self._ime_length}c")
-            widget.insert(start, value, ("ime_preedit",))
+            tags = ["ime_preedit"]
+            if "todo_indent" in widget.tag_names(f"{start} linestart"):
+                tags.append("todo_indent")
+            widget.insert(start, value, tags)
             widget.mark_set("insert", f"{start}+{cursor}c")
             self._queue_strikes()
             self._see_text("insert")
