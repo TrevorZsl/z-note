@@ -735,6 +735,31 @@ class NoteEditingTests(unittest.TestCase):
         self.assertEqual(self.app.notes[note_id].d["lines"], lines)
         self.assertFalse(self.app.data["deletedNotes"])
 
+    def test_recycle_bin_restore_button_preserves_note_and_handles_save_failure(self):
+        from copy import deepcopy
+        original = deepcopy(self.note.d)
+        note_id = original["id"]
+        self.note.delete_self()
+        win = main.HistoryWindow(self.app)
+        self.app.history_win = win
+        win.switch("deletedNotes")
+        actions = win.content.winfo_children()[0]
+        delete, restore = actions.winfo_children()
+        self.assertEqual([delete.cget("text"), restore.cget("text")], ["彻底删除", "还原"])
+        with patch.object(main, "save_data", side_effect=OSError("disk full")), \
+             patch.object(main.messagebox, "showerror") as error:
+            restore.invoke()
+        error.assert_called_once()
+        self.assertNotIn(note_id, self.app.notes)
+        self.assertEqual(self.app.data["deletedNotes"][0]["id"], note_id)
+        self.assertEqual(win.ids, [note_id])
+        restore.invoke()
+        self.assertEqual(self.app.notes[note_id].d, dict(original, visible=True))
+        self.assertFalse(self.app.data["deletedNotes"])
+        self.assertFalse(win.ids)
+        self.assertEqual(win.content.winfo_children()[0].cget("text"), "暂无记录")
+        win.destroy()
+
     def test_clear_preserves_completed_items_and_undo_restores_positions(self):
         self.note.toggle_done(1)
         original = [dict(line) for line in self.note.d["lines"]]
@@ -809,8 +834,9 @@ class NoteEditingTests(unittest.TestCase):
         self.assertFalse(self.app.data["archives"])
         self.assertEqual(len(self.app.data["deletedNotes"]), 1)
         win.switch("deletedNotes")
-        buttons = [c.cget("text") for c in win.content.winfo_children() if isinstance(c, main.tk.Button)]
-        self.assertEqual(buttons, ["彻底删除"])
+        actions = win.content.winfo_children()[0]
+        buttons = [c.cget("text") for c in actions.winfo_children()]
+        self.assertEqual(buttons, ["彻底删除", "还原"])
         win.toggle_batch()
         win.check(note_id, True)
         with patch.object(main.messagebox, "askyesno", return_value=True):

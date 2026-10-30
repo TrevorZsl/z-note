@@ -2367,7 +2367,10 @@ class HistoryWindow(tk.Toplevel):
         self.canvas.yview_moveto(0)
         if self.mode == "deletedNotes":
             note = records[0]
-            self.button(self.content, "彻底删除", lambda: self.delete_record(note["id"])).pack(anchor="w",pady=(0,12))
+            actions = tk.Frame(self.content, bg=NOTE_BG)
+            actions.pack(anchor="w", pady=(0,12))
+            self.button(actions, "彻底删除", lambda: self.delete_record(note["id"])).pack(side="left")
+            self.button(actions, "还原", lambda: self.app.recover_note(note["id"])).pack(side="left", padx=(8,0))
             self.label(note.get("title") or "无标题", True)
             for line in note["lines"]:
                 self.label(("✓ " if line["checked"] else "□ ") + line["text"] if line["type"] == "todo" else line["text"])
