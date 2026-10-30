@@ -581,7 +581,7 @@ class NoteWindow(tk.Toplevel):
         t.bind("<KeyRelease>", self._on_keyrelease)
         t.bind("<KeyPress-Return>", self._on_enter)
         t.bind("<KeyPress-BackSpace>", self._on_backspace)
-        t.bind("<Left>", self._clamp_todo_cursor)
+        t.bind("<Left>", self._on_left)
         caret_tag = "TodoCaret"
         tags = t.bindtags()
         t.bindtags((tags[0], tags[1], caret_tag, *tags[2:]))
@@ -1191,6 +1191,19 @@ class NoteWindow(tk.Toplevel):
                                      if w.winfo_exists()])
         self._clamp_todo_cursor()
 
+    def _on_left(self, event):
+        if self._ime_composing(self.text):
+            return
+        row, col = self._row_col(self.text.index("insert"))
+        pre = self._prefix_len(self.d["lines"][row])
+        if pre and col <= pre:
+            target = f"{row}.end" if row else f"1.{pre}"
+            command = "tk::TextKeySelect" if event.state & 1 else "tk::TextSetCursor"
+            self.text.tk.call(command, self.text, target)
+            self._clamp_todo_cursor()
+            self._see_text("insert")
+            return "break"
+
     def _clamp_todo_cursor(self, _event=None):
         if self._ime_composing(self.text):
             return
@@ -1199,10 +1212,8 @@ class NoteWindow(tk.Toplevel):
         images = t.dump(start, f"{start}+1c", image=True)
         if images and t.image_cget(start, "image") in {str(i) for i in self._check_slots.values()}:
             target = f"{start}+{1 + len(PREFIX_PAD)}c"
-            if t.compare("insert", "<=", target):
+            if t.compare("insert", "<", target):
                 t.mark_set("insert", target)
-                if _event is not None and _event.keysym == "Left":
-                    return "break"
 
     # ---- 底部添加条 ----
     def add_todo(self):

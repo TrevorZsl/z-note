@@ -1266,6 +1266,49 @@ class NoteEditingTests(unittest.TestCase):
         text.event_generate("<Control-a>")
         self.assertEqual(tuple(map(str, text.tag_ranges("sel"))), ("1.0", "2.3"))
 
+    def test_left_at_todo_start_moves_to_previous_item_end(self):
+        note, text = self.note, self.text
+        note.d["lines"] = [
+            {"type": "text", "text": "abc", "checked": False},
+            {"type": "todo", "text": "", "checked": True},
+            {"type": "todo", "text": "def", "checked": False}]
+        note.render()
+        text.focus_force()
+        self.app.root.update()
+        text.mark_set("insert", "3.4")
+        for expected in ("3.3", "2.3", "1.3", "1.2"):
+            text.event_generate("<Left>")
+            self.assertEqual(text.index("insert"), expected)
+        text.mark_set("insert", "3.3")
+        text.event_generate("<Shift-Left>")
+        self.assertEqual(text.index("insert"), "2.3")
+        self.assertEqual(tuple(map(str, text.tag_ranges("sel"))), ("2.3", "3.3"))
+        text.event_generate("<Shift-Left>")
+        self.assertEqual(text.index("insert"), "1.3")
+        self.assertEqual(tuple(map(str, text.tag_ranges("sel"))), ("1.3", "3.3"))
+
+    def test_left_at_wrapped_todo_start_reaches_previous_todo_end(self):
+        note, text = self.note, self.text
+        note.geometry("300x500")
+        note.d["lines"] = [
+            {"type": "todo", "text": "abc", "checked": True},
+            {"type": "todo", "text": "long text " * 30, "checked": False}]
+        note.render()
+        text.focus_force()
+        self.app.root.update()
+        text.mark_set("insert", "2.3 display lineend +1c")
+        wrapped_start = text.index("insert")
+        expected = text.index("insert -1c")
+        self.assertGreater(int(wrapped_start.split(".")[1]), 3)
+        text.event_generate("<Left>")
+        self.assertEqual(text.index("insert"), expected)
+        text.mark_set("insert", "2.3")
+        text.event_generate("<Left>")
+        self.assertEqual(text.index("insert"), "1.6")
+        text.mark_set("insert", "1.3")
+        text.event_generate("<Left>")
+        self.assertEqual(text.index("insert"), "1.3")
+
     def test_first_todo_backspace_does_not_delete_checkbox(self):
         note = self.app.new_note()
         text = note.text
