@@ -53,10 +53,112 @@ class NoteEditingTests(unittest.TestCase):
     def test_new_note_is_visible_without_pinning(self):
         note = self.app.new_note()
         self.app.root.update()
-        self.assertEqual(note.d["z"], "bottom")
+        self.assertEqual(note.d["z"], "normal")
         self.assertFalse(note.attributes("-topmost"))
         self.assertTrue(note.d["visible"])
         self.assertEqual(note.state(), "normal")
+
+    def test_legacy_unpinned_notes_stay_normal_and_new_bottom_state_survives_restart(self):
+        from copy import deepcopy
+        original = deepcopy(self.note.d)
+        for version, expected in ((2, "normal"), (3, "bottom")):
+            for job in self.app.root.tk.call("after", "info"):
+                self.app.root.tk.call("after", "cancel", job)
+            self.app.root.destroy()
+            data = {"schemaVersion": version, "settings": dict(main.DEFAULT_SETTINGS),
+                    "notes": [dict(deepcopy(original), z="bottom")],
+                    "deletedNotes": [dict(deepcopy(original), id="deleted", z="bottom")]}
+            with patch.object(main, "load_data", return_value=data):
+                self.app = main.App()
+            self.note = next(iter(self.app.notes.values()))
+            self.app.root.update()
+            self.assertEqual(self.app.data["schemaVersion"], 3)
+            self.assertEqual(self.note.d["z"], expected)
+            self.assertEqual(self.app.data["deletedNotes"][0]["z"], expected)
+            self.assertEqual(self.note.b_bottom._active, expected == "bottom")
+
+    def test_layer_buttons_toggle_and_last_clicked_wins(self):
+        note = self.note
+        for button, state in ((note.b_bottom, "bottom"), (note.b_pin, "top"),
+                              (note.b_pin, "normal"), (note.b_bottom, "bottom"),
+                              (note.b_bottom, "normal"), (note.b_pin, "top"),
+                              (note.b_bottom, "bottom")):
+            button.event_generate("<Button-1>")
+            self.app.root.update()
+            self.assertEqual(note.d["z"], state)
+            self.assertEqual(note.b_pin._active, state == "top")
+            self.assertEqual(note.b_bottom._active, state == "bottom")
+            self.assertEqual(bool(note.attributes("-topmost")), state == "top")
+            for item in (note.b_pin, note.b_bottom):
+                expected = item._active_image if item._active else item._image
+                self.assertEqual(item.itemcget(item._icon, "image"), str(expected))
+
+    def test_bottom_note_stays_below_other_windows_when_shown_or_activated(self):
+        blocker = main.tk.Toplevel(self.app.root)
+        blocker.geometry("300x240+30+30")
+        self.app.root.update()
+        blocker_hwnd = main.user32.GetParent(blocker.winfo_id()) or blocker.winfo_id()
+        self.note.set_z("bottom")
+        for action in (self.note.show, self.note.text.focus_force, self.note.lift,
+                       lambda: self.note.geometry("500x400+60+60")):
+            action()
+            self.app.root.update()
+            order = []
+            callback = main.ctypes.WINFUNCTYPE(main.wintypes.BOOL, main.wintypes.HWND,
+                                              main.wintypes.LPARAM)(
+                lambda hwnd, _: order.append(hwnd) or True)
+            main.user32.EnumWindows(callback, 0)
+            self.assertLess(order.index(blocker_hwnd), order.index(self.note.hwnd))
+            self.assertFalse(main.user32.GetWindowLongPtrW(self.note.hwnd, -20) & 0x8)
+        self.note.toggle_bottom()
+        self.note.show()
+        self.app.root.update()
+        self.assertEqual(self.note.d["z"], "normal")
+
+    def test_cancel_bottom_raises_active_note_without_making_it_topmost(self):
+        blocker = main.tk.Toplevel(self.app.root)
+        blocker.geometry("300x240+30+30")
+        self.app.root.update()
+        blocker_hwnd = main.user32.GetParent(blocker.winfo_id()) or blocker.winfo_id()
+
+        def order():
+            handles = []
+            callback = main.ctypes.WINFUNCTYPE(main.wintypes.BOOL, main.wintypes.HWND,
+                                              main.wintypes.LPARAM)(
+                lambda hwnd, _: handles.append(hwnd) or True)
+            main.user32.EnumWindows(callback, 0)
+            return handles
+
+        for _ in range(2):
+            self.note.set_z("bottom")
+            self.note.text.focus_force()
+            self.app.root.update()
+            self.assertLess(order().index(blocker_hwnd), order().index(self.note.hwnd))
+            self.note.b_bottom.event_generate("<Button-1>")
+            self.app.root.update()
+            self.assertEqual(self.note.d["z"], "normal")
+            self.assertFalse(self.note.b_bottom._active)
+            self.assertLess(order().index(self.note.hwnd), order().index(blocker_hwnd))
+            self.assertFalse(main.user32.GetWindowLongPtrW(self.note.hwnd, -20) & 0x8)
+            blocker.focus_force()
+            self.app.root.update()
+            self.assertLess(order().index(blocker_hwnd), order().index(self.note.hwnd))
+            self.note.text.focus_force()
+            self.app.root.update()
+            self.assertLess(order().index(self.note.hwnd), order().index(blocker_hwnd))
+
+    def test_bottom_button_sits_between_pin_and_title_without_overlap(self):
+        for width in (300, 320, 543):
+            self.note.geometry(f"{width}x340")
+            self.app.root.update()
+            pin, bottom, title = self.note.b_pin, self.note.b_bottom, self.note.title_box
+            self.assertLessEqual(pin.winfo_x() + pin.winfo_width(), bottom.winfo_x())
+            self.assertLessEqual(bottom.winfo_x() + bottom.winfo_width(), title.winfo_x())
+            self.assertTrue(bottom.winfo_ismapped())
+            right = title.winfo_x() + title.winfo_width()
+            for button in self.note._tool_btns[2:]:
+                self.assertTrue(button.winfo_ismapped())
+                self.assertGreaterEqual(button.winfo_x(), right)
 
     def test_startup_display_setting_controls_raising_and_preserves_pinning(self):
         from copy import deepcopy
@@ -68,7 +170,7 @@ class NoteEditingTests(unittest.TestCase):
                 self.app.notes.clear()
                 self.app.data["notes"] = [
                     dict(deepcopy(original), id=f"{z}-{visible}", z=z, visible=visible)
-                    for z in ("top", "bottom") for visible in (True, False)]
+                    for z in ("top", "normal") for visible in (True, False)]
                 self.app.show_notes = show_on_startup
                 with patch.object(main.NoteWindow, "show", autospec=True,
                                   side_effect=main.NoteWindow.show) as show:
@@ -104,7 +206,7 @@ class NoteEditingTests(unittest.TestCase):
 
         pinned = self.app.new_note()
         pinned.set_z("top")
-        self.note.set_z("bottom")
+        self.note.set_z("normal")
         other = subprocess.Popen([sys.executable, "-c", (
             "import tkinter as tk; root = tk.Tk(); "
             "root.geometry('300x240+30+30'); root.update(); "
@@ -133,7 +235,7 @@ class NoteEditingTests(unittest.TestCase):
         for note in (self.note, pinned):
             self.assertTrue(note.d["visible"])
             self.assertLess(order.index(note.hwnd), order.index(other_hwnd))
-        self.assertEqual(self.note.d["z"], "bottom")
+        self.assertEqual(self.note.d["z"], "normal")
         self.assertEqual(self.note.attributes("-topmost"), 0)
         self.assertFalse(main.user32.GetWindowLongPtrW(self.note.hwnd, -20) & 0x8)
         self.assertEqual(pinned.d["z"], "top")
@@ -175,7 +277,7 @@ class NoteEditingTests(unittest.TestCase):
         self.assertLess(order.index(pinned.hwnd), order.index(second_hwnd))
         main.user32.ShowWindow(second_hwnd, 9)  # SW_RESTORE
 
-        pinned.set_z("bottom")
+        pinned.set_z("normal")
         self.app.root.update()
         self.assertFalse(main.user32.GetWindowLongPtrW(pinned.hwnd, -20) & 0x8)
         self.assertLess(window_order().index(self.note.hwnd), window_order().index(other_hwnd))
@@ -188,7 +290,7 @@ class NoteEditingTests(unittest.TestCase):
         windows = [main.tk.Toplevel(self.app.root) for _ in range(2)]
         for window in windows:
             window.geometry("300x240+30+30")
-        self.note.set_z("bottom")
+        self.note.set_z("normal")
         self.app.root.update()
         older, foreground = windows
         older.focus_force()
@@ -221,9 +323,9 @@ class NoteEditingTests(unittest.TestCase):
         normal = self.app.new_note()
         for _ in range(2):
             normal.show()
-            self.note.set_z("bottom")
+            self.note.set_z("normal")
             self.note.set_z("top")
-            self.note.set_z("bottom")
+            self.note.set_z("normal")
             self.app.hide_all()
             self.app.show_all()
             self.app.root.update()
@@ -232,7 +334,7 @@ class NoteEditingTests(unittest.TestCase):
                 self.assertFalse(main.user32.GetWindowLongPtrW(note.hwnd, -20) & 0x8)
 
     def test_activating_pinned_note_does_not_raise_normal_note_with_it(self):
-        self.note.set_z("bottom")
+        self.note.set_z("normal")
         pinned = self.app.new_note()
         pinned.set_z("top")
         blocker = main.tk.Toplevel(self.app.root)
@@ -280,7 +382,7 @@ class NoteEditingTests(unittest.TestCase):
 
     def test_show_and_hide_all_are_independent_and_repeatable(self):
         other = self.app.new_note()
-        self.note.set_z("bottom")
+        self.note.set_z("normal")
         other.hide()
         self.app.root.update()
         original = [(w.winfo_x(), w.winfo_y(), w.winfo_width(), w.winfo_height(), w.d["z"])
@@ -904,7 +1006,7 @@ class NoteEditingTests(unittest.TestCase):
              patch.object(main, "save_data") as save:
             app = main.App()
             try:
-                self.assertEqual(app.data["schemaVersion"], 2)
+                self.assertEqual(app.data["schemaVersion"], 3)
                 self.assertEqual(app.data["settings"]["opacity"], 1.0)
                 self.assertEqual(app.data["notes"][0]["opacity"], 1.0)
                 save.assert_called()
@@ -2200,7 +2302,7 @@ class NoteEditingTests(unittest.TestCase):
         self.app.root.update()
         self.assertEqual(self.note.title_chip.winfo_width(), self.note._title_max_width())
         title_right = self.note.title_box.winfo_x() + self.note.title_chip.winfo_width()
-        for button in self.note._tool_btns[1:]:
+        for button in self.note._tool_btns[2:]:
             self.assertTrue(button.winfo_ismapped())
             self.assertGreater(button.winfo_x(), title_right)
         entry.delete(1, "end")

@@ -195,6 +195,11 @@ def parse_hotkey(value):
 class _POINT(ctypes.Structure):
     _fields_ = [("x", wintypes.LONG), ("y", wintypes.LONG)]
 
+class _WINDOWPOS(ctypes.Structure):
+    _fields_ = [("hwnd", wintypes.HWND), ("hwndInsertAfter", wintypes.HWND),
+                ("x", ctypes.c_int), ("y", ctypes.c_int),
+                ("cx", ctypes.c_int), ("cy", ctypes.c_int), ("flags", wintypes.UINT)]
+
 # 使用控件字体和光标位置显示 Windows 输入法预编辑文字。
 imm32 = ctypes.WinDLL("imm32")
 imm32.ImmGetContext.argtypes = [wintypes.HWND]
@@ -357,7 +362,7 @@ class ToolButton(tk.Canvas):
                          highlightthickness=0, bd=0, cursor="hand2")
         self._bg, self._active = bg, False
         self._image = load_icon(self, icon)
-        self._active_image = load_icon(self, icon, active=True) if icon == "pin" else self._image
+        self._active_image = load_icon(self, icon, active=True) if icon in ("pin", "arrow-down-to-line") else self._image
         r = 13
         self._pill = self.create_oval(size/2 - r, size/2 - r, size/2 + r, size/2 + r,
                                       state="hidden", outline="")
@@ -447,7 +452,11 @@ class NoteWindow(tk.Toplevel):
                                 lambda: "取消置顶" if self.d["z"] == "top" else "置顶",
                                 self.toggle_pin, self._bg)
         self._tool_btns.append(self.b_pin)
-        self.b_pin.pack(side="left", padx=(3, 8), pady=9)
+        self.b_pin.pack(side="left", padx=(3, 2), pady=9)
+        self.b_bottom = btn("arrow-down-to-line",
+                            lambda: "取消置底" if self.d["z"] == "bottom" else "置底",
+                            self.toggle_bottom)
+        self.b_bottom.pack(side="left", padx=(2, 8), pady=9)
 
         # 标题胶囊：悬停有提示，点击改名
         self.title_box = tk.Frame(self.toolbar, bg=self._bg)
@@ -574,6 +583,7 @@ class NoteWindow(tk.Toplevel):
             raise ctypes.WinError()
         self._round_window()
         self._install_inline_ime()
+        self._install_z_order()
         self.apply_z()
         self._restyle()
         if not data.get("visible", True):
@@ -760,6 +770,8 @@ class NoteWindow(tk.Toplevel):
         if hasattr(self, "_ime_pump_job"):
             self.after_cancel(self._ime_pump_job)
             user32.SetWindowLongPtrW(self.winfo_id(), -4, self._ime_old_proc)
+        if hasattr(self, "_z_old_proc"):
+            user32.SetWindowLongPtrW(self.hwnd, -4, self._z_old_proc)
         super().destroy()
         user32.DestroyWindow(self._owner_hwnd)
 
@@ -785,9 +797,13 @@ class NoteWindow(tk.Toplevel):
         for b in self._tool_btns:
             b.set_bg(self._bg)
         self.b_pin.set_active(self.d["z"] == "top")
+        self.b_bottom.set_active(self.d["z"] == "bottom")
 
     def toggle_pin(self):
-        self.set_z("top" if self.d["z"] == "bottom" else "bottom")
+        self.set_z("normal" if self.d["z"] == "top" else "top")
+
+    def toggle_bottom(self):
+        self.set_z("normal" if self.d["z"] == "bottom" else "bottom")
 
     def _ime_composing(self, widget):
         if getattr(self, "_ime_native_widget", None) == widget:
@@ -1713,11 +1729,29 @@ class NoteWindow(tk.Toplevel):
             self._drag_release(_e)
 
     # ---- 层级 / 透明度 / 颜色 ----
+    def _install_z_order(self):
+        @_WNDPROC
+        def window_proc(hwnd, message, wparam, lparam):
+            if message == 0x0046 and self.d["z"] == "bottom":  # WM_WINDOWPOSCHANGING
+                position = ctypes.cast(lparam, ctypes.POINTER(_WINDOWPOS)).contents
+                if not position.flags & 0x0004:  # SWP_NOZORDER
+                    position.hwndInsertAfter = 1  # HWND_BOTTOM，激活或拖动也保持置底。
+            return user32.CallWindowProcW(self._z_old_proc, hwnd, message, wparam, lparam)
+
+        self._z_proc = window_proc
+        self._z_old_proc = user32.SetWindowLongPtrW(
+            self.hwnd, -4, ctypes.cast(window_proc, ctypes.c_void_p))
+
     def set_z(self, state):
         if self.d["z"] == state:
             return
+        previous = self.d["z"]
         self.d["z"] = state
         self.apply_z()
+        if previous == "bottom" and state == "normal":
+            # 置底时窗口可能已经激活，取消后不会再收到激活带来的前移。
+            user32.SetWindowPos(self.hwnd, 0, 0, 0, 0, 0,
+                                SWP_NOMOVE | SWP_NOSIZE | 0x0010)  # HWND_TOP / SWP_NOACTIVATE
         self._restyle()
         self.app.schedule_save()
 
@@ -1728,6 +1762,9 @@ class NoteWindow(tk.Toplevel):
         user32.SetWindowLongPtrW(self.hwnd, -8, self._owner_hwnd)  # GWLP_HWNDPARENT
         style = user32.GetWindowLongPtrW(self.hwnd, -20)
         user32.SetWindowLongPtrW(self.hwnd, -20, style & ~0x80)  # WS_EX_TOOLWINDOW
+        if self.d["z"] == "bottom":
+            user32.SetWindowPos(self.hwnd, 1, 0, 0, 0, 0,
+                                SWP_NOMOVE | SWP_NOSIZE | 0x0010)  # SWP_NOACTIVATE
 
     def hide(self):
         self.d["visible"] = False
@@ -1740,9 +1777,11 @@ class NoteWindow(tk.Toplevel):
         self.overrideredirect(True)
         self._round_window()
         # 先前移到置顶层，再恢复原状态，确保被其他进程覆盖后也能显示到前面。
-        self.attributes("-topmost", True)
+        if self.d["z"] != "bottom":
+            self.attributes("-topmost", True)
         self.apply_z()
-        self.lift()
+        if self.d["z"] != "bottom":
+            self.lift()
 
     def delete_self(self):
         self.app.remove_note(self)
@@ -2410,6 +2449,13 @@ class App:
             self.data["settings"]["opacity"] = 1.0
             for note in self.data["notes"]:
                 note["opacity"] = 1.0
+        migrate_z = self.data.get("schemaVersion", 1) < 3
+        if migrate_z:
+            # 旧版 bottom 只是未置顶，升级后保持原来的普通层级。
+            for note in self.data["notes"] + self.data["deletedNotes"]:
+                if note.get("z") == "bottom":
+                    note["z"] = "normal"
+            self.data["schemaVersion"] = 3
         self.q = queue.Queue()
         self.root = tk.Tk()
         # 钉死 tk scaling：首次运行记录系统 DPI，此后不再跟随系统缩放变化，画面始终一致。
@@ -2433,7 +2479,7 @@ class App:
                                      size=self.data["settings"]["fontSize"])
 
         self._restore_notes()
-        if migrate_opacity:
+        if migrate_opacity or migrate_z:
             self.save_now()
         self._start_tray()
         self._start_hotkeys()
@@ -2462,8 +2508,8 @@ class App:
             d["y"] = min(max(0, d["y"]), max(0, sh - 60))
             d["w"] = max(d.get("w", 320), 300)  # 旧数据太窄会挤掉工具栏
             d["h"] = max(d.get("h", 300), 240)
-            if d.get("z") not in ("bottom", "top"):  # 旧数据迁移：去掉 normal 态
-                d["z"] = "top"
+            if d.get("z") not in ("normal", "bottom", "top"):
+                d["z"] = "normal"
             w = NoteWindow(self, d)
             self.notes[d["id"]] = w
         if self.show_notes:
@@ -2494,7 +2540,7 @@ class App:
         off = 24 * (self._cascade % 6); self._cascade += 1
         d = {"id": str(uuid.uuid4()),
              "x": min(cx + off, sw - 240), "y": min(cy + off, sh - 200),
-             "w": 543, "h": 477, "z": "bottom",
+             "w": 543, "h": 477, "z": "normal",
              "opacity": self.data["settings"]["opacity"],
              "color": self.data["settings"]["color"], "visible": True,
              "editedAt": datetime.now().isoformat(timespec="microseconds"),
