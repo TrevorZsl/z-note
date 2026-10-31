@@ -541,6 +541,8 @@ class NoteWindow(tk.Toplevel):
         t.bind("<KeyPress-Return>", self._on_enter)
         t.bind("<KeyPress-BackSpace>", self._on_backspace)
         t.bind("<Left>", self._on_left)
+        t.bind("<Up>", self._on_vertical)
+        t.bind("<Down>", self._on_vertical)
         caret_tag = "TodoCaret"
         tags = t.bindtags()
         t.bindtags((tags[0], tags[1], caret_tag, *tags[2:]))
@@ -1159,6 +1161,33 @@ class NoteWindow(tk.Toplevel):
             self.after_idle(lambda: [w.lift() for w in self._selection_masks + self._checkbox_widgets
                                      if w.winfo_exists()])
         self._clamp_todo_cursor()
+
+    def _on_vertical(self, event):
+        if self._ime_composing(self.text):
+            return
+        self._stop_wheel()
+        t = self.text
+        current = t.index("insert")
+        self._see_text(current)
+        box = t.bbox(current)
+        if not box:
+            return "break"
+        x = box[0]
+        direction = 1 if event.keysym == "Down" else -1
+        start = t.index("insert display linestart")
+        target = t.index(f"{start} {direction:+d} displaylines display linestart")
+        if t.compare(target, "!=", start):
+            self._see_text(target)
+            display = t.dlineinfo(target)
+            end = t.index(f"{target} display lineend")
+            target = t.tk.call("tk::TextClosestGap", t, x, display[1] + display[3] // 2)
+            if t.compare(target, ">", end):
+                target = end
+            command = "tk::TextKeySelect" if event.state & 1 else "tk::TextSetCursor"
+            t.tk.call(command, t, target)
+            self._clamp_todo_cursor()
+            self._see_text("insert")
+        return "break"
 
     def _on_left(self, event):
         if self._ime_composing(self.text):

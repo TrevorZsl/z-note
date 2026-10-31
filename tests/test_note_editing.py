@@ -1400,6 +1400,48 @@ class NoteEditingTests(unittest.TestCase):
         text.event_generate("<Control-a>")
         self.assertEqual(tuple(map(str, text.tag_ranges("sel"))), ("1.0", "2.3"))
 
+    def test_vertical_navigation_uses_visible_position_after_short_row(self):
+        note, text = self.note, self.text
+        note.geometry("650x500")
+        note.d["lines"] = [
+            {"type": "todo", "text": value, "checked": False}
+            for value in ("回收站界面", "删除行逻辑（三种状态）光标位置", "短", "iiiiiiiiiiii WWWW 中英文混排文字")]
+        note.render()
+        text.focus_force()
+        self.app.root.update()
+        text.mark_set("insert", "2.11")
+        for key, row in (("Up", 1), ("Down", 2), ("Down", 3), ("Down", 4), ("Up", 3), ("Up", 2)):
+            x = text.bbox("insert")[0]
+            text.event_generate(f"<{key}>")
+            text.event_generate(f"<KeyRelease-{key}>")
+            self.app.root.update()
+            self.assertEqual(int(text.index("insert").split(".")[0]), row, (key, row, text.index("insert")))
+            if row in (1, 3):
+                self.assertEqual(text.index("insert"), text.index(f"{row}.end"))
+            else:
+                self.assertLessEqual(abs(text.bbox("insert")[0] - x), self.app.base_font.measure("字") // 2 + 1)
+        text.mark_set("insert", "1.end")
+        text.event_generate("<Shift-Down>")
+        self.assertEqual(tuple(map(str, text.tag_ranges("sel"))), ("1.8", text.index("insert")))
+
+    def test_vertical_navigation_between_wrapped_display_lines(self):
+        note, text = self.note, self.text
+        note.geometry("300x500")
+        note.d["lines"] = [{"type": "todo", "text": "中英文 Wi 混排 " * 12, "checked": False}]
+        note.render()
+        text.focus_force()
+        self.app.root.update()
+        text.mark_set("insert", "1.6")
+        x = text.bbox("insert")[0]
+        first_y = text.bbox("insert")[1]
+        text.event_generate("<Down>")
+        self.assertGreater(text.bbox("insert")[1], first_y)
+        self.assertLessEqual(abs(text.bbox("insert")[0] - x), self.app.base_font.measure("字") // 2 + 1)
+        x = text.bbox("insert")[0]
+        text.event_generate("<Up>")
+        self.assertEqual(text.bbox("insert")[1], first_y)
+        self.assertLessEqual(abs(text.bbox("insert")[0] - x), self.app.base_font.measure("字") // 2 + 1)
+
     def test_left_at_todo_start_moves_to_previous_item_end(self):
         note, text = self.note, self.text
         note.d["lines"] = [
