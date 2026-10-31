@@ -1496,10 +1496,7 @@ class NoteWindow(tk.Toplevel):
         pre = self._prefix_len(ln)
         rel = max(0, col - pre)
         left, right = ln["text"][:rel], ln["text"][rel:]
-        if ln["type"] == "todo" and rel == 0:
-            right = ""
-        else:
-            ln["text"] = left
+        ln["text"] = left
         lines.insert(row + 1, {"type": ln["type"], "text": right, "checked": False})
         self.render(keep_cursor=False)
         nrow = row + 2

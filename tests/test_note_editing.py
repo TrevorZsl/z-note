@@ -2261,17 +2261,22 @@ class NoteEditingTests(unittest.TestCase):
         self.assertEqual(self.note.d["lines"][1]["text"], original[:2])
         self.assertEqual(self.note.d["lines"][2]["text"], "")
 
-    def test_enter_at_start_of_checked_todo_keeps_text_and_adds_empty_todo_below(self):
-        original = dict(self.note.d["lines"][2])
-        self.note.toggle_done(2)
-        self.text.mark_set("insert", f"3.{self.note._prefix_len(original)}")
-        self.note._on_enter(None)
-        self.app.root.update()
-        self.assertEqual(self.note.d["lines"][2], dict(original, checked=True))
-        self.assertEqual(self.note.d["lines"][3],
-                         {"type": "todo", "text": "", "checked": False})
-        self.assertEqual(self.text.index("insert"), "4.3")
-        self.assertEqual(len(self.note._strike_widgets), 1)
+    def test_enter_splits_todo_at_cursor(self):
+        original = "买牛奶"
+        for checked in (False, True):
+            for offset in (0, 1, len(original)):
+                with self.subTest(checked=checked, offset=offset):
+                    self.note.d["lines"] = [
+                        {"type": "todo", "text": original, "checked": checked}]
+                    self.note.render()
+                    prefix = self.note._prefix_len(self.note.d["lines"][0])
+                    self.text.mark_set("insert", f"1.{prefix + offset}")
+                    self.assertEqual(self.note._on_enter(None), "break")
+                    self.app.root.update()
+                    self.assertEqual(self.note.d["lines"], [
+                        {"type": "todo", "text": original[:offset], "checked": checked},
+                        {"type": "todo", "text": original[offset:], "checked": False}])
+                    self.assertEqual(self.text.index("insert"), f"2.{prefix}")
 
     def test_cancel_cross_row_ime_restores_todo_icons_and_text(self):
         original = [dict(line) for line in self.note.d["lines"]]
