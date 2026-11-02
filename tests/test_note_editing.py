@@ -1879,6 +1879,99 @@ class NoteEditingTests(unittest.TestCase):
         text.event_generate("<Left>")
         self.assertEqual(text.index("insert"), "1.3")
 
+    def test_deleting_completed_todo_text_to_empty_unchecks_and_supports_undo(self):
+        note, text = self.note, self.text
+        original = {"type": "todo", "text": "删除行逻辑", "checked": True}
+        for deletion in ("backspace", "delete", "selection"):
+            with self.subTest(deletion=deletion):
+                note.d["lines"] = [dict(original)]
+                note.render()
+                text.focus_force()
+                self.app.root.update()
+                if deletion == "selection":
+                    text.tag_add("sel", "1.3", "1.end")
+                    text.event_generate("<KeyPress-BackSpace>")
+                    text.event_generate("<KeyRelease-BackSpace>")
+                    before_last = original
+                else:
+                    before_last = dict(original, text="删" if deletion == "backspace" else "辑")
+                    for remaining in range(len(original["text"]) - 1, -1, -1):
+                        text.mark_set("insert", "1.end" if deletion == "backspace" else "1.3")
+                        key = "BackSpace" if deletion == "backspace" else "Delete"
+                        text.event_generate(f"<KeyPress-{key}>")
+                        text.event_generate(f"<KeyRelease-{key}>")
+                        self.assertEqual(note.d["lines"][0]["checked"], remaining > 0)
+                empty = {"type": "todo", "text": "", "checked": False}
+                self.assertEqual(note.d["lines"], [empty])
+                self.assertEqual(text.image_cget("1.0", "image"), str(note._check_slots[False]))
+                self.assertFalse(text.tag_ranges("done"))
+                self.assertEqual(note.status.cget("text"), "待办 0/1")
+                text.event_generate("<<Undo>>")
+                self.assertEqual(note.d["lines"], [before_last])
+                text.event_generate("<<Redo>>")
+                self.assertEqual(note.d["lines"], [empty])
+                text.insert("insert", "新待办")
+                note._on_keyrelease(None)
+                self.assertEqual(note.d["lines"], [dict(empty, text="新待办")])
+
+    def test_last_letter_delete_hides_strike_before_native_edit_and_before_keyrelease(self):
+        note, text = self.note, self.text
+        for key, selection, content in (("BackSpace", False, "a"), ("Delete", False, "a"),
+                                        ("BackSpace", True, "abc"), ("Delete", True, "abc"),
+                                        ("BackSpace", False, "字"), ("BackSpace", False, "😀")):
+            with self.subTest(key=key, selection=selection, content=content):
+                note.d["lines"] = [{"type": "todo", "text": content, "checked": True}]
+                note.render()
+                text.focus_force()
+                self.app.root.update()
+                bars = list(note._strike_widgets)
+                self.assertTrue(bars)
+                text.mark_set("insert", "1.end" if key == "BackSpace" else "1.3")
+                if selection:
+                    text.tag_add("sel", "1.3", "1.end")
+                snapshots = []
+                tags = text.bindtags()
+                probe = "BeforeNativeDelete"
+                text.bindtags((tags[0], probe, *tags[1:]))
+                text.bind_class(probe, "<KeyPress>", lambda e: snapshots.append(
+                    [bar.winfo_manager() for bar in bars if bar.winfo_exists()]))
+                try:
+                    text.event_generate(f"<KeyPress-{key}>")
+                    self.assertEqual(snapshots, [[""]])
+                    self.assertEqual(note.d["lines"], [
+                        {"type": "todo", "text": "", "checked": False}])
+                    self.app.root.update()
+                    self.assertFalse(note._strike_widgets)
+                finally:
+                    text.bindtags(tags)
+                    text.unbind_class(probe, "<KeyPress>")
+
+    def test_last_character_strike_is_hidden_before_layout_flushes_redraws(self):
+        note, text = self.note, self.text
+        for sync in (False, True):
+            with self.subTest(sync=sync):
+                note.d["lines"] = [{"type": "todo", "text": "字", "checked": True}]
+                note.render()
+                self.app.root.update()
+                bars = list(note._strike_widgets)
+                self.assertTrue(bars)
+                self.assertTrue(all(bar.winfo_manager() == "place" for bar in bars))
+                text.delete("1.3", "1.end")
+                if sync:
+                    note._sync_lines_from_text()
+                flush = note.body.update_idletasks
+                snapshots = []
+
+                def check_before_flush():
+                    snapshots.append([bar.winfo_manager() for bar in bars if bar.winfo_exists()])
+                    flush()
+
+                with patch.object(note.body, "update_idletasks", side_effect=check_before_flush):
+                    note._draw_strikes()
+                self.assertTrue(snapshots)
+                self.assertTrue(all(not manager for frame in snapshots for manager in frame), snapshots)
+                self.assertFalse(note._strike_widgets)
+
     def test_first_todo_backspace_does_not_delete_checkbox(self):
         note = self.app.new_note()
         text = note.text

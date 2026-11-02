@@ -653,6 +653,8 @@ class NoteWindow(tk.Toplevel):
         t.bind("<KeyRelease>", self._on_keyrelease)
         t.bind("<KeyPress-Return>", self._on_enter)
         t.bind("<KeyPress-BackSpace>", self._on_backspace)
+        t.bind("<KeyPress-BackSpace>", self._hide_strikes_before_delete, add="+")
+        t.bind("<KeyPress-Delete>", self._hide_strikes_before_delete)
         t.bind("<Left>", self._on_left)
         t.bind("<Up>", self._on_vertical)
         t.bind("<Down>", self._on_vertical)
@@ -665,6 +667,11 @@ class NoteWindow(tk.Toplevel):
             if not t.bind_class(caret_tag, sequence):
                 t.bind_class(caret_tag, sequence,
                              lambda e: e.widget.winfo_toplevel()._clamp_todo_cursor())
+        # Text 类绑定完成删除后立即同步，长按删除也不必等 KeyRelease 才刷新。
+        for sequence in ("<KeyPress-BackSpace>", "<KeyPress-Delete>"):
+            if not t.bind_class(caret_tag, sequence):
+                t.bind_class(caret_tag, sequence,
+                             lambda e: e.widget.winfo_toplevel()._on_keyrelease(None))
         t.bind("<<Copy>>", lambda e: self._clipboard_edit("tk_textCopy"))
         t.bind("<<Cut>>", lambda e: self._clipboard_edit("tk_textCut"))
         t.bind("<<Paste>>", lambda e: self._clipboard_edit("tk_textPaste"))
@@ -1160,6 +1167,10 @@ class NoteWindow(tk.Toplevel):
         width = self.body.winfo_width()
         if width < 50:
             return
+        # 测量布局会刷新画面，先隐藏文字已删掉的旧横线，避免空行残留一帧。
+        for bar in self._strike_widgets:
+            if self.text.compare(bar._text_start, ">=", f"{bar._text_start} lineend"):
+                bar.place_forget()
         # 正文和所有装饰始终留在同一内容坐标系，滚动只移动整个 Text 窗口。
         self.text.place_configure(width=width)
         self.body.update_idletasks()
@@ -1651,6 +1662,7 @@ class NoteWindow(tk.Toplevel):
         images = {index: t.image_cget(index, "image")
                   for kind, name, index in t.dump("1.0", "end-1c", image=True)}
         checkbox_images = {str(image) for image in self._check_slots.values()}
+        old = self.d["lines"]
         lines = []
         for row in range(1, int(t.index("end-1c").split(".")[0]) + 1):
             image = images.get(f"{row}.0")
@@ -1658,9 +1670,13 @@ class NoteWindow(tk.Toplevel):
             content = t.get(f"{row}.0", f"{row}.end")
             if todo and content.startswith(PREFIX_PAD):
                 content = content[len(PREFIX_PAD):]
+            if (todo and not content and image == str(self._check_slots[True]) and
+                    row <= len(old) and old[row - 1]["type"] == "todo" and old[row - 1]["text"]):
+                image = str(self._check_slots[False])
+                t.image_configure(f"{row}.0", image=self._check_slots[False])
+                t.tag_remove("done", f"{row}.0", f"{row}.end")
             lines.append({"type": "todo" if todo else "text", "text": content,
                           "checked": todo and image == str(self._check_slots[True])})
-        old = self.d["lines"]
         self.d["lines"] = lines
         if old != lines:
             self.d["editedAt"] = datetime.now().isoformat(timespec="microseconds")
@@ -1705,6 +1721,23 @@ class NoteWindow(tk.Toplevel):
         self.d["editedAt"] = datetime.now().isoformat(timespec="microseconds")
         self.app.schedule_save()
         return "break"
+
+    def _hide_strikes_before_delete(self, event):
+        if self._ime_composing(self.text):
+            return
+        t = self.text
+        selected = t.tag_ranges("sel")
+        for bar in self._strike_widgets:
+            row = bar._text_start.split(".")[0]
+            start, end = f"{row}.{1 + len(PREFIX_PAD)}", f"{row}.end"
+            if selected:
+                removes_text = (t.compare(selected[0], "<=", start) and
+                                t.compare(selected[1], ">=", end))
+            else:
+                position = end if event.keysym == "BackSpace" else start
+                removes_text = len(t.get(start, end)) == 1 and t.compare("insert", "==", position)
+            if removes_text:
+                bar.place_forget()
 
     def _on_backspace(self, _e):
         if self._ime_composing(self.text):
