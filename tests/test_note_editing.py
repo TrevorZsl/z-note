@@ -718,6 +718,97 @@ class NoteEditingTests(unittest.TestCase):
             if clipboard is not None:
                 text.clipboard_append(clipboard)
 
+    def test_multiple_todos_copy_and_cut_between_notes_preserve_structure(self):
+        from copy import deepcopy
+        source = self.note
+        original = [
+            {"type": "todo", "text": "买牛奶😀", "checked": False},
+            {"type": "text", "text": "普通说明", "checked": False},
+            {"type": "todo", "text": "已处理", "checked": True},
+            {"type": "todo", "text": "", "checked": False}]
+        target = self.app.new_note()
+        try:
+            clipboard = self.text.clipboard_get()
+        except main.tk.TclError:
+            clipboard = None
+        try:
+            for command in ("<<Copy>>", "<<Cut>>"):
+                for start in ("1.0", "1.3"):
+                    with self.subTest(command=command, start=start):
+                        source.d["lines"] = deepcopy(original)
+                        source.render()
+                        source.text.tag_add("sel", start, "end-1c")
+                        source.text.event_generate(command)
+                        self.assertEqual(source.text.clipboard_get(),
+                                         "买牛奶😀\n普通说明\n已处理\n")
+                        target.d["lines"] = [{"type": "todo", "text": "旧内容", "checked": True}]
+                        target.render()
+                        before = deepcopy(target.d["lines"])
+                        target.text.tag_add("sel", "1.0", "end-1c")
+                        target.text.event_generate("<<Paste>>")
+                        self.assertEqual(target.d["lines"], original)
+                        self.assertEqual(len(target.text.dump("1.0", "end", image=True)), 3)
+                        target.text.event_generate("<<Undo>>")
+                        self.assertEqual(target.d["lines"], before)
+                        target.text.event_generate("<<Redo>>")
+                        self.assertEqual(target.d["lines"], original)
+                        if command == "<<Cut>>":
+                            source.text.event_generate("<<Undo>>")
+                        self.assertEqual(source.d["lines"], original)
+        finally:
+            self.text.clipboard_clear()
+            if clipboard is not None:
+                self.text.clipboard_append(clipboard)
+
+    def test_partial_todo_copy_stays_plain_and_structured_paste_keeps_surrounding_text(self):
+        note, text = self.note, self.text
+        try:
+            clipboard = text.clipboard_get()
+        except main.tk.TclError:
+            clipboard = None
+        try:
+            note.d["lines"] = [{"type": "todo", "text": "abc", "checked": True}]
+            note.render()
+            text.tag_add("sel", "1.4", "1.end")
+            text.event_generate("<<Copy>>")
+            self.assertEqual(text.clipboard_get(), "bc")
+            text.tag_remove("sel", "1.0", "end")
+            source = self.app.new_note()
+            source.d["lines"] = [
+                {"type": "todo", "text": "第一项", "checked": False},
+                {"type": "todo", "text": "第二项😀", "checked": True}]
+            source.render()
+            source.text.tag_add("sel", "1.0", "end-1c")
+            source.text.event_generate("<<Copy>>")
+            for kind in ("text", "todo"):
+                with self.subTest(kind=kind):
+                    note.d["lines"] = [{"type": kind, "text": "前😀后", "checked": False}]
+                    note.render()
+                    text.mark_set("insert", f"1.{note._prefix_len(note.d['lines'][0]) + 3}")
+                    text.event_generate("<<Paste>>")
+                    self.assertEqual(note.d["lines"], [
+                        {"type": kind, "text": "前😀", "checked": False},
+                        {"type": "todo", "text": "第一项", "checked": False},
+                        {"type": "todo", "text": "第二项😀后", "checked": True}])
+                    self.assertEqual(text.get("insert", "3.end"), "后")
+            # 外部重新复制同样的文字，剪贴板序号已变，不能复用内部待办结构。
+            plain = text.clipboard_get()
+            text.clipboard_clear()
+            text.clipboard_append(plain)
+            note.d["lines"] = [{"type": "text", "text": "", "checked": False}]
+            note.render()
+            text.mark_set("insert", "1.0")
+            with patch.object(main.user32, "GetClipboardSequenceNumber",
+                              return_value=self.app._clipboard_lines[0] + 1):
+                text.event_generate("<<Paste>>")
+            self.assertEqual(note.d["lines"], [
+                {"type": "text", "text": "第一项", "checked": False},
+                {"type": "text", "text": "第二项😀", "checked": False}])
+        finally:
+            text.clipboard_clear()
+            if clipboard is not None:
+                text.clipboard_append(clipboard)
+
     def test_undo_restores_todo_structure_and_new_edit_clears_redo(self):
         from copy import deepcopy
         note, text = self.note, self.text
@@ -2531,6 +2622,29 @@ class NoteEditingTests(unittest.TestCase):
             {"type": "text", "text": "", "checked": False}])
         self.assertEqual(self.text.index("insert"), "1.0")
         self.assertEqual(self.note.body.yview(), (0.0, 1.0))
+
+    def test_backspace_merge_keeps_cursor_before_current_text(self):
+        for previous_type in ("todo", "text"):
+            for previous_text in ("上一项", "上一项😀" * 30, ""):
+                with self.subTest(previous_type=previous_type, previous_text=previous_text):
+                    self.note.d["lines"] = [
+                        {"type": previous_type, "text": previous_text, "checked": previous_type == "todo"},
+                        {"type": "todo", "text": "当前待办文字", "checked": False}]
+                    self.note.render()
+                    self.app.root.update()
+                    self.text.mark_set("insert", "2.3")
+                    self.assertEqual(self.note._on_backspace(None), "break")
+                    self.note._on_keyrelease(None)
+                    self.app.root.update()
+                    self.assertEqual(self.note.d["lines"], [
+                        {"type": previous_type, "text": previous_text + "当前待办文字",
+                         "checked": previous_type == "todo"}])
+                    self.assertEqual(self.text.get("insert", "1.end"), "当前待办文字")
+                    self.assertIsNotNone(self._visible_bbox("insert"))
+                    self.text.insert("insert", "插入")
+                    self.note._on_keyrelease(None)
+                    self.assertEqual(self.note.d["lines"][0]["text"],
+                                     previous_text + "插入当前待办文字")
 
     def test_backspace_empty_todo_keeps_scrolled_view_and_previous_row_cursor(self):
         for row in (25, 40):

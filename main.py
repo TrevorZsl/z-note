@@ -665,6 +665,7 @@ class NoteWindow(tk.Toplevel):
             if not t.bind_class(caret_tag, sequence):
                 t.bind_class(caret_tag, sequence,
                              lambda e: e.widget.winfo_toplevel()._clamp_todo_cursor())
+        t.bind("<<Copy>>", lambda e: self._clipboard_edit("tk_textCopy"))
         t.bind("<<Cut>>", lambda e: self._clipboard_edit("tk_textCut"))
         t.bind("<<Paste>>", lambda e: self._clipboard_edit("tk_textPaste"))
         t.bind("<<Undo>>", lambda e: self._undo_edit())
@@ -1545,11 +1546,80 @@ class NoteWindow(tk.Toplevel):
             return "break"
         self._sync_lines_from_text()
         self._clamp_todo_cursor()
+        t = self.text
+        if command in ("tk_textCopy", "tk_textCut"):
+            if not t.tag_ranges("sel"):
+                return "break"
+            first, last = t.index("sel.first"), t.index("sel.last")
+            chunks = []
+            copied_lines = []
+            for row in range(int(first.split(".")[0]), int(last.split(".")[0]) + 1):
+                start = first if t.compare(first, ">", f"{row}.0") else f"{row}.0"
+                end = last if t.compare(last, "<", f"{row}.end") else f"{row}.end"
+                line = self.d["lines"][row - 1]
+                body = f"{row}.{self._prefix_len(line)}"
+                whole_todo = (line["type"] == "todo" and
+                              t.compare(start, "<=", body) and
+                              t.compare(end, "==", f"{row}.end") and
+                              t.compare(last, ">", f"{row}.0"))
+                if line["type"] == "todo" and t.compare(start, "<", body):
+                    start = body
+                content = t.get(start, end) if t.compare(start, "<=", end) else ""
+                chunks.append(content)
+                copied_lines.append({"type": "todo" if whole_todo else "text",
+                                     "text": content, "checked": whole_todo and line["checked"]})
+            t.clipboard_clear()
+            content = "\n".join(chunks)
+            t.clipboard_append(content)
+            # 结构只留在应用内；序号防止外部软件重新复制相同文字时误用旧结构。
+            self.app._clipboard_lines = (user32.GetClipboardSequenceNumber(), content, copied_lines)
+            if command == "tk_textCopy":
+                return "break"
+            t.delete(first, last)
+            self._on_keyrelease(None)
+            return "break"
+        if command == "tk_textPaste":
+            try:
+                content = t.clipboard_get()
+            except tk.TclError:
+                return "break"
+            copied = getattr(self.app, "_clipboard_lines", None)
+            if (copied and copied[:2] == (user32.GetClipboardSequenceNumber(), content) and
+                    any(line["type"] == "todo" for line in copied[2])):
+                self._paste_lines(deepcopy(copied[2]))
+                self._on_keyrelease(None)
+                return "break"
         if command == "tk_textPaste" and self.text.tag_ranges("sel"):
             self.text.mark_set("insert", "sel.first")
         self.text.tk.call(command, self.text)
         self._on_keyrelease(None)
         return "break"
+
+    def _paste_lines(self, incoming):
+        t = self.text
+        selected = t.tag_ranges("sel")
+        first, last = map(str, selected) if selected else (t.index("insert"), t.index("insert"))
+        start_row, _ = self._row_col(first)
+        end_row, _ = self._row_col(last)
+        lines = self.d["lines"]
+        body = f"{start_row + 1}.{self._prefix_len(lines[start_row])}"
+        left = t.get(body, first) if t.compare(first, ">", body) else ""
+        body = f"{end_row + 1}.{self._prefix_len(lines[end_row])}"
+        right = t.get(last if t.compare(last, ">", body) else body, f"{end_row + 1}.end")
+        if incoming[0]["type"] == "text" and left:
+            incoming[0] = dict(lines[start_row], text=left + incoming[0]["text"])
+        elif incoming[0]["type"] == "todo" and left:
+            incoming.insert(0, dict(lines[start_row], text=left))
+        if (len(incoming) > 1 and incoming[-1]["type"] == "text" and
+                not incoming[-1]["text"] and last == f"{end_row + 1}.0"):
+            incoming[-1] = dict(lines[end_row], text="")
+        # 用 Tk 的字符计数定位，兼容 emoji 等占用多个 Tcl 字符的文字。
+        cursor_row = start_row + len(incoming)
+        cursor_col = self._prefix_len(incoming[-1]) + int(t.tk.call("string", "length", incoming[-1]["text"]))
+        incoming[-1]["text"] += right
+        lines[start_row:end_row + 1] = incoming
+        self.render(keep_cursor=False)
+        t.mark_set("insert", f"{cursor_row}.{cursor_col}")
 
     def _select_all(self, _event):
         self.text.tag_add("sel", "1.0", "end-1c")
@@ -1646,9 +1716,9 @@ class NoteWindow(tk.Toplevel):
         ln = lines[row]
         if col <= self._prefix_len(ln) and row > 0:
             prev = lines[row - 1]
+            target = self.text.index(f"{row}.end")
             prev["text"] += ln["text"]
             del lines[row]
-            target = f"{row}.0+{self._prefix_len(prev)}c lineend"
             self.render(keep_cursor=False)
             self.text.mark_set("insert", target)
             self._see_text("insert")
