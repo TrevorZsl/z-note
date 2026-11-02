@@ -1140,7 +1140,7 @@ class NoteEditingTests(unittest.TestCase):
 
     def test_reset_hotkeys_restores_all_defaults_and_keeps_old_bindings_on_conflict(self):
         self.app.data["settings"].update(newHotkey="Ctrl+Alt+H", hideHotkey="Ctrl+Alt+N",
-                                         showHotkey="Ctrl+Shift+S")
+                                         showHotkey="Ctrl+Shift+S", convertHotkey="Ctrl+Shift+K")
         self.app._hotkey_hwnd = self.app.root.winfo_id()
         self.app._hotkey_ids = {"new": 1, "hide": 2, "show": 3}
         self.app._active_hotkeys = {"new": "Ctrl+Alt+H", "hide": "Ctrl+Alt+N", "show": "Ctrl+Shift+S"}
@@ -1148,6 +1148,7 @@ class NoteEditingTests(unittest.TestCase):
              patch.object(main.user32, "UnregisterHotKey"), patch.object(main, "save_data") as save:
             self.assertIn("占用", self.app.reset_hotkeys())
             self.assertEqual(self.app.hotkey_text("new"), "Ctrl+Alt+H")
+            self.assertEqual(self.app.hotkey_text("convert"), "Ctrl+Shift+K")
             self.assertEqual(self.app._active_hotkeys["hide"], "Ctrl+Alt+N")
             self.assertEqual(self.app._active_hotkeys["show"], "Ctrl+Shift+S")
             save.assert_not_called()
@@ -1172,6 +1173,7 @@ class NoteEditingTests(unittest.TestCase):
             self.assertEqual(settings.hotkey_entries["new"].get(), "Ctrl+Alt+N")
             self.assertEqual(settings.hotkey_entries["hide"].get(), "Ctrl+Alt+H")
             self.assertEqual(settings.hotkey_entries["show"].get(), "Ctrl+Alt+S")
+            self.assertEqual(settings.hotkey_entries["convert"].get(), "Ctrl+Shift+L")
             self.assertEqual(self.app._active_hotkeys,
                              {"new": "Ctrl+Alt+N", "hide": "Ctrl+Alt+H", "show": "Ctrl+Alt+S"})
             save.assert_called_once_with(self.app.data)
@@ -1700,6 +1702,203 @@ class NoteEditingTests(unittest.TestCase):
         self.assertEqual(self.app.base_font.actual("weight"), "normal")
         self.assertEqual(self.note._chip_font.actual("weight"), "bold")
 
+    def test_convert_shortcut_majority_and_repeat_preserve_selection_and_history(self):
+        from copy import deepcopy
+        note, text = self.note, self.text
+        for kinds in (("text",), ("todo",), ("text", "text"), ("todo", "todo"),
+                      ("todo", "text"), ("todo", "todo", "text"), ("text", "text", "todo")):
+            with self.subTest(kinds=kinds):
+                original = [{"type": kind, "text": f"中文😀行 {i}", "checked": kind == "todo"}
+                            for i, kind in enumerate(kinds)]
+                note.d["lines"] = deepcopy(original)
+                note.render()
+                text.focus_force()
+                self.app.root.update()
+                text.tag_add("sel", "1.0", "end-1c")
+                text.mark_set("insert", "end-1c")
+                history = len(note._edit_history)
+                target = "text" if kinds.count("todo") * 2 > len(kinds) else "todo"
+                with patch.object(note, "render", wraps=note.render) as render, \
+                        patch.object(self.app, "schedule_save") as save:
+                    text.event_generate("<Control-Shift-L>")
+                    text.event_generate("<KeyRelease>", keycode=76, state=5)
+                    render.assert_called_once()
+                    save.assert_called_once()
+                expected = [dict(line, type=target, checked=line["checked"] if target == "todo" else False)
+                            for line in original]
+                self.assertEqual(note.d["lines"], expected)
+                self.assertEqual(len(note._edit_history), history + 1)
+                self.assertEqual(tuple(map(str, text.tag_ranges("sel"))), ("1.0", text.index("end-1c")))
+                self.assertEqual(text.index("insert"), text.index("end-1c"))
+                text.event_generate("<Control-Shift-L>")
+                self.assertTrue(all(line["type"] != target for line in note.d["lines"]))
+                text.event_generate("<<Undo>>")
+                self.assertEqual(note.d["lines"], expected)
+                text.event_generate("<<Undo>>")
+                self.assertEqual(note.d["lines"], original)
+                text.event_generate("<<Redo>>")
+                self.assertEqual(note.d["lines"], expected)
+
+    def test_convert_shortcut_partial_selection_empty_and_wrapped_rows(self):
+        note, text = self.note, self.text
+        note.d["lines"] = [
+            {"type": "text", "text": "中😀abc" * 30, "checked": False},
+            {"type": "text", "text": "", "checked": False},
+            {"type": "todo", "text": "保持完成", "checked": True}]
+        note.render()
+        text.focus_force()
+        self.app.root.update()
+        text.tag_add("sel", "1.3", "3.0")
+        text.mark_set("insert", "1.3")
+        text.event_generate("<Control-Shift-L>")
+        self.assertEqual([line["type"] for line in note.d["lines"]], ["todo"] * 3)
+        self.assertTrue(note.d["lines"][2]["checked"])
+        self.assertEqual(tuple(map(str, text.tag_ranges("sel"))), ("1.6", "3.0"))
+        self.assertEqual(text.index("insert"), "1.6")
+        text.event_generate("<Control-Shift-L>")
+        self.assertEqual([line["type"] for line in note.d["lines"]], ["text", "text", "todo"])
+        self.assertEqual(tuple(map(str, text.tag_ranges("sel"))), ("1.3", "3.0"))
+        text.tag_remove("sel", "1.0", "end")
+        text.tag_add("sel", "1.1", "1.3")
+        text.mark_set("insert", "1.3")
+        text.event_generate("<Control-Shift-L>")
+        self.assertEqual(tuple(map(str, text.tag_ranges("sel"))), ("1.4", "1.6"))
+        text.tag_remove("sel", "1.0", "end")
+        text.mark_set("insert", "2.0")
+        text.event_generate("<Control-Shift-L>")
+        self.assertEqual(note.d["lines"][1], {"type": "todo", "text": "", "checked": False})
+        self.assertEqual(text.index("insert"), "2.3")
+
+    def test_convert_menu_uses_selection_inside_and_clicked_row_outside(self):
+        note, text = self.note, self.text
+        note.d["lines"] = [{"type": "todo", "text": "已完成", "checked": True},
+                           {"type": "text", "text": "文字", "checked": False},
+                           {"type": "text", "text": "其他行", "checked": False}]
+        note.render()
+        self.app.root.update()
+        text.tag_add("sel", "1.3", "2.end")
+        def rightclick(index):
+            box = text.bbox(index)
+            event = type("Event", (), {"x": box[0] + 1, "y": box[1] + 1,
+                                      "x_root": 100, "y_root": 100})()
+            with patch.object(note, "_show_context_menu") as menu:
+                note._on_rightclick(event)
+            return menu.call_args
+        call = rightclick("1.3")
+        self.assertEqual(call.args[2][0][0], "全部转为待办（2 行）")
+        self.assertEqual(call.kwargs["shortcuts"], {0: "Ctrl+Shift+L"})
+        call.args[2][0][1]()
+        self.assertTrue(note.d["lines"][0]["checked"])
+        self.assertEqual(note.d["lines"][1]["type"], "todo")
+        call = rightclick("3.0")
+        self.assertEqual(call.args[2][0][0], "转为待办")
+        self.assertFalse(text.tag_ranges("sel"))
+        call.args[2][0][1]()
+        self.assertEqual(note.d["lines"][2]["type"], "todo")
+
+    def test_convert_hotkey_is_local_live_configurable_and_rejects_conflicts(self):
+        from copy import deepcopy
+        self.assertEqual(self.app.hotkey_text("convert"), "Ctrl+Shift+L")
+        with patch.object(main.user32, "RegisterHotKey") as register:
+            for value in ("Ctrl+C", "Ctrl+Shift+Z", "Ctrl+Alt+N", "Ctrl+Left", "Delete"):
+                self.assertIsNotNone(self.app.update_hotkey("convert", value))
+                self.assertEqual(self.app.hotkey_text("convert"), "Ctrl+Shift+L")
+            self.assertIsNone(self.app.update_hotkey("convert", "Ctrl+Shift+K"))
+            self.assertIn("文字／待办", self.app.update_hotkey("new", "Ctrl+Shift+K"))
+            register.assert_not_called()
+        for note in (self.note, self.app.new_note()):
+            note.d["lines"] = [{"type": "text", "text": "正文", "checked": False}]
+            note.render()
+            note.text.focus_force()
+            self.app.root.update()
+            note.text.event_generate("<Control-Shift-L>")
+            self.assertEqual(note.d["lines"][0]["type"], "text")
+            note.text.event_generate("<Control-Shift-K>")
+            self.assertEqual(note.d["lines"][0]["type"], "todo")
+        settings = main.SettingsWindow(self.app)
+        entry = settings.hotkey_entries["convert"]
+        entry.focus_force()
+        self.app.root.update()
+        before = deepcopy(self.note.d["lines"])
+        entry.event_generate("<Control-Shift-K>")
+        self.assertEqual(self.note.d["lines"], before)
+        self.assertEqual(entry.get(), "Ctrl+Shift+K")
+        self.note.text.focus_force()
+        self.app.root.update()
+        with patch.object(self.note, "_ime_composing", return_value=True):
+            self.note.text.event_generate("<Control-Shift-K>")
+        self.assertEqual(self.note.d["lines"], before)
+        settings.destroy()
+        self.note.edit_title()
+        self.app.root.update()
+        self.note._title_editor.event_generate("<Control-Shift-K>")
+        self.assertEqual(self.note.d["lines"], before)
+        self.note._title_editor.event_generate("<Return>")
+
+    def test_convert_hotkey_capture_persistence_and_local_only_reset(self):
+        import tempfile
+        from pathlib import Path
+        with patch.object(main.user32, "RegisterHotKey", return_value=True) as register, \
+                patch.object(main.user32, "UnregisterHotKey"):
+            self._start_hotkeys_impl(self.app)
+            self.assertEqual(register.call_count, 3)
+            self.assertNotIn("convert", self.app._hotkey_ids)
+            settings = main.SettingsWindow(self.app)
+            entry = settings.hotkey_entries["convert"]
+            entry.focus_force()
+            self.app.root.update()
+            with patch.object(main, "save_data") as save:
+                entry.event_generate("<KeyPress>", keycode=75, state=5)
+                self.assertEqual(entry.get(), "Ctrl+Shift+K")
+                self.assertEqual(self.app.data["settings"]["convertHotkey"], "Ctrl+Shift+K")
+                save.assert_called_once_with(self.app.data)
+            entry.event_generate("<Escape>")
+            self.assertTrue(settings.winfo_exists())
+            with tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parents[1]) as folder, \
+                    patch.object(storage, "DATA_DIR", folder), \
+                    patch.object(storage, "DATA_FILE", str(Path(folder) / "notes.json")), \
+                    patch.object(storage, "BACKUP_DIR", str(Path(folder) / "backup")):
+                storage.save_data(self.app.data)
+                loaded = storage.load_data()
+                with patch.object(main, "load_data", return_value=loaded):
+                    restored = main.App()
+                try:
+                    self.assertEqual(restored.hotkey_text("convert"), "Ctrl+Shift+K")
+                finally:
+                    for job in restored.root.tk.call("after", "info"):
+                        restored.root.tk.call("after", "cancel", job)
+                    restored.root.destroy()
+            register.reset_mock()
+            settings._reset_hotkeys()
+            self.assertEqual(entry.get(), "Ctrl+Shift+L")
+            register.assert_not_called()
+            settings.destroy()
+
+    def test_convert_context_menu_displays_right_aligned_accelerator(self):
+        self.note._show_context_menu(100, 100,
+            [("全部转为待办（100 行）", lambda: None), ("在下方插入新行", lambda: None),
+             ("删除此行", lambda: None)], shortcuts={0: "Ctrl+Alt+Shift+Backspace"})
+        self.app.root.update()
+        popup = self.note._context_menu
+        canvas = popup.winfo_children()[0]
+        label, shortcut = [item for item in canvas.find_withtag("item0") if canvas.type(item) == "text"]
+        self.assertEqual(canvas.itemcget(shortcut, "anchor"), "e")
+        self.assertEqual(canvas.itemcget(shortcut, "fill"), main.INK)
+        self.assertLess(canvas.bbox(label)[2], canvas.bbox(shortcut)[0])
+        self.assertLessEqual(canvas.bbox(shortcut)[2], canvas.winfo_width())
+        popup.event_generate("<Escape>")
+
+    def test_convert_shortcut_handles_selection_through_final_newline(self):
+        note, text = self.note, self.text
+        note.d["lines"] = [{"type": "text", "text": "末行😀", "checked": False}]
+        note.render()
+        text.focus_force()
+        self.app.root.update()
+        text.tag_add("sel", "1.0", "end")
+        text.event_generate("<KeyPress>", keycode=76, state=7)
+        self.assertEqual(note.d["lines"], [{"type": "todo", "text": "末行😀", "checked": False}])
+        self.assertEqual(tuple(map(str, text.tag_ranges("sel"))), ("1.0", text.index("end-1c")))
+
     def test_context_menu_uses_note_style_and_activates_row_action(self):
         self.note._show_context_menu(100, 100,
                                      [("转为文本行", lambda: self.note.convert(0, "text")),
@@ -1932,7 +2131,8 @@ class NoteEditingTests(unittest.TestCase):
                 snapshots = []
                 tags = text.bindtags()
                 probe = "BeforeNativeDelete"
-                text.bindtags((tags[0], probe, *tags[1:]))
+                native = tags.index("Text")
+                text.bindtags((*tags[:native], probe, *tags[native:]))
                 text.bind_class(probe, "<KeyPress>", lambda e: snapshots.append(
                     [bar.winfo_manager() for bar in bars if bar.winfo_exists()]))
                 try:

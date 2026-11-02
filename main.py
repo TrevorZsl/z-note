@@ -184,6 +184,9 @@ WM_HOTKEY = 0x0312
 HOTKEY_ACTIONS = {"new": (1, "newHotkey", "Ctrl+Alt+N"),
                   "hide": (2, "hideHotkey", "Ctrl+Alt+H"),
                   "show": (3, "showHotkey", "Ctrl+Alt+S")}
+LOCAL_HOTKEY_ACTIONS = {"convert": ("convertHotkey", "Ctrl+Shift+L")}
+HOTKEY_LABELS = {"new": "新建便签", "hide": "隐藏所有便签", "show": "显示所有便签",
+                 "convert": "文字／待办切换"}
 HOTKEY_KEYS = {**{chr(k): k for k in range(65, 91)},
                **{str(k): 48 + k for k in range(10)},
                **{f"F{k}": 111 + k for k in range(1, 25)},
@@ -660,7 +663,11 @@ class NoteWindow(tk.Toplevel):
         t.bind("<Down>", self._on_vertical)
         caret_tag = "TodoCaret"
         tags = t.bindtags()
-        t.bindtags((tags[0], tags[1], caret_tag, *tags[2:]))
+        t.bindtags(("NoteShortcuts", tags[0], tags[1], caret_tag, *tags[2:]))
+        for sequence in ("<KeyPress>", "<KeyRelease>"):
+            if not t.bind_class("NoteShortcuts", sequence):
+                t.bind_class("NoteShortcuts", sequence,
+                             lambda e: e.widget.winfo_toplevel()._local_shortcut(e))
         # 在 Text 默认移动完成后立即校正，避免连续按键在前缀中插入文字。
         for sequence in ("<KeyPress>", "<KeyRelease>", "<Button-1>", "<B1-Motion>",
                          "<ButtonRelease-1>", "<FocusIn>"):
@@ -1765,8 +1772,40 @@ class NoteWindow(tk.Toplevel):
     def _on_click(self, e):
         self.focus_set(); self.text.focus_set()
 
+    def _local_shortcut(self, event):
+        modifiers = sum(value for mask, value in ((4, 2), (0x20000, 1), (1, 4)) if event.state & mask)
+        if (modifiers, event.keycode) == parse_hotkey(self.app.hotkey_text("convert")):
+            if event.type == tk.EventType.KeyRelease:
+                return "break"  # 转换已保存，松键不再走普通输入的同步和保存流程。
+            return self.toggle_line_type()
+
+    def _conversion_rows(self):
+        selected = self.text.tag_ranges("sel")
+        if not selected:
+            return [self._row_col(self.text.index("insert"))[0]]
+        first, _ = self._row_col(str(selected[0]))
+        last, col = self._row_col(str(selected[1]))
+        if col == 0 and last > first:
+            last -= 1
+        return list(range(first, last + 1))
+
+    def _conversion_target(self, rows):
+        todos = sum(self.d["lines"][row]["type"] == "todo" for row in rows)
+        return "text" if todos * 2 > len(rows) else "todo"
+
+    def toggle_line_type(self):
+        if self._ime_composing(self.text):
+            return "break"
+        self._sync_lines_from_text()
+        rows = self._conversion_rows()
+        self.convert_rows(rows, self._conversion_target(rows))
+        return "break"
+
     def _on_rightclick(self, e):
+        if self._ime_composing(self.text):
+            return "break"
         self.focus_set(); self.text.focus_set()
+        self._sync_lines_from_text()
         try:
             row, _ = self._row_col(self.text.index(f"@{e.x},{e.y}"))
         except Exception:
@@ -1774,16 +1813,24 @@ class NoteWindow(tk.Toplevel):
         lines = self.d["lines"]
         if row >= len(lines):
             return
-        target = "text" if lines[row]["type"] == "todo" else "todo"
+        if not self.text.tag_ranges("sel") or row not in self._conversion_rows():
+            self.text.tag_remove("sel", "1.0", "end")
+            self.text.mark_set("insert", self.text.index(f"@{e.x},{e.y}"))
+            self._clamp_todo_cursor()
+        rows = self._conversion_rows()
+        target = self._conversion_target(rows)
+        label = "转为文字" if target == "text" else "转为待办"
+        if len(rows) > 1:
+            label = f"全部{label}（{len(rows)} 行）"
         actions = [
-            ("转为文本行" if target == "text" else "转为待办行",
-             lambda: self.convert(row, target)),
+            (label, lambda: self.convert_rows(rows, target)),
             ("在下方插入新行", lambda: self.insert_line(row)),
             ("删除此行", lambda: self.delete_line(row)),
         ]
-        self._show_context_menu(e.x_root, e.y_root, actions)
+        self._show_context_menu(e.x_root, e.y_root, actions, shortcuts={0: self.app.hotkey_text("convert")})
 
-    def _show_context_menu(self, x, y, actions):
+    def _show_context_menu(self, x, y, actions, shortcuts=None):
+        shortcuts = shortcuts or {}
         old = getattr(self, "_context_menu", None)
         if old and old.winfo_exists():
             old.destroy()
@@ -1795,7 +1842,8 @@ class NoteWindow(tk.Toplevel):
         p.attributes("-transparentcolor", T_COLOR)
         p.attributes("-topmost", True)
         font = tkfont.Font(family=UI_FONT, size=10)
-        width = max(184, max(font.measure(label) for label, _ in actions) + 44)
+        width = max(184, max(font.measure(label) + (font.measure(shortcuts[i]) + 32 if i in shortcuts else 0)
+                             for i, (label, _) in enumerate(actions)) + 44)
         row_h = max(34, font.metrics("linespace") + 12)
         height = 16 + row_h * len(actions) + 9
         cv = tk.Canvas(p, width=width, height=height, bg=T_COLOR,
@@ -1811,6 +1859,9 @@ class NoteWindow(tk.Toplevel):
             highlights.append(highlight)
             cv.create_text(18, top + row_h / 2, anchor="w", text=label,
                            fill="#2B2F36", font=font, tags=(f"item{i}",))
+            if i in shortcuts:
+                cv.create_text(width - 18, top + row_h / 2, anchor="e", text=shortcuts[i],
+                               fill=INK, font=font, tags=(f"item{i}",))
             cv.tag_bind(f"item{i}", "<Enter>", lambda _e, n=i: select(n))
             cv.tag_bind(f"item{i}", "<Button-1>", lambda _e, n=i: activate(n))
             cv.tag_bind(highlight, "<Enter>", lambda _e, n=i: select(n))
@@ -1861,12 +1912,36 @@ class NoteWindow(tk.Toplevel):
         self.app.schedule_save()
 
     def convert(self, row, to):
-        ln = self.d["lines"][row]
-        ln["type"] = to
-        if to == "text":
-            ln["checked"] = False
+        self.convert_rows([row], to)
+
+    def convert_rows(self, rows, to):
+        if self._ime_composing(self.text):
+            return
+        t = self.text
+        positions = [t.index("insert"), *map(str, t.tag_ranges("sel"))]
+        positions = [index if t.compare(index, "<=", "end-1c") else t.index("end-1c")
+                     for index in positions]
+        anchors = []
+        for index in positions:
+            row, col = self._row_col(index)
+            body = f"{row+1}.{self._prefix_len(self.d['lines'][row])}"
+            count = t.count(body, index, "chars") if t.compare(index, ">", body) else None
+            anchors.append((row, count[0] if count else 0, col == 0))
+        for row in rows:
+            ln = self.d["lines"][row]
+            if to == "text" or ln["type"] != "todo":
+                ln["checked"] = False
+            ln["type"] = to
         self.render(keep_cursor=False)
-        self.text.mark_set("insert", f"{row+1}.0+{self._prefix_len(ln)}c")
+        restored = [t.index(f"{row+1}.0" if at_start else
+                            f"{row+1}.{self._prefix_len(self.d['lines'][row]) + offset}")
+                    for row, offset, at_start in anchors]
+        t.mark_set("insert", restored[0])
+        if len(restored) == 3:
+            t.tag_add("sel", restored[1], restored[2])
+        self._clamp_todo_cursor()
+        self._remember_edit()
+        t.focus_set()
         self._see_text("insert")
         self.d["editedAt"] = datetime.now().isoformat(timespec="microseconds")
         self.app.schedule_save()
@@ -2311,7 +2386,7 @@ class SettingsWindow(tk.Toplevel):
         self._hotkey_vars = {}
         self._hotkey_borders = []
         hotkey_rows = []
-        for action, name in (("new", "新建便签"), ("hide", "隐藏所有便签"), ("show", "显示所有便签")):
+        for action, name in HOTKEY_LABELS.items():
             hotkey_row = tk.Frame(f, bg=NOTE_BG)
             hotkey_row.pack(fill="x", pady=5)
             hotkey_row.columnconfigure(0, weight=1)
@@ -2510,7 +2585,7 @@ class SettingsWindow(tk.Toplevel):
         if error:
             self._hotkey_hint.configure(text=error, fg="#A44A42")
         else:
-            for action in HOTKEY_ACTIONS:
+            for action in HOTKEY_LABELS:
                 self._hotkey_vars[action].set(self.app.hotkey_text(action))
             self._hotkey_hint.configure(text="快捷键已恢复默认值。", fg=QUIET)
 
@@ -3092,7 +3167,10 @@ class App:
         self.icon.run_detached()
 
     def hotkey_text(self, action):
-        _, setting, default = HOTKEY_ACTIONS[action]
+        if action in LOCAL_HOTKEY_ACTIONS:
+            setting, default = LOCAL_HOTKEY_ACTIONS[action]
+        else:
+            _, setting, default = HOTKEY_ACTIONS[action]
         return self.data["settings"].get(setting, default)
 
     # 在 Tk 所在线程注册，编辑时可立即检查占用并替换绑定。
@@ -3127,8 +3205,35 @@ class App:
                 self._active_hotkeys[action] = value
 
     def update_hotkey(self, action, value):
-        if any(other != action and self.hotkey_text(other) == value for other in HOTKEY_ACTIONS):
-            return "此快捷键已用于另一项功能，请换一个组合键。"
+        parsed = parse_hotkey(value)
+        for other, label in HOTKEY_LABELS.items():
+            if other != action and parse_hotkey(self.hotkey_text(other)) == parsed:
+                return f"此快捷键已用于另一项功能“{label}”，请换一个组合键。"
+        if action in LOCAL_HOTKEY_ACTIONS:
+            if not (parsed[0] & 3) and not 112 <= parsed[1] <= 135:
+                return "请使用 Ctrl / Alt 组合键，或 F1–F24 功能键。"
+            reserved = {"Ctrl+A": "全选", "Ctrl+C": "复制", "Ctrl+X": "剪切", "Ctrl+V": "粘贴",
+                        "Ctrl+Z": "撤销", "Ctrl+Y": "重做", "Ctrl+Shift+Z": "重做",
+                        "Ctrl+Insert": "复制", "Shift+Insert": "粘贴", "Shift+Delete": "剪切",
+                        "Ctrl+Left": "光标移动", "Ctrl+Right": "光标移动",
+                        "Ctrl+Up": "光标移动", "Ctrl+Down": "光标移动",
+                        "Ctrl+Home": "光标移动", "Ctrl+End": "光标移动",
+                        "Ctrl+Shift+Left": "选区移动", "Ctrl+Shift+Right": "选区移动",
+                        "Ctrl+Shift+Up": "选区移动", "Ctrl+Shift+Down": "选区移动",
+                        "Ctrl+Shift+Home": "选区移动", "Ctrl+Shift+End": "选区移动",
+                        "Ctrl+Backspace": "删除文字", "Ctrl+Delete": "删除文字",
+                        "Ctrl+D": "删除文字", "Ctrl+H": "删除文字", "Ctrl+K": "删除至行尾",
+                        "Ctrl+O": "插入换行", "Ctrl+T": "交换字符", "Ctrl+I": "插入制表符",
+                        "Ctrl+Tab": "切换焦点", "Ctrl+Shift+Tab": "切换焦点",
+                        "Ctrl+Space": "设置选区起点", "Ctrl+Shift+Space": "扩展选区",
+                        "Ctrl+PgUp": "水平翻页", "Ctrl+PgDn": "水平翻页"}
+            for shortcut, label in reserved.items():
+                if parse_hotkey(shortcut) == parsed:
+                    return f"此快捷键已用于正文的“{label}”，请换一个组合键。"
+            if self.hotkey_text(action) != value:
+                self.data["settings"][LOCAL_HOTKEY_ACTIONS[action][0]] = value
+                self.save_now()
+            return None
         if self._active_hotkeys.get(action) == value:
             return None
         modifiers, key = parse_hotkey(value)
@@ -3151,6 +3256,10 @@ class App:
         defaults = {action: default for action, (_, _, default) in HOTKEY_ACTIONS.items()}
         if all(self.hotkey_text(action) == value and self._active_hotkeys.get(action) == value
                for action, value in defaults.items()):
+            setting, default = LOCAL_HOTKEY_ACTIONS["convert"]
+            if self.hotkey_text("convert") != default:
+                self.data["settings"][setting] = default
+                self.save_now()
             return None
         old_ids, old_active = self._hotkey_ids.copy(), self._active_hotkeys.copy()
         for action in old_active:
@@ -3175,6 +3284,8 @@ class App:
         self._hotkey_ids = {action: identity for action, (identity, _, _) in HOTKEY_ACTIONS.items()}
         self._active_hotkeys = defaults
         for action, (_, setting, default) in HOTKEY_ACTIONS.items():
+            self.data["settings"][setting] = default
+        for setting, default in LOCAL_HOTKEY_ACTIONS.values():
             self.data["settings"][setting] = default
         self.save_now()
         if hasattr(self, "icon"):
