@@ -1335,9 +1335,75 @@ class NoteEditingTests(unittest.TestCase):
         self.app.root.update()
         self.assertEqual(win.selected_id, "note2")
         self.assertEqual(label.cget("bg"), "#E9EDF2")
-        self.assertTrue(any(c.cget("text") == "✓ 第二张便签的内容"
-            for c in win.content.winfo_children() if isinstance(c, main.tk.Label)))
+        self.assertTrue(any(isinstance(row, main.tk.Frame) and any(
+            isinstance(c, main.tk.Label) and c.cget("text") == "第二张便签的内容"
+            for c in row.winfo_children()) for row in win.content.winfo_children()))
         win.destroy()
+
+    def test_history_orders_by_latest_action_and_keeps_same_second_newest_first(self):
+        from copy import deepcopy
+        self.note.toggle_done(1)
+        self.note.clear_done()
+        batch = deepcopy(self.app.data["archives"][0])
+        first = dict(deepcopy(batch), id="first", noteId="one", clearedAt="2026-11-01T12:00:00")
+        second = dict(deepcopy(batch), id="second", noteId="two", clearedAt="2026-11-02T12:00:00")
+        latest = dict(deepcopy(batch), id="latest", noteId="one", clearedAt="2026-11-02T12:00:00")
+        self.app.data["archives"] = [first, second, latest]
+        win = main.HistoryWindow(self.app)
+        self.app.root.update()
+        self.assertEqual(win.ids, ["one", "two"])
+        self.assertEqual([r["id"] for r in win.groups["one"]], ["latest", "first"])
+        self.app.data["deletedNotes"] = [
+            dict(deepcopy(self.note.d), id=key, deletedAt=stamp)
+            for key, stamp in (("newer", "2026-11-02"), ("older", "2026-11-01"), ("newest", "2026-11-02"))]
+        win.switch("deletedNotes")
+        self.assertEqual(win.ids, ["newest", "newer", "older"])
+        win.destroy()
+
+    def test_history_multiline_preview_uses_one_centered_note_checkbox(self):
+        win = main.HistoryWindow(self.app)
+        for checked in (False, True):
+            win.preview_line({"type": "todo", "text": "很长的待办" * 40 + "\n第二段", "checked": checked})
+        self.app.root.update()
+        rows = [c for c in win.content.winfo_children() if isinstance(c, main.tk.Frame)]
+        self.assertEqual(len(rows), 2)
+        for checked, row in zip((False, True), rows):
+            marker, text = row.winfo_children()
+            self.assertEqual(marker.cget("image"), str(win._check_images[checked]))
+            self.assertGreater(text.winfo_height(), marker.winfo_height() * 2)
+            self.assertAlmostEqual(marker.winfo_y() + marker.winfo_height()/2,
+                                   text.winfo_y() + text.winfo_height()/2, delta=2)
+        win.destroy()
+
+    def test_dialogs_resize_from_edges_and_reflow_content(self):
+        for cls in (main.SettingsWindow, main.HistoryWindow):
+            win = cls(self.app)
+            self.app.root.update()
+            old_w, old_h = win.winfo_width(), win.winfo_height()
+            event = type("Event", (), {"widget": win, "x_root": win.winfo_rootx()+old_w-2,
+                                       "y_root": win.winfo_rooty()+old_h-2})()
+            main.SettingsWindow._drag_press(win, event)
+            self.assertIsNotNone(win._resize)
+            event.x_root += 120
+            event.y_root += 80
+            main.SettingsWindow._drag_move(win, event)
+            self.app.root.update()
+            self.assertEqual((win.winfo_width(), win.winfo_height()), (old_w+120, old_h+80))
+            min_w, min_h = win.minsize()
+            win.geometry(f"{min_w}x{min_h}")
+            self.app.root.update()
+            if cls == main.HistoryWindow:
+                self.assertLessEqual(win.right.winfo_rootx()+win.right.winfo_width(),
+                                     win.winfo_rootx()+win.winfo_width())
+            else:
+                body = next(w for w in win.winfo_children() if isinstance(w, main.tk.Canvas)
+                            and w.find_all() and w.type(w.find_all()[0]) == "window")
+                self.assertEqual(body.winfo_width(), min_w-2*main.RADIUS-next(w for w in win.winfo_children() if isinstance(w, main.tk.Scrollbar)).winfo_reqwidth()-4)
+                self.assertLess(body.yview()[1], 1)
+                body.yview_moveto(1)
+                self.app.root.update()
+                self.assertAlmostEqual(body.yview()[1], 1)
+            win.destroy()
 
     def test_history_duplicate_name_suffix_only_shows_seconds(self):
         from copy import deepcopy
@@ -1349,7 +1415,7 @@ class NoteEditingTests(unittest.TestCase):
         win = main.HistoryWindow(self.app)
         win.switch("deletedNotes")
         self.app.root.update()
-        self.assertEqual(win.names, ["同名 · 2026-10-28 11:22:33", "同名 · 2026-10-28 12:34:56"])
+        self.assertEqual(win.names, ["同名 · 2026-10-28 12:34:56", "同名 · 2026-10-28 11:22:33"])
         win.choose("second")
         self.assertEqual(win.rows["second"].cget("bg"), "#E9EDF2")
         win.destroy()

@@ -2081,7 +2081,7 @@ class SettingsWindow(tk.Toplevel):
         self._icon_image = ImageTk.PhotoImage(_make_tray_icon(), master=self)
         self.iconphoto(False, self._icon_image)
         self.overrideredirect(True)
-        self.resizable(False, False)
+        self.resizable(True, True)
         self.configure(bg=NOTE_BG)
         cv = tk.Canvas(self, bg=NOTE_BG, highlightthickness=0, bd=0)
         cv.pack(fill="both", expand=True)
@@ -2263,34 +2263,49 @@ class SettingsWindow(tk.Toplevel):
         self.update_idletasks()
         content_height = f.winfo_reqheight()
         height = min(content_height + 2 * RADIUS, available_h)
-        viewport_height = height - 2 * RADIUS
-        if content_height > viewport_height:
-            scrollbar = tk.Scrollbar(self, orient="vertical", command=body.yview)
-            scrollbar_width = scrollbar.winfo_reqwidth()
-            content_width -= scrollbar_width + 4
-            scrollbar.place(x=width - RADIUS - scrollbar_width, y=RADIUS,
-                            width=scrollbar_width, height=viewport_height)
-            body.configure(yscrollcommand=scrollbar.set)
+        scrollbar = tk.Scrollbar(self, orient="vertical", command=body.yview)
+        body.configure(yscrollcommand=scrollbar.set)
+        self.bind("<MouseWheel>", lambda e: body.yview_scroll(-int(e.delta / 120), "units"))
+        border = cv.create_rectangle(0, 0, width - 1, height - 1,
+                                     fill=NOTE_BG, outline=NOTE_BORDER)
+
+        def layout(event):
+            if event.widget != self:
+                return
+            w, h = event.width, event.height
+            viewport_height = max(1, h - 2 * RADIUS)
+            # Reserve scrollbar space so wrapping does not oscillate at the overflow boundary.
+            content_width = max(1, w - 2 * RADIUS - scrollbar.winfo_reqwidth() - 4)
+            body.place(x=RADIUS, y=RADIUS, width=content_width, height=viewport_height)
+            body.itemconfigure(content, width=content_width)
             startup.configure(wraplength=max(1, content_width - self._check_images[False].width() - 16))
             hotkey_hint.configure(wraplength=max(1, content_width - 16))
             path.configure(wraplength=max(1, content_width - 16))
             for hotkey_row, label, entry in hotkey_rows:
                 label.configure(wraplength=max(1, content_width - entry.winfo_reqwidth() - 28))
-            body.itemconfigure(content, width=content_width)
             for appearance_row in (row, row3):
                 label = appearance_row.winfo_children()[0]
-                label.configure(wraplength=max(1, content_width - 16))
-                if appearance_row.winfo_reqwidth() > content_width - 8:
-                    label.pack_configure(side="top", anchor="w")
-            self.update_idletasks()
-            content_height = f.winfo_reqheight()
-            self.bind("<MouseWheel>", lambda e: body.yview_scroll(-int(e.delta / 120), "units"))
-        body.place(x=RADIUS, y=RADIUS, width=content_width, height=viewport_height)
-        body.configure(scrollregion=(0, 0, content_width, content_height))
-        cv.configure(width=width, height=height)
-        # 与便签窗口一致，由 DWM 抗锯齿裁切矩形底板。
-        cv.create_rectangle(0, 0, width - 1, height - 1,
-                            fill=NOTE_BG, outline=NOTE_BORDER)
+                label.configure(wraplength=max(1, content_width - 16), justify="left")
+                controls_width = sum(c.winfo_reqwidth() for c in appearance_row.winfo_children()[1:])
+                label.pack_configure(side="top" if controls_width + label.winfo_reqwidth() > content_width - 8 else "left",
+                                     anchor="w")
+            cv.coords(border, 0, 0, w - 1, h - 1)
+
+        def update_region(_event=None):
+            body.configure(scrollregion=(0, 0, body.winfo_width(), f.winfo_reqheight()))
+            if f.winfo_reqheight() > body.winfo_height():
+                scrollbar.place(x=self.winfo_width() - RADIUS - scrollbar.winfo_reqwidth(), y=RADIUS,
+                                width=scrollbar.winfo_reqwidth(), height=body.winfo_height())
+            else:
+                scrollbar.place_forget()
+                body.yview_moveto(0)
+
+        self.bind("<Configure>", layout)
+        f.bind("<Configure>", update_region)
+        body.bind("<Configure>", update_region)
+        SettingsWindow._enable_resize(self, min(width, max(600,
+            max(entry.winfo_reqwidth() for _, _, entry in hotkey_rows) + 2 * RADIUS +
+            scrollbar.winfo_reqwidth() + 48)), min(height, 360))
         self.geometry("%dx%d+%d+%d" % (width, height,
                        work.left + (work.right - work.left - width) // 2,
                        work.top + (work.bottom - work.top - height) // 2))
@@ -2303,7 +2318,29 @@ class SettingsWindow(tk.Toplevel):
         user32.SetWindowPos(hwnd, None, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | 0x04 | 0x20)
         self.deiconify()
 
+    def _enable_resize(self, width, height):
+        self.minsize(width, height)
+        self._resize = None
+        self.bind("<Motion>", lambda e: self.configure(cursor=SettingsWindow._resize_edges(self, e)[1]))
+        self.bind("<ButtonRelease-1>", lambda _e: (setattr(self, "_drag", None), setattr(self, "_resize", None)))
+
+    def _resize_edges(self, event):
+        x, y = event.x_root - self.winfo_rootx(), event.y_root - self.winfo_rooty()
+        w, h = self.winfo_width(), self.winfo_height()
+        edges = (0 <= x < EDGE, w - EDGE < x <= w, 0 <= y < EDGE, h - EDGE < y <= h)
+        l, r, t, b = edges
+        cursor = ("size_nw_se" if (l and t) or (r and b) else
+                  "size_ne_sw" if (l and b) or (r and t) else
+                  "size_we" if l or r else "size_ns" if t or b else "")
+        return edges, cursor
+
     def _drag_press(self, event):
+        edges, _ = SettingsWindow._resize_edges(self, event)
+        if any(edges):
+            self._drag = None
+            self._resize = (edges, event.x_root, event.y_root, self.winfo_x(), self.winfo_y(),
+                            self.winfo_width(), self.winfo_height())
+            return
         if (event.widget in (self._close_button, self._minimize_button, *self._hotkey_borders) or
                 isinstance(event.widget, (SettingsScale, tk.Checkbutton, tk.Button, tk.Scrollbar, tk.Entry))):
             self._drag = None
@@ -2314,6 +2351,14 @@ class SettingsWindow(tk.Toplevel):
         user32.ShowWindow(user32.GetParent(self.winfo_id()) or self.winfo_id(), 6)  # SW_MINIMIZE
 
     def _drag_move(self, event):
+        if getattr(self, "_resize", None):
+            (l, r, t, b), mx, my, x, y, w, h = self._resize
+            dx, dy = event.x_root - mx, event.y_root - my
+            min_w, min_h = self.minsize()
+            width = max(min_w, w + dx if r else w - dx if l else w)
+            height = max(min_h, h + dy if b else h - dy if t else h)
+            self.geometry(f"{width}x{height}+{x + w - width if l else x}+{y + h - height if t else y}")
+            return
         if self._drag is None:
             return
         self.geometry("+%d+%d" % (event.x_root - self._drag[0],
@@ -2500,6 +2545,9 @@ class HistoryWindow(tk.Toplevel):
         style = user32.GetWindowLongPtrW(hwnd, -20)
         user32.SetWindowLongPtrW(hwnd, -20, style & ~0x80 | 0x40000)
         user32.SetWindowPos(hwnd, None, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | 0x04 | 0x20)
+        SettingsWindow._enable_resize(self, min(width, max(640, tabs.winfo_reqwidth() + self.delete_button.winfo_reqwidth() + 58,
+            header.winfo_reqwidth() + 42)), min(height, 360))
+        self.hint.bind("<Configure>", lambda e: self.hint.configure(wraplength=max(1, e.width), justify="left"))
         self.refresh()
         self.deiconify()
 
@@ -2531,14 +2579,17 @@ class HistoryWindow(tk.Toplevel):
                             else "彻底删除便签不会删除已清除待办的记录。")
         sources = {n["id"]: n for n in self.app.data["deletedNotes"] + self.app.data["notes"]}
         groups = {}
-        for record in self.app.data[self.mode]:
+        stamp = "clearedAt" if self.mode == "archives" else "deletedAt"
+        records = sorted(reversed(self.app.data[self.mode]),
+                         key=lambda record: record.get(stamp, ""), reverse=True)
+        for record in records:
             key = record["noteId"] if self.mode == "archives" else record["id"]
             groups.setdefault(key, []).append(record)
         self.groups = groups
         self.ids = list(groups)
         names = {}
         for key, records in groups.items():
-            source = sources.get(key, records[-1])
+            source = sources.get(key, records[0])
             names[key] = (source.get("title") or "无标题", source.get("editedAt", ""))
         self.checked.intersection_update(self.ids)
         for child in self.left.content.winfo_children():
@@ -2621,6 +2672,19 @@ class HistoryWindow(tk.Toplevel):
         label.pack(fill="x", pady=(6, 4), padx=4)
         label.bind("<Configure>", lambda e: label.configure(wraplength=max(1, e.width-8)))
 
+    def preview_line(self, line):
+        if line["type"] != "todo":
+            self.label(line["text"])
+            return
+        row = tk.Frame(self.content, bg=NOTE_BG)
+        row.pack(fill="x", padx=4, pady=(6, 4))
+        marker = tk.Label(row, image=self._check_images[line["checked"]], bg=NOTE_BG)
+        marker.pack(side="left", anchor="center", padx=(0, 8))
+        text = tk.Label(row, text=line["text"], bg=NOTE_BG, fg="#2B2F36",
+                        font=(UI_FONT, 10), justify="left", anchor="w")
+        text.pack(side="left", fill="x", expand=True)
+        text.bind("<Configure>", lambda e: text.configure(wraplength=max(1, e.width-8)))
+
     def select(self, _event=None):
         for child in self.content.winfo_children():
             child.destroy()
@@ -2639,12 +2703,12 @@ class HistoryWindow(tk.Toplevel):
             self.button(actions, "还原", lambda: self.app.recover_note(note["id"])).pack(side="left", padx=(8,0))
             self.label(note.get("title") or "无标题", True)
             for line in note["lines"]:
-                self.label(("✓ " if line["checked"] else "□ ") + line["text"] if line["type"] == "todo" else line["text"])
+                self.preview_line(line)
         else:
-            for batch in reversed(records):
+            for batch in records:
                 self.label("清除于 " + batch["clearedAt"].replace("T", " "), True)
                 for item in batch["items"]:
-                    self.label("✓ " + item["line"]["text"])
+                    self.preview_line(item["line"])
                 tk.Frame(self.content, bg=NOTE_BORDER, height=1).pack(fill="x", pady=12)
         self.content.update_idletasks()
         self.right.update_region()
