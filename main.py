@@ -2715,9 +2715,10 @@ class HistoryWindow(tk.Toplevel):
         self.rows = {}
         for key in self.ids:
             name, stamp = names[key]
+            suffix = ""
             if sum(value[0] == name for value in names.values()) > 1:
-                name += " · " + (stamp.split(".")[0].replace("T", " ") or "编辑时间未知")
-            self.names.append(name)
+                suffix = " · " + (stamp.split(".")[0].replace("T", " ") or "编辑时间未知")
+            self.names.append(name + suffix)
             row = tk.Frame(self.left.content, bg=NOTE_BG)
             row.pack(fill="x", pady=4)
             row.bind("<Button-1>", lambda e,k=key: self.choose(k))
@@ -2731,8 +2732,16 @@ class HistoryWindow(tk.Toplevel):
                 box.pack(side="left", anchor="center", padx=(0, 6))
             label = tk.Label(row, text=name, bg=NOTE_BG, fg="#2B2F36", anchor="w",
                              justify="left", font=(UI_FONT,10), cursor="hand2")
-            label.pack(side="left",fill="x",expand=True)
-            label.bind("<Configure>", lambda e, l=label: l.configure(wraplength=max(1,e.width-8)))
+            label.pack(side="left", fill="x", expand=not suffix)
+            if suffix:
+                row.bind("<Configure>", lambda e, l=label: l.configure(wraplength=max(1, e.width // 2)))
+                detail = tk.Label(row, text=suffix, bg=NOTE_BG, fg=INK, anchor="w",
+                                  justify="left", font=(UI_FONT, 10), cursor="hand2")
+                detail.pack(side="left", fill="x", expand=True)
+                detail.bind("<Configure>", lambda e, l=detail: l.configure(wraplength=max(1, e.width-8)))
+                detail.bind("<Button-1>", lambda e,k=key: self.choose(k))
+            else:
+                label.bind("<Configure>", lambda e, l=label: l.configure(wraplength=max(1,e.width-8)))
             label.bind("<Button-1>", lambda e,k=key: self.choose(k))
         if self.selected_id not in self.ids:
             self.selected_id = self.ids[0] if self.ids else None
