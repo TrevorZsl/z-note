@@ -2328,6 +2328,10 @@ class SettingsWindow(tk.Toplevel):
         x, y = event.x_root - self.winfo_rootx(), event.y_root - self.winfo_rooty()
         w, h = self.winfo_width(), self.winfo_height()
         edges = (0 <= x < EDGE, w - EDGE < x <= w, 0 <= y < EDGE, h - EDGE < y <= h)
+        if not (0 <= x <= w and 0 <= y <= h):
+            edges = (False, False, False, False)
+        elif (x < CORNER or x > w - CORNER) and (y < CORNER or y > h - CORNER):
+            edges = (x < w / 2, x >= w / 2, y < h / 2, y >= h / 2)
         l, r, t, b = edges
         cursor = ("size_nw_se" if (l and t) or (r and b) else
                   "size_ne_sw" if (l and b) or (r and t) else

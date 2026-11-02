@@ -1375,6 +1375,57 @@ class NoteEditingTests(unittest.TestCase):
                                    text.winfo_y() + text.winfo_height()/2, delta=2)
         win.destroy()
 
+    def test_dialog_corner_resize_hit_regions(self):
+        for cls in (main.SettingsWindow, main.HistoryWindow):
+            win = cls(self.app)
+            self.app.root.update()
+            w, h = win.winfo_width(), win.winfo_height()
+            cases = [
+                (12, 12, (True, False, True, False), "size_nw_se"),
+                (w-12, 12, (False, True, True, False), "size_ne_sw"),
+                (12, h-12, (True, False, False, True), "size_ne_sw"),
+                (w-12, h-12, (False, True, False, True), "size_nw_se"),
+                (main.CORNER-1, main.CORNER-1, (True, False, True, False), "size_nw_se"),
+                (main.CORNER, main.CORNER, (False, False, False, False), ""),
+                (w-main.CORNER, h-main.CORNER, (False, False, False, False), ""),
+                (2, h/2, (True, False, False, False), "size_we"),
+                (w-2, h/2, (False, True, False, False), "size_we"),
+                (w/2, 2, (False, False, True, False), "size_ns"),
+                (w/2, h-2, (False, False, False, True), "size_ns"),
+                (w/2, h/2, (False, False, False, False), ""),
+            ]
+            cases.extend((x, y, (False, False, False, False), "")
+                         for x, y in ((-1, 2), (w+1, 2), (2, -1), (2, h+1)))
+            for x, y, edges, cursor in cases:
+                with self.subTest(window=cls.__name__, x=x, y=y):
+                    event = type("Event", (), {"x_root": win.winfo_rootx()+x,
+                                               "y_root": win.winfo_rooty()+y})()
+                    self.assertEqual(main.SettingsWindow._resize_edges(win, event), (edges, cursor))
+            win.destroy()
+
+    def test_dialogs_drag_all_enlarged_corner_regions(self):
+        for cls in (main.SettingsWindow, main.HistoryWindow):
+            win = cls(self.app)
+            for left, top in ((True, True), (False, True), (True, False), (False, False)):
+                self.app.root.update()
+                w, h = win.winfo_width(), win.winfo_height()
+                x, y = win.winfo_x(), win.winfo_y()
+                event = type("Event", (), {"widget": win,
+                    "x_root": win.winfo_rootx() + (12 if left else w-12),
+                    "y_root": win.winfo_rooty() + (12 if top else h-12)})()
+                main.SettingsWindow._drag_press(win, event)
+                self.assertIsNotNone(win._resize)
+                event.x_root += -30 if left else 30
+                event.y_root += -20 if top else 20
+                main.SettingsWindow._drag_move(win, event)
+                self.app.root.update()
+                self.assertEqual((win.winfo_width(), win.winfo_height()), (w+30, h+20))
+                self.assertEqual((win.winfo_x(), win.winfo_y()),
+                                 (x-30 if left else x, y-20 if top else y))
+                win.event_generate("<ButtonRelease-1>")
+                self.assertIsNone(win._resize)
+            win.destroy()
+
     def test_dialogs_resize_from_edges_and_reflow_content(self):
         for cls in (main.SettingsWindow, main.HistoryWindow):
             win = cls(self.app)
