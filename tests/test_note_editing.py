@@ -2298,6 +2298,117 @@ class NoteEditingTests(unittest.TestCase):
         self.app.root.update()
         self.assertTrue(self.text.tag_ranges("sel"))
 
+    def test_edge_fade_tracks_overflow_and_releases_native_windows(self):
+        self.note.d["lines"] = [{"type": "text", "text": "Short"}]
+        self.note.render()
+        self.app.root.update()
+        fade = self.note._edge_fade
+        visible = main.user32.IsWindowVisible
+        visible.argtypes = [main.wintypes.HWND]
+        self.assertEqual([bool(visible(hwnd)) for hwnd in fade.windows], [False, False])
+        self.note.d["lines"] = [{"type": "todo", "text": f"Item {i}", "checked": False}
+                                for i in range(40)]
+        self.note.render()
+        self.app.root.update()
+        self.note.body.yview_moveto(0)
+        self.app.root.update()
+        self.assertEqual([bool(visible(hwnd)) for hwnd in fade.windows], [False, True])
+        self.note.body.yview_moveto(.3)
+        self.app.root.update()
+        self.assertEqual([bool(visible(hwnd)) for hwnd in fade.windows], [True, True])
+        self.note.hide()
+        self.app.root.update()
+        self.assertFalse(any(visible(hwnd) for hwnd in fade.windows))
+        self.note.show()
+        self.app.root.update()
+        self.assertTrue(all(visible(hwnd) for hwnd in fade.windows))
+        self.note.body.yview_moveto(1)
+        self.app.root.update()
+        self.assertEqual([bool(visible(hwnd)) for hwnd in fade.windows], [True, False])
+        self.note.d["lines"] = [{"type": "text", "text": "Short"}]
+        self.note.render()
+        self.app.root.update()
+        self.assertFalse(any(visible(hwnd) for hwnd in fade.windows))
+        self.note.destroy()
+        self.assertEqual(fade.windows, [])
+
+    def test_edge_fade_composites_only_edges_and_passes_mouse_through(self):
+        background = main.tk.Toplevel(self.app.root, bg="#406080")
+        background.overrideredirect(True)
+        background.geometry("700x600+80+80")
+        self.app.root.update()
+        self.note.geometry("543x477+100+100")
+        self.note.d["lines"] = [
+            {"type": "todo", "text": f"Item {i} 渐变测试", "checked": i % 2 == 0}
+            for i in range(40)]
+        self.note.render()
+        self.note.show()
+        self.text.configure(insertwidth=0)
+        self.app.root.update()
+        self.note.body.yview_moveto(.17)
+        self.app.root.update()
+        fade, body = self.note._edge_fade, self.note.body
+        x, y = body.winfo_rootx(), body.winfo_rooty()
+        width, height = body.winfo_width(), body.winfo_height()
+
+        def capture():
+            main.dwmapi.DwmFlush()
+            return ImageGrab.grab(bbox=(x, y, x + width, y + height))
+
+        for opacity in (1.0, .7):
+            with self.subTest(opacity=opacity):
+                self.note.attributes("-alpha", opacity)
+                self.app.root.update()
+                faded = capture()
+                for hwnd in fade.windows:
+                    main.user32.ShowWindow(hwnd, 0)
+                self.app.root.update()
+                plain = capture()
+                difference = ImageChops.difference(faded, plain)
+                self.assertIsNotNone(difference.crop((0, 0, width, fade.height)).getbbox())
+                self.assertIsNotNone(difference.crop((0, height-fade.height, width, height)).getbbox())
+                self.assertIsNone(difference.crop((0, fade.height, width, height-fade.height)).getbbox())
+                for hwnd in fade.windows:
+                    main.user32.ShowWindow(hwnd, 8)
+                self.app.root.update()
+        for edge_y in (1, height-2):
+            hit = main.user32.WindowFromPoint(main.wintypes.POINT(x+30, y+edge_y))
+            self.assertNotIn(hit, fade.windows)
+            self.assertIn(hit, [body.winfo_id(), self.text.winfo_id()] +
+                          [widget.winfo_id() for widget in self.note._checkbox_widgets])
+
+    def test_edge_fade_resizes_without_repainting_during_scroll(self):
+        self.note.d["lines"] = [{"type": "text", "text": f"Line {i}"} for i in range(40)]
+        self.note.render()
+        self.app.root.update()
+        fade = self.note._edge_fade
+        with patch.object(fade, "_paint", wraps=fade._paint) as paint:
+            for position in (.2, .4, .6):
+                self.note.body.yview_moveto(position)
+                self.app.root.update()
+            paint.assert_not_called()
+            self.note.geometry("400x300")
+            self.app.root.update()
+            self.assertGreater(paint.call_count, 0)
+        self.assertEqual(fade.height, min(round(self.note.body.winfo_fpixels("18p")),
+                                          self.note.body.winfo_height() // 4))
+        self.assertEqual(fade._size[0], self.note.body.winfo_width())
+
+    def test_see_text_keeps_caret_outside_edge_fade(self):
+        self.note.d["lines"] = [{"type": "text", "text": f"Line {i}"} for i in range(60)]
+        self.note.render()
+        self.app.root.update()
+        for index in ("30.0", "28.0", "33.0", "1.0", "60.0"):
+            self.text.mark_set("insert", index)
+            self.note._see_text("insert")
+            self.app.root.update()
+            box = self.text.bbox("insert")
+            y = box[1] + self.note._chunk_start - self.note.body.canvasy(0)
+            top, bottom = self.note._edge_fade._visible
+            pad = self.note._edge_fade.height
+            self.assertGreaterEqual(y, pad if top else 0)
+            self.assertLessEqual(y+box[3], self.note.body.winfo_height() - (pad if bottom else 0))
+
     def test_footer_labels_align_with_button_without_overlap(self):
         self.note.geometry("300x340")
         self.app.root.update()

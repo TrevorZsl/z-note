@@ -2,7 +2,7 @@
 """z-note 雏形：常驻托盘的桌面便签（自由文本 + 可勾选待办）。
 运行: python main.py   依赖安装: python -m pip install -r requirements.txt
 """
-import atexit, ctypes, math, os, queue, sys, time, uuid, winreg
+import atexit, ctypes, math, os, queue, struct, sys, time, uuid, winreg
 from copy import deepcopy
 from datetime import datetime
 import tkinter as tk
@@ -422,6 +422,98 @@ class VerticalThumb(tk.Canvas):
         self.target.yview_moveto(position-self._drag_offset)
 
 
+class EdgeFade:
+    """正文内的原生透明子窗口，不参与 Tk 布局和鼠标命中。"""
+    def __init__(self, body):
+        self.body = body
+        self.height = 0
+        self._size = None
+        self._visible = (False, False)
+        self.windows = []
+        for _ in range(2):
+            hwnd = user32.CreateWindowExW(
+                0x08080020, "STATIC", None, 0x40000000,
+                0, 0, 0, 0, body.winfo_id(), None, None, None)
+            if not hwnd:
+                self.destroy()
+                raise ctypes.WinError()
+            self.windows.append(hwnd)
+        body.bind("<Destroy>", lambda e: self.destroy() if e.widget == body else None, add="+")
+
+    def update(self, first, last):
+        width, viewport = self.body.winfo_width(), self.body.winfo_height()
+        height = min(max(1, round(self.body.winfo_fpixels("18p"))), viewport // 4)
+        if width < 1 or height < 1:
+            for hwnd in self.windows:
+                user32.ShowWindow(hwnd, 0)
+            self.height = 0
+            self._visible = (False, False)
+            return
+        size = (width, height, viewport)
+        if size != self._size:
+            for hwnd, bottom in zip(self.windows, (False, True)):
+                self._paint(hwnd, width, height, bottom)
+                user32.SetWindowPos(hwnd, 0, 0, viewport-height if bottom else 0,
+                                    width, height, 0x0010)
+            self.height = height
+            self._size = size
+        visible = (float(first) > 1e-6, float(last) < 1-1e-6)
+        for hwnd, show, previous in zip(self.windows, visible, self._visible):
+            if show != previous:
+                user32.ShowWindow(hwnd, 8 if show else 0)  # SW_SHOWNA，不激活便签。
+        self._visible = visible
+
+    @staticmethod
+    def _paint(hwnd, width, height, bottom):
+        # UpdateLayeredWindow 需要预乘 BGRA；白色的各通道恰好都等于 alpha。
+        rows = [bytes([round(255 * y / max(1, height-1))]) * (4 * width)
+                for y in range(height)]
+        pixels = b"".join(rows if bottom else reversed(rows))
+        header = ctypes.create_string_buffer(struct.pack(
+            "<IiiHHIIiiII", 40, width, -height, 1, 32, 0, len(pixels), 0, 0, 0, 0))
+        bits = ctypes.c_void_p()
+        dc = gdi32.CreateCompatibleDC(None)
+        if not dc:
+            raise ctypes.WinError()
+        bitmap = old = None
+        try:
+            bitmap = gdi32.CreateDIBSection(dc, header, 0, ctypes.byref(bits), None, 0)
+            if not bitmap:
+                raise ctypes.WinError()
+            ctypes.memmove(bits, pixels, len(pixels))
+            old = gdi32.SelectObject(dc, bitmap)
+            size = wintypes.SIZE(width, height)
+            origin = _POINT(0, 0)
+            blend = ctypes.c_uint32(0x01FF0000)  # AC_SRC_OVER、255、AC_SRC_ALPHA。
+            if not user32.UpdateLayeredWindow(hwnd, None, None, ctypes.byref(size), dc,
+                                             ctypes.byref(origin), 0, ctypes.byref(blend), 2):
+                raise ctypes.WinError()
+        finally:
+            if old:
+                gdi32.SelectObject(dc, old)
+            if bitmap:
+                gdi32.DeleteObject(bitmap)
+            gdi32.DeleteDC(dc)
+
+    def destroy(self):
+        for hwnd in self.windows:
+            user32.DestroyWindow(hwnd)
+        self.windows.clear()
+
+
+gdi32.CreateCompatibleDC.argtypes = [wintypes.HDC]
+gdi32.CreateCompatibleDC.restype = wintypes.HDC
+gdi32.CreateDIBSection.argtypes = [wintypes.HDC, ctypes.c_void_p, wintypes.UINT,
+    ctypes.POINTER(ctypes.c_void_p), wintypes.HANDLE, wintypes.DWORD]
+gdi32.CreateDIBSection.restype = wintypes.HBITMAP
+gdi32.SelectObject.argtypes = [wintypes.HDC, wintypes.HANDLE]
+gdi32.SelectObject.restype = wintypes.HANDLE
+gdi32.DeleteDC.argtypes = [wintypes.HDC]
+user32.UpdateLayeredWindow.argtypes = [wintypes.HWND, wintypes.HDC, ctypes.c_void_p,
+    ctypes.c_void_p, wintypes.HDC, ctypes.c_void_p, wintypes.DWORD, ctypes.c_void_p, wintypes.DWORD]
+user32.UpdateLayeredWindow.restype = wintypes.BOOL
+
+
 class NoteWindow(tk.Toplevel):
     def __init__(self, app, data):
         super().__init__(app.root)
@@ -526,6 +618,7 @@ class NoteWindow(tk.Toplevel):
         self._wheel_job = None
         self._wheel_remaining = 0
         self._selection_scroll_job = None
+        self._edge_fade = EdgeFade(self.body)
         self.body.configure(yscrollcommand=self._text_scrolled)
         self.body.bind("<Configure>", lambda e: self._queue_strikes())
         self._bind_ime(self.text)
@@ -638,6 +731,7 @@ class NoteWindow(tk.Toplevel):
 
     def _text_scrolled(self, first, last):
         self.scroll_thumb.set(first, last)
+        self._edge_fade.update(first, last)
         if self._layout_busy:
             return
         top = round(self.body.canvasy(0))
@@ -713,7 +807,8 @@ class NoteWindow(tk.Toplevel):
                     size = self._check_images[False].width()
                     box = (box[0], int(self.text.cget("pady")) + offset - self._chunk_start +
                            height // 2 - size // 2, box[2], size)
-            top, pad = self.body.canvasy(0), int(self.text.cget("pady"))
+            top = self.body.canvasy(0)
+            pad = max(int(self.text.cget("pady")), self._edge_fade.height)
             y = box[1] + self._chunk_start
             if y < top + pad:
                 self._scroll_to(y - pad)
