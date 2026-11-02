@@ -921,8 +921,8 @@ class NoteEditingTests(unittest.TestCase):
         self.assertEqual(scale.get(), 10)
         self.assertEqual(self.note.d["opacity"], 0.9)
         x, y = settings.winfo_x(), settings.winfo_y()
-        settings._drag_press(type("Event", (), {"widget": settings, "x_root": x + 20, "y_root": y + 20})())
-        settings._drag_move(type("Event", (), {"x_root": x + 35, "y_root": y + 30})())
+        settings._drag_press(type("Event", (), {"widget": settings, "x_root": x + 40, "y_root": y + 20})())
+        settings._drag_move(type("Event", (), {"x_root": x + 55, "y_root": y + 30})())
         self.assertEqual((settings.winfo_x(), settings.winfo_y()), (x + 15, y + 10))
         settings.destroy()
 
@@ -1279,9 +1279,9 @@ class NoteEditingTests(unittest.TestCase):
             self.assertIsNone(win._drag)
         pane = win.right
         pane.bars["y"].set(0.25, 0.75)
-        coordinates = pane.bars["y"].coords("thumb")
+        coordinates = pane.bars["y"].bbox("thumb")
         length = pane.bars["y"].winfo_height()-8
-        self.assertAlmostEqual(coordinates[3]-coordinates[1], length*.5)
+        self.assertAlmostEqual(coordinates[3]-coordinates[1], length*.5+8, delta=1)
         pane.bars["y"].set(0,1)
         self.assertFalse(pane.bars["y"].find_withtag("thumb"))
         win.destroy()
@@ -1449,7 +1449,7 @@ class NoteEditingTests(unittest.TestCase):
             else:
                 body = next(w for w in win.winfo_children() if isinstance(w, main.tk.Canvas)
                             and w.find_all() and w.type(w.find_all()[0]) == "window")
-                self.assertEqual(body.winfo_width(), min_w-2*main.RADIUS-next(w for w in win.winfo_children() if isinstance(w, main.tk.Scrollbar)).winfo_reqwidth()-4)
+                self.assertEqual(body.winfo_width(), min_w-2*main.RADIUS-next(w for w in win.winfo_children() if isinstance(w, main.VerticalThumb)).winfo_reqwidth()-4)
                 self.assertLess(body.yview()[1], 1)
                 body.yview_moveto(1)
                 self.app.root.update()
@@ -1469,6 +1469,58 @@ class NoteEditingTests(unittest.TestCase):
         self.assertEqual(win.names, ["同名 · 2026-10-28 12:34:56", "同名 · 2026-10-28 11:22:33"])
         win.choose("second")
         self.assertEqual(win.rows["second"].cget("bg"), "#E9EDF2")
+        win.destroy()
+
+    def test_scroll_thumb_has_smooth_round_caps_even_for_short_ranges(self):
+        thumb = self.note.scroll_thumb
+        for first, last in ((0, .5), (.5, 1), (.5, .501)):
+            with self.subTest(first=first, last=last):
+                thumb.set(first, last)
+                image = main.ImageTk.getimage(thumb._thumb_image)
+                alpha = image.getchannel("A")
+                self.assertTrue(any(0 < value < 255 for value in alpha.tobytes()))
+                self.assertLess(alpha.getpixel((1, 1)), alpha.getpixel((4, 1)))
+                self.assertGreaterEqual(alpha.getpixel((4, image.height//2)), 250)
+                self.assertEqual(alpha.crop((0, 0, 8, 4)).tobytes(),
+                                 alpha.transpose(main.Image.Transpose.FLIP_TOP_BOTTOM)
+                                      .crop((0, 0, 8, 4)).tobytes())
+                bounds = thumb.bbox("thumb")
+                self.assertGreaterEqual(bounds[1], 0)
+                self.assertLessEqual(bounds[3], thumb.winfo_height())
+
+    def test_settings_scroll_thumb_tracks_drag_wheel_and_overflow(self):
+        win = main.SettingsWindow(self.app)
+        self.app.root.update()
+        thumb = next(w for w in win.winfo_children() if isinstance(w, main.VerticalThumb))
+        body = thumb.target
+        min_w, min_h = win.minsize()
+        win.geometry(f"{min_w}x{min_h}")
+        self.app.root.update()
+        self.assertTrue(thumb.winfo_ismapped())
+        self.assertEqual(thumb.winfo_width(), 8)
+        self.assertTrue(thumb.find_withtag("thumb"))
+        position = (win.winfo_x(), win.winfo_y())
+        thumb.event_generate("<Button-1>", x=4, y=6)
+        thumb.event_generate("<B1-Motion>", x=4, y=thumb.winfo_height()-6)
+        thumb.event_generate("<ButtonRelease-1>", x=4, y=thumb.winfo_height()-6)
+        self.app.root.update()
+        self.assertGreater(body.yview()[0], 0)
+        self.assertEqual((win.winfo_x(), win.winfo_y()), position)
+        self.assertIsNone(win._resize)
+        self.assertIsNone(thumb._drag_offset)
+        body.yview_moveto(0)
+        thumb.event_generate("<MouseWheel>", delta=-120)
+        self.app.root.update()
+        self.assertGreater(body.yview()[0], 0)
+        content = next(w for w in body.winfo_children() if isinstance(w, main.tk.Frame))
+        win.geometry(f"{min_w}x{content.winfo_reqheight()+2*main.RADIUS+40}")
+        self.app.root.update()
+        self.assertFalse(thumb.winfo_ismapped())
+        self.assertEqual(body.yview(), (0.0, 1.0))
+        win.geometry(f"{min_w}x{min_h}")
+        self.app.root.update()
+        self.assertTrue(thumb.winfo_ismapped())
+        self.assertTrue(thumb.find_withtag("thumb"))
         win.destroy()
 
     def test_note_scroll_thumb_only_shows_for_overflow_and_tracks_drag(self):

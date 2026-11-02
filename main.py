@@ -401,6 +401,7 @@ class VerticalThumb(tk.Canvas):
     def __init__(self, parent, target, bg):
         super().__init__(parent, bg=bg, highlightthickness=0, bd=0, cursor="arrow")
         self.target = target
+        self._thumb_image = None
         self._drag_offset = None
         self.bind("<Configure>", lambda e: self.set(*target.yview()))
         self.bind("<Button-1>", self.move)
@@ -410,11 +411,19 @@ class VerticalThumb(tk.Canvas):
     def set(self, first, last):
         first, last = float(first), float(last)
         self.delete("all")
+        self._thumb_image = None
         length = self.winfo_height()-8
         if last-first >= .999 or length < 1:
             return
-        self.create_line(4,4+first*length,4,4+last*length,
-                         fill="#A7B0BE",width=6,capstyle="round",tags="thumb")
+        height = max(6, round((last-first)*length) + 6)
+        scale = 4
+        image = Image.new("RGBA", (8*scale, (height+2)*scale), (0, 0, 0, 0))
+        ImageDraw.Draw(image).rounded_rectangle(
+            (scale, scale, 7*scale-1, (height+1)*scale-1),
+            radius=3*scale, fill="#A7B0BE")
+        self._thumb_image = ImageTk.PhotoImage(
+            image.resize((8, height+2), Image.Resampling.LANCZOS), master=self)
+        self.create_image(0, round(first*length), anchor="nw", image=self._thumb_image, tags="thumb")
 
     def move(self, event):
         first, last = self.target.yview()
@@ -2263,7 +2272,8 @@ class SettingsWindow(tk.Toplevel):
         self.update_idletasks()
         content_height = f.winfo_reqheight()
         height = min(content_height + 2 * RADIUS, available_h)
-        scrollbar = tk.Scrollbar(self, orient="vertical", command=body.yview)
+        scrollbar = VerticalThumb(self, body, NOTE_BG)
+        scrollbar.configure(width=8)
         body.configure(yscrollcommand=scrollbar.set)
         self.bind("<MouseWheel>", lambda e: body.yview_scroll(-int(e.delta / 120), "units"))
         border = cv.create_rectangle(0, 0, width - 1, height - 1,
@@ -2346,7 +2356,7 @@ class SettingsWindow(tk.Toplevel):
                             self.winfo_width(), self.winfo_height())
             return
         if (event.widget in (self._close_button, self._minimize_button, *self._hotkey_borders) or
-                isinstance(event.widget, (SettingsScale, tk.Checkbutton, tk.Button, tk.Scrollbar, tk.Entry))):
+                isinstance(event.widget, (SettingsScale, VerticalThumb, tk.Checkbutton, tk.Button, tk.Scrollbar, tk.Entry))):
             self._drag = None
             return
         self._drag = (event.x_root - self.winfo_x(), event.y_root - self.winfo_y())
