@@ -1,3 +1,6 @@
 __pycache__/
 *.log
 .runtime-deps/
+build/
+dist/
+*.spec

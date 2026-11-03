@@ -23,7 +23,7 @@ T_COLOR = "#010203"   # 窗口透明色键（圆角外的部分透出去）
 RADIUS = 20
 EDGE = 7                              # 窗口边缘可拖拽调大小的宽度
 CORNER = RADIUS + 4                   # 四角斜向拉伸热区：整个圆角区都能触发，比 EDGE 好按
-ICON_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets", "icons")
+ICON_DIR = os.path.join(getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__))), "assets", "icons")
 PREFIX_PAD = "  "                       # 勾选框后跟 2 个空格
 INK, QUIET = "#6B7280", "#666D75"      # 图标与状态栏的墨色（冷灰单色系）
 
@@ -282,9 +282,10 @@ def set_autostart(on):
     key = r"Software\Microsoft\Windows\CurrentVersion\Run"
     try:
         if on:
+            cmd = f'"{sys.executable}"' if getattr(sys, "frozen", False) else \
+                  f'"{sys.executable}" "{os.path.abspath(__file__)}"'
             with winreg.OpenKey(winreg.HKEY_CURRENT_USER, key, 0, winreg.KEY_SET_VALUE) as k:
-                winreg.SetValueEx(k, APP_NAME, 0, winreg.REG_SZ,
-                                  f'"{sys.executable}" "{os.path.abspath(__file__)}"')
+                winreg.SetValueEx(k, APP_NAME, 0, winreg.REG_SZ, cmd)
         else:
             try:
                 with winreg.OpenKey(winreg.HKEY_CURRENT_USER, key, 0, winreg.KEY_SET_VALUE) as k:
