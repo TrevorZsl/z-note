@@ -474,7 +474,7 @@ class NoteEditingTests(unittest.TestCase):
         self.assertEqual((note.winfo_width(), note.winfo_height()), (w, h+20))
         self.assertEqual(note.d["h"], h+20)
 
-    def test_top_and_left_resize_submit_complete_frames(self):
+    def test_all_resize_directions_submit_complete_frames(self):
         note = self.note
         note.d["lines"] = [
             {"type": "todo", "text": f"待办 {i} " + "需要处理的事情" * (i % 3 + 1),
@@ -482,6 +482,7 @@ class NoteEditingTests(unittest.TestCase):
         note.render()
         self.text.configure(insertwidth=0)
         self.text.tag_add("sel", "1.3", "1.end")
+        note.attributes("-topmost", True)
         note.lift()
 
         def capture():
@@ -491,29 +492,27 @@ class NoteEditingTests(unittest.TestCase):
                                        x + note.winfo_width() - 24,
                                        y + note.winfo_height() - 6))
 
-        for edge in ("top", "left", "corner", "top_right"):
+        for x, y in ((2, 220), (438, 220), (220, 2), (220, 438),
+                     (2, 2), (438, 2), (2, 438), (438, 438)):
             note.geometry("440x440+180+180")
             self.app.root.update()
-            x = 438 if edge == "top_right" else 220 if edge == "top" else 2
-            y = 2 if edge != "left" else 220
             press = type("Pointer", (), {"x": x, "y": y,
                                           "x_root": 180 + x, "y_root": 180 + y})()
             note._edge_press(press)
             for delta in (-45, 30, -20, 250, 0):
-                with self.subTest(edge=edge, delta=delta):
+                with self.subTest(edge=(x, y), delta=delta):
                     move = type("Pointer", (), {
-                        "x_root": press.x_root + (-delta if edge == "top_right" else
-                                                    delta if edge != "top" else 0),
-                        "y_root": press.y_root + (delta if edge != "left" else 0)})()
+                        "x_root": press.x_root + (delta if x == 2 else -delta if x == 438 else 0),
+                        "y_root": press.y_root + (delta if y == 2 else -delta if y == 438 else 0)})()
                     note._edge_move(move)
                     self.assertEqual(note.winfo_width(),
-                                     max(280, 440 - delta) if edge != "top" else 440)
+                                     max(280, 440 - delta) if x != 220 else 440)
                     self.assertEqual(note.winfo_height(),
-                                     max(230, 440 - delta) if edge != "left" else 440)
-                    self.assertEqual(note.winfo_x() if edge == "top_right" else
-                                     note.winfo_x() + note.winfo_width(),
-                                     180 if edge == "top_right" else 620)
-                    self.assertEqual(note.winfo_y() + note.winfo_height(), 620)
+                                     max(230, 440 - delta) if y != 220 else 440)
+                    self.assertEqual(note.winfo_x() + note.winfo_width() if x == 2 else note.winfo_x(),
+                                     620 if x == 2 else 180)
+                    self.assertEqual(note.winfo_y() + note.winfo_height() if y == 2 else note.winfo_y(),
+                                     620 if y == 2 else 180)
                     frame = capture()
                     # 强制全量重画应与刚提交的缩放帧一致，不能靠后续 Expose 修补残影。
                     note.text.event_generate("<Expose>", x=0, y=0,
@@ -533,42 +532,32 @@ class NoteEditingTests(unittest.TestCase):
             note.geometry("440x440+180+180")
             self.app.root.update()
             controls = (note.status, note.add_pill, note.clear_btn)
+            for widget in controls:
+                self.assertIs(widget.master, note.bar)
             initial = [widget.winfo_rooty() for widget in controls]
             local = [(widget.winfo_rootx()-note.bar.winfo_rootx(),
                       widget.winfo_rooty()-note.bar.winfo_rooty()) for widget in controls]
             bar_y = note.bar.winfo_rooty()
-            idle = note.update_idletasks
             positions = []
-            native_positions = []
-            native_move = main.user32.SetWindowPos
-            def record_native_move(*args):
-                result = native_move(*args)
-                if args[0] == note.hwnd:
-                    rect = main.wintypes.RECT()
-                    main.user32.GetWindowRect(note.bar.winfo_id(), main.ctypes.byref(rect))
-                    native_positions.append(rect.top)
-                return result
-            def record_before_layout():
+            close_frame = main.ResizeFrame.close
+            def record_frame_commit(frame):
                 rect = main.wintypes.RECT()
                 main.user32.GetWindowRect(note.bar.winfo_id(), main.ctypes.byref(rect))
                 positions.append(rect.top)
-                return idle()
+                return close_frame(frame)
             press = type("Pointer", (), dict(x=220, y=2 if top else 438,
                                              x_root=400, y_root=182 if top else 618))()
             note._edge_press(press)
             with patch.object(note, "_draw_pill", wraps=note._draw_pill) as pill, \
-                    patch.object(note, "update_idletasks", side_effect=record_before_layout), \
-                    patch.object(main.user32, "SetWindowPos", side_effect=record_native_move):
+                    patch.object(main.ResizeFrame, "close", new=record_frame_commit):
                 for delta in (30, -25, 15, 0):
                     with self.subTest(top=top, delta=delta):
                         positions.clear()
-                        native_positions.clear()
                         note._edge_move(type("Pointer", (), dict(
                             x_root=400, y_root=press.y_root + delta))())
                         self.assertTrue(positions)
                         if top:
                             self.assertEqual(set(positions), {bar_y})
-                            self.assertEqual(set(native_positions), {bar_y})
                         self.assertEqual(note.winfo_y() + note.winfo_height(),
                                          620 if top else 620 + delta)
                         for widget, y, xy in zip(controls, initial, local):
@@ -596,10 +585,17 @@ class NoteEditingTests(unittest.TestCase):
         self.app.root.update()
         press = type("Pointer", (), dict(x=220, y=2, x_root=400, y_root=182))()
         note._edge_press(press)
+        idle = note.update_idletasks
+        injected = False
         def more_input():
-            note._edge_move(type("Pointer", (), dict(x_root=400, y_root=222))())
-            note._edge_release(None)
-        with patch.object(note, "update", side_effect=more_input):
+            nonlocal injected
+            if not injected:
+                injected = True
+                note._edge_move(type("Pointer", (), dict(x_root=400, y_root=212))())
+                note._edge_move(type("Pointer", (), dict(x_root=400, y_root=222))())
+                note._edge_release(None)
+            return idle()
+        with patch.object(note, "update_idletasks", side_effect=more_input):
             note._edge_move(type("Pointer", (), dict(x_root=400, y_root=202))())
         self.app.root.update()
         self.assertIsNone(note._rs)
@@ -608,36 +604,136 @@ class NoteEditingTests(unittest.TestCase):
         self.assertIsNone(note._resize_pending)
         self.assertFalse(note._resize_release_pending)
 
-    def test_resize_restores_compositing_and_repaints_after_layout_error(self):
+    def test_resize_removes_presentation_buffer_after_layout_error(self):
         note = self.note
-        press = type("Pointer", (), dict(x=220, y=2, x_root=400, y_root=182))()
-        note._edge_press(press)
-        style = main.user32.GetWindowLongPtrW(note.hwnd, -20)
-        with patch.object(note, "update_idletasks", side_effect=RuntimeError("layout")), \
-                patch.object(main.user32, "RedrawWindow") as redraw, \
-                patch.object(main.user32, "ReleaseDC", wraps=main.user32.ReleaseDC) as release:
-            with self.assertRaisesRegex(RuntimeError, "layout"):
-                note._edge_move(type("Pointer", (), dict(x_root=400, y_root=212))())
-            redraw.assert_called_once()
-            release.assert_called_once()
-            self.assertEqual(release.call_args.args[0], note.hwnd)
-        self.assertEqual(main.user32.GetWindowLongPtrW(note.hwnd, -20), style)
-        self.assertFalse(note._resize_busy)
-        self.app.root.update()
-        note._edge_release(None)
+        for fail_at in (1, 2):
+            with self.subTest(fail_at=fail_at):
+                note.geometry("440x440+180+180")
+                self.app.root.update()
+                note._edge_press(type("Pointer", (), dict(x=220, y=2, x_root=400, y_root=182))())
+                style = main.user32.GetWindowLongPtrW(note.hwnd, -20)
+                idle = note.update_idletasks
+                calls = 0
+                def fail_layout():
+                    nonlocal calls
+                    calls += 1
+                    if calls == fail_at:
+                        raise RuntimeError("layout")
+                    return idle()
+                with patch.object(note, "update_idletasks", side_effect=fail_layout), \
+                        patch.object(main, "ResizeFrame") as buffer:
+                    with self.assertRaisesRegex(RuntimeError, "layout"):
+                        note._edge_move(type("Pointer", (), dict(x_root=400, y_root=212))())
+                    buffer.return_value.close.assert_called_once()
+                self.assertEqual(main.user32.GetWindowLongPtrW(note.hwnd, -20), style)
+                self.assertTrue(main.user32.GetWindowLongPtrW(note.text.winfo_id(), -16) & 0x10000000)
+                self.assertFalse(note._resize_busy)
+                self.app.root.update()
+                note._edge_release(None)
+
+    def test_resize_buffer_releases_native_resources_when_upload_fails(self):
+        frame = main.ResizeFrame.__new__(main.ResizeFrame)
+        with patch.object(main.user32, "UpdateLayeredWindow", return_value=False), \
+                patch.object(main.user32, "DestroyWindow", wraps=main.user32.DestroyWindow) as destroy, \
+                patch.object(main.gdi32, "DeleteObject", wraps=main.gdi32.DeleteObject) as bitmap, \
+                patch.object(main.gdi32, "DeleteDC", wraps=main.gdi32.DeleteDC) as dc:
+            with self.assertRaises(OSError):
+                frame.__init__(self.note, (180, 180, 440, 440))
+            destroy.assert_called_once()
+            bitmap.assert_called_once()
+            dc.assert_called_once()
+        self.assertIsNone(frame.hwnd)
+        self.assertIsNone(frame.bitmap)
+        self.assertIsNone(frame.dc)
 
     def test_destroying_note_during_resize_does_not_leave_idle_callbacks(self):
         note = self.note
         press = type("Pointer", (), dict(x=220, y=2, x_root=400, y_root=182))()
         note._edge_press(press)
-        def close_during_update():
-            note._edge_release(None)
-            note.destroy()
-        with patch.object(note, "update", side_effect=close_during_update):
-            note._edge_move(type("Pointer", (), dict(x_root=400, y_root=212))())
+        note.after_idle(lambda: (note._edge_release(None), note.destroy()))
+        note._edge_move(type("Pointer", (), dict(x_root=400, y_root=212))())
         self.app.root.update()
         self.assertFalse(note.winfo_exists())
         self.assertIsNone(note._resize_job)
+
+    def test_resize_does_not_run_timers_or_full_update(self):
+        note = self.note
+        ran = []
+        note._edge_press(type("Pointer", (), dict(x=2, y=220, x_root=182, y_root=400))())
+        job = note.after(0, lambda: ran.append(True))
+        with patch.object(note, "update", side_effect=AssertionError("nested update")):
+            note._edge_move(type("Pointer", (), dict(x_root=202, y_root=400))())
+        self.assertEqual(ran, [])
+        note.after_cancel(job)
+        note._edge_release(None)
+
+    def test_resize_keeps_previous_complete_frame_visible_during_layout(self):
+        note = self.note
+        note.geometry("440x440+180+180")
+        note.text.configure(insertwidth=0)
+        note.attributes("-topmost", True)
+        note.lift()
+        self.app.root.update()
+        main.dwmapi.DwmFlush()
+        region = (204, 186, 596, 614)
+        note._edge_press(type("Pointer", (), dict(x=2, y=2, x_root=182, y_root=182))())
+        idle = note.update_idletasks
+        frames = []
+        buffers = []
+        captured = []
+        real_buffer = main.ResizeFrame
+        def make_buffer(*args):
+            buffer = real_buffer(*args)
+            buffers.append(buffer)
+            main.dwmapi.DwmFlush()
+            captured.append(ImageGrab.grab(bbox=region))
+            return buffer
+        def inspect_layout():
+            frames.append((note.winfo_width(), note.winfo_height()))
+            if len(frames) == 1:
+                self.assertEqual(frames[0], (470, 460))
+                self.assertEqual(int(note.body.place_info()["width"]), 470 - 2 * (main.RADIUS + 4))
+                main.dwmapi.DwmFlush()
+                self.assertIsNone(ImageChops.difference(captured[0], ImageGrab.grab(bbox=region)).getbbox())
+            return idle()
+        with patch.object(note, "update_idletasks", side_effect=inspect_layout), \
+                patch.object(main, "ResizeFrame", side_effect=make_buffer):
+            note._edge_move(type("Pointer", (), dict(x_root=152, y_root=162))())
+        self.assertEqual(frames[-1], (470, 460))
+        self.assertIsNone(buffers[0].hwnd)
+        self.assertIsNone(buffers[0].dc)
+        self.assertIsNone(buffers[0].bitmap)
+        note._edge_release(None)
+
+    def test_resize_preserves_hidden_controls_and_toolbar_anchors(self):
+        note = self.note
+        note.geometry("440x440+180+180")
+        hidden = main.tk.Label(note.bar, text="hidden")
+        hidden.place(x=0, y=0)
+        self.app.root.update()
+        hidden.place_forget()
+        note.edit_title()
+        self.app.root.update()
+        editor = note._title_editor
+        title = editor.get()
+        buttons = (note.b_pin, note.b_bottom, *note._tool_btns[-3:])
+        offsets = [button.winfo_rootx() - note.toolbar.winfo_rootx() if i < 2 else
+                   note.toolbar.winfo_rootx()+note.toolbar.winfo_width()-button.winfo_rootx()
+                   for i, button in enumerate(buttons)]
+        for opacity in (1.0, .7):
+            note.attributes("-alpha", opacity)
+            note._edge_press(type("Pointer", (), dict(x=2, y=2,
+                x_root=note.winfo_x()+2, y_root=note.winfo_y()+2))())
+            press = note._rs[-2:]
+            note._edge_move(type("Pointer", (), dict(x_root=press[0]-30, y_root=press[1]-20))())
+            for i, button in enumerate(buttons):
+                actual = button.winfo_rootx() - note.toolbar.winfo_rootx() if i < 2 else \
+                    note.toolbar.winfo_rootx()+note.toolbar.winfo_width()-button.winfo_rootx()
+                self.assertEqual(actual, offsets[i])
+            self.assertFalse(main.user32.GetWindowLongPtrW(hidden.winfo_id(), -16) & 0x10000000)
+            self.assertEqual(editor.get(), title)
+            self.assertIs(note._title_editor, editor)
+            note._edge_release(None)
 
     def test_typing_keeps_native_text_window_visible_during_layout(self):
         self.note.d["lines"] = [{"type": "text", "text": "", "checked": False}]
