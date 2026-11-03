@@ -43,7 +43,7 @@ class AppLifecycleTests(unittest.TestCase):
 
     def test_exit_saves_positions_before_destroying_ui_and_exiting(self):
         app = object.__new__(main.App)
-        note = Mock(d={}, winfo_x=Mock(return_value=12), winfo_y=Mock(return_value=34))
+        note = Mock(d={}, _resizing=False, winfo_x=Mock(return_value=12), winfo_y=Mock(return_value=34))
         app.notes = {"note": note}
         app.icon, app.root = Mock(), Mock()
         order = Mock()
@@ -56,3 +56,20 @@ class AppLifecycleTests(unittest.TestCase):
                 app.quit()
         self.assertEqual(note.d, {"x": 12, "y": 34})
         self.assertEqual(order.mock_calls, [call.save(), call.stop(), call.destroy(), call.exit(0)])
+
+    def test_exit_finishes_resize_before_saving_without_reading_hidden_source_position(self):
+        app = object.__new__(main.App)
+        note = Mock(d={"x": 120, "y": 130}, _resizing=True, _resize_cancel_requested=False)
+        app.notes = {"note": note}
+        app.icon, app.root = Mock(), Mock()
+        order = Mock()
+        with patch.object(app, "save_now") as save, \
+             patch.object(main.os, "_exit", side_effect=SystemExit(0)):
+            order.attach_mock(note._finish_resize, "finish")
+            order.attach_mock(save, "save")
+            with self.assertRaises(SystemExit):
+                app.quit()
+        self.assertEqual(order.mock_calls, [call.finish(cancel=False, redraw=False, hidden=True), call.save()])
+        note.winfo_x.assert_not_called()
+        note.winfo_y.assert_not_called()
+        self.assertEqual(note.d, {"x": 120, "y": 130})
