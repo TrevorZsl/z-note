@@ -15,9 +15,10 @@ from PIL import Image, ImageDraw, ImageFont, ImageTk
 
 from storage import DATA_FILE, DEFAULT_SETTINGS, load_data, save_data
 from resize_surface import ResizeSurface
+from bundled_fonts import CLASSIC_FAMILY, FONT_CHOICES, FONT_FAMILIES, FONT_DIR, load_fonts
 
 APP_NAME = "z-note"
-UI_FONT = "Times New Roman"
+UI_FONT = CLASSIC_FAMILY
 
 NOTE_BG, NOTE_BORDER = "#FFFFFF", "#DFE2E6"
 T_COLOR = "#010203"   # 窗口透明色键（圆角外的部分透出去）
@@ -566,7 +567,7 @@ class NoteEditor:
         self.win, self.col = win, col
         self.d = win.d  # 与窗口共享同一便签字典；只有 lines 按 col 分流
         self.app, self._bg, self.tk = win.app, win._bg, win.tk
-        self.done_font = tkfont.Font(family=UI_FONT,
+        self.done_font = tkfont.Font(family=win.app.note_font_family(),
                                      size=win.app.data["settings"]["fontSize"])
         self.body = tk.Canvas(win, bg=self._bg, bd=0, highlightthickness=0, yscrollincrement=1)
         self.text = tk.Text(self.body, bg=self._bg, fg="#2B2F36", bd=0, highlightthickness=0,
@@ -1532,7 +1533,7 @@ class NoteWindow(tk.Toplevel):
         # -- 工具栏 --
         self.toolbar = tk.Frame(self, bg=self._bg)
         self._tool_btns = []
-        self._chip_font = tkfont.Font(family=UI_FONT, size=10, weight="bold")
+        self._chip_font = tkfont.Font(family=app.note_font_family(), size=10, weight="bold")
         self._title_edit_font = self._chip_font
 
         def btn(icon, get_tip, cmd):
@@ -2808,6 +2809,132 @@ class SettingsScale(tk.Canvas):
         self.create_image(0, 0, image=self._image, anchor="nw")
 
 
+class FontSelector(tk.Canvas):
+    """Rounded font field and popup; no native menu indicator."""
+
+    def __init__(self, parent, variable, command):
+        self.variable, self.command = variable, command
+        self._popup = None
+        self._font = tkfont.Font(root=parent, family=UI_FONT, size=10)
+        width = max(self._font.measure(label) for label in FONT_CHOICES.values()) + 32
+        height = self._font.metrics("linespace") + 16
+        super().__init__(parent, width=width, height=height, bg=NOTE_BG,
+                         highlightthickness=0, bd=0, cursor="hand2", takefocus=True)
+        self._trace = variable.trace_add("write", lambda *_: self._draw())
+        self.bind("<Configure>", lambda _e: self._draw())
+        self.bind("<FocusIn>", lambda _e: self._draw())
+        self.bind("<FocusOut>", lambda _e: self._draw())
+        self.bind("<Button-1>", self._open)
+        for key in ("<Return>", "<space>", "<Down>", "<Up>"):
+            self.bind(key, self._open)
+        self.bind("<Destroy>", self._destroy)
+
+    def _draw(self):
+        width, height = self.winfo_width(), self.winfo_height()
+        if width <= 1 or height <= 1:
+            return
+        image = Image.new("RGB", (width * 4, height * 4), NOTE_BG)
+        border = "#94A3B8" if self.focus_get() == self else NOTE_BORDER
+        ImageDraw.Draw(image).rounded_rectangle(
+            (2, 2, width * 4 - 3, height * 4 - 3), radius=36,
+            fill=NOTE_BG, outline=border, width=4)
+        self._image = ImageTk.PhotoImage(image.resize((width, height), Image.Resampling.LANCZOS), master=self)
+        self.delete("all")
+        self.create_image(0, 0, image=self._image, anchor="nw")
+        self.create_text(16, height / 2, text=self.variable.get(), font=self._font,
+                         fill="#2B2F36", anchor="w")
+
+    def _close(self, _event=None):
+        popup, self._popup = self._popup, None
+        if popup is not None and popup.winfo_exists():
+            popup.grab_release()
+            popup.destroy()
+        return "break"
+
+    def _destroy(self, event):
+        if event.widget == self:
+            self._close()
+            self.variable.trace_remove("write", self._trace)
+
+    def _open(self, _event=None):
+        if self._popup is not None:
+            return self._close()
+        self.focus_set()
+        popup = self._popup = tk.Toplevel(self)
+        popup.withdraw()
+        popup.overrideredirect(True)
+        popup.configure(bg=T_COLOR)
+        popup.attributes("-transparentcolor", T_COLOR)
+        popup.attributes("-topmost", True)
+        labels = list(FONT_CHOICES.values())
+        row_height = max(30, self._font.metrics("linespace") + 14)
+        width, height = self.winfo_width(), 12 + row_height * len(labels)
+        canvas = tk.Canvas(popup, width=width, height=height, bg=T_COLOR,
+                           highlightthickness=0, bd=0)
+        canvas.pack()
+        background = round_rect(canvas, 1, 1, width - 2, height - 2, 10,
+                                fill=NOTE_BG, outline=NOTE_BORDER)
+        highlights = []
+        for index, label in enumerate(labels):
+            top = 6 + index * row_height
+            highlights.append(round_rect(canvas, 5, top, width - 5, top + row_height, 7,
+                                          fill="#F2F3F5", outline="", state="hidden"))
+            canvas.create_text(16, top + row_height / 2, text=label, font=self._font,
+                               fill="#2B2F36", anchor="w")
+        selected = labels.index(self.variable.get())
+
+        def select(index):
+            nonlocal selected
+            canvas.itemconfigure(highlights[selected], state="hidden")
+            selected = index
+            canvas.itemconfigure(highlights[selected], state="normal")
+            canvas.tag_raise(highlights[selected], background)
+
+        def activate(index):
+            self._close()
+            self.variable.set(labels[index])
+            self.command(labels[index])
+
+        def click(event):
+            x, y = event.x_root - popup.winfo_rootx(), event.y_root - popup.winfo_rooty()
+            index = (y - 6) // row_height
+            if 5 <= x < width - 5 and 0 <= index < len(labels):
+                activate(index)
+            else:
+                self._close()
+            return "break"
+
+        def motion(event):
+            index = (event.y - 6) // row_height
+            if 0 <= index < len(labels):
+                select(index)
+
+        def key(event):
+            if event.keysym in ("Up", "Down"):
+                select((selected + (1 if event.keysym == "Down" else -1)) % len(labels))
+            elif event.keysym in ("Return", "space"):
+                activate(selected)
+            elif event.keysym in ("Escape", "Tab"):
+                self._close()
+            return "break"
+
+        canvas.bind("<Motion>", motion)
+        popup.bind("<Button-1>", click)
+        popup.bind("<KeyPress>", key)
+        popup.bind("<FocusOut>", lambda _e: self._close())
+        work = SettingsWindow._work_area(self.winfo_toplevel())
+        x = max(work.left, min(self.winfo_rootx(), work.right - width))
+        y = self.winfo_rooty() + self.winfo_height() + 4
+        if y + height > work.bottom:
+            y = max(work.top, self.winfo_rooty() - height - 4)
+        popup.geometry(f"{width}x{height}+{x}+{y}")
+        select(selected)
+        popup.deiconify()
+        popup.grab_set()
+        popup.focus_set()
+        return "break"
+
+
 class SettingsWindow(tk.Toplevel):
     def __init__(self, app):
         super().__init__(app.root)
@@ -2880,6 +3007,13 @@ class SettingsWindow(tk.Toplevel):
         startup.pack(anchor="w", pady=4)
 
         section("外观")
+        font_row = tk.Frame(f, bg=NOTE_BG)
+        font_row.pack(fill="x", pady=(0, 8))
+        tk.Label(font_row, text="字体", bg=NOTE_BG, fg="#2B2F36",
+                 font=(UI_FONT, 10)).pack(side="left")
+        self.font_choice = tk.StringVar(master=self, value=FONT_CHOICES[app.data["settings"]["fontFamily"]])
+        self.font_selector = FontSelector(font_row, self.font_choice, self._font_family)
+        self.font_selector.pack(side="right")
         row = tk.Frame(f, bg=NOTE_BG); row.pack(fill="x", pady=(0, 4))
         tk.Label(row, text="透明度", bg=NOTE_BG, fg="#2B2F36",
                  font=(UI_FONT, 10)).pack(side="left")
@@ -3003,7 +3137,7 @@ class SettingsWindow(tk.Toplevel):
         path.configure(wraplength=max(1, content_width - 16))
         layout_hotkeys(content_width)
         body.itemconfigure(content, width=content_width)
-        for appearance_row in (row, row3):
+        for appearance_row in (font_row, row, row3):
             label = appearance_row.winfo_children()[0]
             label.configure(wraplength=max(1, content_width - 16), justify="left")
             if appearance_row.winfo_reqwidth() > content_width - 8:
@@ -3154,6 +3288,11 @@ class SettingsWindow(tk.Toplevel):
         self.app.update_fonts()
         self._save()
 
+    def _font_family(self, label):
+        self.app.data["settings"]["fontFamily"] = next(key for key, value in FONT_CHOICES.items() if value == label)
+        self.app.update_fonts()
+        self._save()
+
     def _save(self):
         self.app.schedule_save()
 
@@ -3163,7 +3302,7 @@ def _make_tray_icon():
     d = ImageDraw.Draw(img)
     d.rounded_rectangle([1, 1, 30, 30], 7, fill=(255, 213, 79, 255))
     try:
-        font = ImageFont.truetype("times.ttf", 20)
+        font = ImageFont.truetype(str(FONT_DIR / "classic.ttf"), 20)
     except OSError:
         try:
             font = ImageFont.load_default(20)
@@ -3504,8 +3643,11 @@ class HistoryWindow(tk.Toplevel):
 
 class App:
     def __init__(self):
+        load_fonts()
         self.data = load_data()
         settings = self.data["settings"]
+        if settings.get("fontFamily") not in FONT_CHOICES:
+            settings["fontFamily"] = "classic"
         if "toggleHotkey" in settings:
             settings.setdefault("hideHotkey", settings.pop("toggleHotkey"))
         self.data.setdefault("archives", [])
@@ -3528,6 +3670,7 @@ class App:
             self.data["schemaVersion"] = 3
         self.q = queue.Queue()
         self.root = tk.Tk()
+        self._system_font_family = tkfont.nametofont("TkDefaultFont", root=self.root).actual("family")
         # 钉死 tk scaling：首次运行记录系统 DPI，此后不再跟随系统缩放变化，画面始终一致。
         # 想重新适配当前缩放，删掉 %APPDATA%/z-note/notes.json 里的 uiDpi 即可。
         dpi = self.data["settings"].get("uiDpi")
@@ -3545,7 +3688,7 @@ class App:
         self.settings_win = None
         self.show_notes = self.data["settings"]["showOnStartup"]
 
-        self.base_font = tkfont.Font(family=UI_FONT,
+        self.base_font = tkfont.Font(family=self.note_font_family(),
                                      size=self.data["settings"]["fontSize"])
 
         self._restore_notes()
@@ -3585,11 +3728,19 @@ class App:
         if self.show_notes:
             self.show_all()
 
+    def note_font_family(self):
+        choice = self.data["settings"]["fontFamily"]
+        return self._system_font_family if choice == "system" else FONT_FAMILIES[choice]
+
     def update_fonts(self):
-        self.base_font.config(size=self.data["settings"]["fontSize"])
+        family = self.note_font_family()
+        self.base_font.config(family=family, size=self.data["settings"]["fontSize"])
         for w in self.notes.values():
+            w._chip_font.config(family=family)
+            w._draw_chip()
             for editor in w.editors:
-                editor.done_font.config(size=self.data["settings"]["fontSize"])
+                editor._sync_lines_from_text()
+                editor.done_font.config(family=family, size=self.data["settings"]["fontSize"])
                 editor._make_check_images()
                 editor.render()
 

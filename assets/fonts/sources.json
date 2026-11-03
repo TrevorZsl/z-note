@@ -1,0 +1,18 @@
+{
+  "repository": "https://github.com/wachin/Microsoft-Fonts",
+  "commit": "ac856f46d987e4e81f39f3a2fadc232eff04b922",
+  "source_sha256": {
+    "msyh.ttc": "e4b3b9d058750fb80899c24f68e35beda606ca92694eff0e9f7f91eec7a846aa",
+    "msyhbd.ttc": "06e1a30f687ab7d39f533447b21e84d51e0cecdaa6bfa060c87136b168811bdc",
+    "simsun.ttc": "2e3cc9dbd787c827f73496f01633bba430e15c5db4d4f6ed9938386ea01f0171",
+    "times.ttf": "2cff2a03d8034801979dd6d16f09b9a825c3d710fcf068f2ebfbf0e1425c87cf",
+    "timesbd.ttf": "621b4a765fef5d255d19530f4bf936104c6519f2e232a0eef1923474e5b9cf22"
+  },
+  "bundled_sha256": {
+    "classic-bold.ttf": "40bce4d16770460faee5eba993c413c1f75a770c085eebade597a9490988326c",
+    "classic.ttf": "160d7268d7ef6914a9c09eb8089430255026dba73a376e69e9c542efd92ecd70",
+    "simsun.ttf": "4580fda642abbd0b5484013597e610060eb2b2b592628fc82a281727f48bf6ef",
+    "yahei-bold.ttf": "c811444310ea8df1c118ded31413b03d2d6e1bbda7084a75e5014cb31cacf580",
+    "yahei.ttf": "db86320b40e06cbc70c87bcb255bded4b6bac9c7743e1c9e4f39dc605963901f"
+  }
+}
