@@ -3263,7 +3263,7 @@ class HistoryWindow(tk.Toplevel):
         panes = tk.Frame(shell, bg=NOTE_BG)
         panes.pack(fill="both", expand=True)
         panes.columnconfigure(0, weight=1, uniform="panes")
-        panes.columnconfigure(1, weight=1, uniform="panes")
+        panes.columnconfigure(1, weight=2, uniform="panes")
         panes.rowconfigure(0, weight=1)
         self.left = HistoryPane(panes)
         self.left.grid(row=0,column=0,sticky="nsew",padx=(0,10))
@@ -3431,18 +3431,10 @@ class HistoryWindow(tk.Toplevel):
         marker = tk.Label(row, image=self._check_images[line["checked"]], bg=NOTE_BG)
         marker.pack(side="left", anchor="center", padx=(0, 8))
         text = tk.Label(row, text=line["text"], bg=NOTE_BG, fg="#2B2F36",
-                        font=(UI_FONT, 10), justify="left", anchor="w")
+                        font=(UI_FONT, 10, "overstrike" if line["checked"] else "normal"),
+                        justify="left", anchor="w")
         text.pack(side="left", fill="x", expand=True)
         text.bind("<Configure>", lambda e: text.configure(wraplength=max(1, e.width-8)))
-
-    @staticmethod
-    def _preview_divider(canvas):
-        canvas.delete("all")
-        h = canvas.winfo_height()
-        if h > 48:
-            margin = 16
-            canvas.create_line(7, margin, 7, h - margin, fill="#C9CED5",
-                               width=4, capstyle="round")
 
     def select(self, _event=None):
         for child in self.content.winfo_children():
@@ -3462,19 +3454,33 @@ class HistoryWindow(tk.Toplevel):
             self.button(actions, "还原", lambda: self.app.recover_note(note["id"])).pack(side="left", padx=(8,0))
             self.label(note.get("title") or "无标题", True)
             if note.get("twoColumn"):
-                wrap = tk.Frame(self.content, bg=NOTE_BG)
-                wrap.pack(fill="both", expand=True)
-                left = tk.Frame(wrap, bg=NOTE_BG)
-                left.pack(side="left", fill="both", expand=True)
-                split = tk.Canvas(wrap, bg=NOTE_BG, width=14, highlightthickness=0, bd=0)
-                split.pack(side="left", fill="y")
-                split.bind("<Configure>", lambda e: self._preview_divider(e.widget))
-                right = tk.Frame(wrap, bg=NOTE_BG)
-                right.pack(side="left", fill="both", expand=True)
-                for line in note.get("lines") or []:
-                    self.preview_line(line, parent=left)
-                for line in note.get("lines2") or []:
-                    self.preview_line(line, parent=right)
+                for key, name in (("lines", "左栏"), ("lines2", "右栏")):
+                    section = tk.Frame(self.content, bg=NOTE_BG)
+                    section.pack(fill="x", padx=4, pady=(8, 12))
+                    background = tk.Canvas(section, bg=NOTE_BG, highlightthickness=0, bd=0)
+                    background.place(x=0, y=0, relwidth=1, relheight=1)
+                    heading = tk.Label(section, text=name, bg="#F5F7FA", fg=QUIET,
+                                       font=(UI_FONT, 9), anchor="w", pady=6)
+                    heading.pack(fill="x", padx=12, pady=(2, 0))
+                    body = tk.Frame(section, bg=NOTE_BG)
+                    body.pack(fill="x", padx=8, pady=(4, 10))
+                    def draw_section(_event=None, card=section, canvas=background, title=heading):
+                        w, h = card.winfo_width(), card.winfo_height()
+                        if w < 26 or h < 26:
+                            return
+                        header_h = title.winfo_y() + title.winfo_height()
+                        canvas.delete("all")
+                        round_rect(canvas, 1, 1, w-1, h-1, 12, fill=NOTE_BG, outline=NOTE_BORDER)
+                        round_rect(canvas, 2, 2, w-2, header_h+12, 11, fill="#F5F7FA", outline="")
+                        canvas.create_rectangle(2, header_h, w-2, header_h+13, fill=NOTE_BG, outline="")
+                    section.bind("<Configure>", draw_section)
+                    heading.bind("<Configure>", draw_section)
+                    lines = note.get(key) or []
+                    if not lines:
+                        tk.Label(body, text="暂无内容", bg=NOTE_BG, fg=QUIET,
+                                 font=(UI_FONT, 10), anchor="w").pack(fill="x", padx=4, pady=6)
+                    for line in lines:
+                        self.preview_line(line, parent=body)
             else:
                 for line in note["lines"]:
                     self.preview_line(line)

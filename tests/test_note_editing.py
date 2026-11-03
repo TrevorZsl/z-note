@@ -1621,6 +1621,66 @@ class NoteEditingTests(unittest.TestCase):
         self.assertEqual(win.ids, ["newest", "newer", "older"])
         win.destroy()
 
+    def test_history_two_column_preview_stacks_full_width_sections(self):
+        from copy import deepcopy
+        note = deepcopy(self.note.d)
+        left_text, right_text = "左栏长文字需要正常换行 " * 24, "右栏长待办需要完整阅读 " * 24
+        note.update(twoColumn=True, title="分栏预览", deletedAt="2026-11-03T15:00:00",
+                    lines=[{"type": "text", "text": left_text, "checked": False}],
+                    lines2=[{"type": "todo", "text": right_text, "checked": True}])
+        self.app.data["deletedNotes"] = [deepcopy(note)]
+        win = main.HistoryWindow(self.app)
+        size = win.winfo_width(), win.winfo_height()
+        win.switch("deletedNotes")
+        self.app.root.update()
+        self.assertEqual((win.winfo_width(), win.winfo_height()), size)
+        self.assertAlmostEqual(win.right.winfo_width() / win.left.winfo_width(), 2, delta=.15)
+        sections = [child for child in win.content.winfo_children()
+                    if isinstance(child, main.tk.Frame)][1:]
+        self.assertEqual(len(sections), 2)
+        for section, name, content in zip(sections, ("左栏", "右栏"), (left_text, right_text)):
+            heading, body = [child for child in section.winfo_children()
+                             if not isinstance(child, main.tk.Canvas)]
+            self.assertEqual(heading.cget("text"), name)
+            labels = list(body.winfo_children())
+            if isinstance(labels[0], main.tk.Frame):
+                marker, label = labels[0].winfo_children()
+                self.assertEqual(marker.cget("image"), str(win._check_images[True]))
+            else:
+                label = labels[0]
+            self.assertEqual(label.cget("text"), content)
+            self.assertGreater(label.winfo_width(), win.right.viewport.winfo_width() * .75)
+            self.assertLessEqual(label.winfo_rootx() + label.winfo_width(),
+                                 win.right.viewport.winfo_rootx() + win.right.viewport.winfo_width())
+        self.assertGreaterEqual(sections[1].winfo_y(), sections[0].winfo_y() + sections[0].winfo_height())
+        self.assertTrue(win.right.bars["y"].find_withtag("thumb"))
+        self.assertEqual(self.app.data["deletedNotes"], [note])
+        win.destroy()
+
+    def test_history_two_column_preview_preserves_blank_lines_and_empty_todos(self):
+        from copy import deepcopy
+        note = deepcopy(self.note.d)
+        note.update(twoColumn=True, deletedAt="2026-11-03T15:00:00", lines=[], lines2=[
+            {"type": "text", "text": "", "checked": False},
+            {"type": "todo", "text": "", "checked": False}])
+        self.app.data["deletedNotes"] = [deepcopy(note)]
+        win = main.HistoryWindow(self.app)
+        win.switch("deletedNotes")
+        self.app.root.update()
+        sections = [child for child in win.content.winfo_children()
+                    if isinstance(child, main.tk.Frame)][1:]
+        left, right = [next(child for child in section.winfo_children() if isinstance(child, main.tk.Frame))
+                       for section in sections]
+        self.assertEqual(left.winfo_children()[0].cget("text"), "暂无内容")
+        blank, todo = right.winfo_children()
+        self.assertEqual(blank.cget("text"), "")
+        self.assertGreater(blank.winfo_height(), 0)
+        marker, text = todo.winfo_children()
+        self.assertEqual(marker.cget("image"), str(win._check_images[False]))
+        self.assertEqual(text.cget("text"), "")
+        self.assertEqual(self.app.data["deletedNotes"], [note])
+        win.destroy()
+
     def test_history_multiline_preview_uses_one_centered_note_checkbox(self):
         win = main.HistoryWindow(self.app)
         for checked in (False, True):
@@ -1631,6 +1691,7 @@ class NoteEditingTests(unittest.TestCase):
         for checked, row in zip((False, True), rows):
             marker, text = row.winfo_children()
             self.assertEqual(marker.cget("image"), str(win._check_images[checked]))
+            self.assertEqual(bool(main.tkfont.Font(root=win, font=text.cget("font")).actual("overstrike")), checked)
             self.assertGreater(text.winfo_height(), marker.winfo_height() * 2)
             self.assertAlmostEqual(marker.winfo_y() + marker.winfo_height()/2,
                                    text.winfo_y() + text.winfo_height()/2, delta=2)
@@ -1890,7 +1951,9 @@ class NoteEditingTests(unittest.TestCase):
                                      win.winfo_rootx()+win.winfo_width())
                 self.assertGreater(win.canvas.winfo_width(), 200)
                 self.assertGreater(win.content.winfo_width(), 200)
-                self.assertGreater(win.left.content.winfo_width(), 200)
+                self.assertEqual(win.left.content.winfo_width(), win.left.viewport.winfo_width())
+                self.assertLessEqual(win.left.content.winfo_rootx() + win.left.content.winfo_width(),
+                                     win.left.winfo_rootx() + win.left.winfo_width())
                 win.destroy()
         finally:
             self.app.root.tk.call("tk", "scaling", original)
@@ -3800,6 +3863,11 @@ class NoteEditingTests(unittest.TestCase):
     def test_two_column_note_round_trips_through_recycle_bin(self):
         note = self.note
         note.toggle_columns()
+        left = [{"type": "text", "text": "左栏内容", "checked": False}]
+        right = [{"type": "todo", "text": "右栏已完成", "checked": True},
+                 {"type": "todo", "text": "", "checked": False}]
+        note.d["lines"], note.d["lines2"] = left, right
+        note.render()
         self.app.root.update()
         note_id = note.d["id"]
         note.delete_self()
@@ -3809,6 +3877,8 @@ class NoteEditingTests(unittest.TestCase):
         self.assertTrue(self.app.recover_note(note_id))
         self.app.root.update()
         self.assertEqual(len(self.app.notes[note_id].editors), 2)
+        self.assertEqual(self.app.notes[note_id].d["lines"], left)
+        self.assertEqual(self.app.notes[note_id].d["lines2"], right)
 
 
 if __name__ == "__main__":
