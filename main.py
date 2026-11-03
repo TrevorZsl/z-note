@@ -84,6 +84,10 @@ user32.SetSystemCursor.argtypes = [wintypes.HANDLE, wintypes.DWORD]
 user32.SetSystemCursor.restype = wintypes.BOOL
 user32.SystemParametersInfoW.argtypes = [wintypes.UINT, wintypes.UINT, wintypes.LPVOID, wintypes.UINT]
 user32.SystemParametersInfoW.restype = wintypes.BOOL
+user32.MonitorFromPoint.argtypes = [wintypes.POINT, wintypes.DWORD]
+user32.MonitorFromPoint.restype = wintypes.HANDLE
+user32.GetMonitorInfoW.argtypes = [wintypes.HANDLE, wintypes.LPVOID]
+user32.GetMonitorInfoW.restype = wintypes.BOOL
 user32.GetKeyState.argtypes = [ctypes.c_int]
 user32.GetKeyState.restype = ctypes.c_short
 SPI_SETICURSORS = 0x0057
@@ -2717,18 +2721,30 @@ class SettingsWindow(tk.Toplevel):
         path = tk.Label(f, text=DATA_FILE, bg=NOTE_BG, fg="#A9AFB6",
                         font=(UI_FONT, 9), wraplength=460, justify="left")
         path.pack(anchor="w", pady=(8, 0))
+
+        def layout_hotkeys(content_width):
+            for hotkey_row, label, entry in hotkey_rows:
+                label_width = int(self.tk.call("font", "measure", label.cget("font"), label.cget("text")))
+                stacked = entry.winfo_reqwidth() + label_width + 28 > content_width
+                label.grid_configure(row=0, column=0, columnspan=2 if stacked else 1,
+                                     pady=(0, 4) if stacked else 0)
+                entry.grid_configure(row=1 if stacked else 0, column=0 if stacked else 1,
+                                     columnspan=2 if stacked else 1)
+                label.configure(wraplength=max(1, content_width-16 if stacked else
+                                                content_width-entry.winfo_reqwidth()-28))
+
         self.update_idletasks()
-        work = wintypes.RECT()
-        user32.SystemParametersInfoW(48, 0, ctypes.byref(work), 0)  # SPI_GETWORKAREA
-        available_w, available_h = work.right - work.left - 32, work.bottom - work.top - 32
-        width = min(max(720, f.winfo_reqwidth() + 2 * RADIUS), available_w)
+        work = SettingsWindow._work_area(self)
+        scale = max(1, round(self.winfo_fpixels("1i")) / 96)
+        margin = max(8, round(16 * scale))
+        available_w, available_h = work.right - work.left - 2*margin, work.bottom - work.top - 2*margin
+        width = min(max(round(480 * scale), f.winfo_reqwidth() + 2 * RADIUS), available_w)
         content_width = width - 2 * RADIUS
         # 文本按实际可用宽度换行，窗口高度在换行完成后再计算。
         startup.configure(wraplength=max(1, content_width - self._check_images[False].width() - 16))
         hotkey_hint.configure(wraplength=max(1, content_width - 16))
         path.configure(wraplength=max(1, content_width - 16))
-        for hotkey_row, label, entry in hotkey_rows:
-            label.configure(wraplength=max(1, content_width - entry.winfo_reqwidth() - 28))
+        layout_hotkeys(content_width)
         body.itemconfigure(content, width=content_width)
         for appearance_row in (row, row3):
             label = appearance_row.winfo_children()[0]
@@ -2757,8 +2773,7 @@ class SettingsWindow(tk.Toplevel):
             startup.configure(wraplength=max(1, content_width - self._check_images[False].width() - 16))
             hotkey_hint.configure(wraplength=max(1, content_width - 16))
             path.configure(wraplength=max(1, content_width - 16))
-            for hotkey_row, label, entry in hotkey_rows:
-                label.configure(wraplength=max(1, content_width - entry.winfo_reqwidth() - 28))
+            layout_hotkeys(content_width)
             for appearance_row in (row, row3):
                 label = appearance_row.winfo_children()[0]
                 label.configure(wraplength=max(1, content_width - 16), justify="left")
@@ -2779,9 +2794,7 @@ class SettingsWindow(tk.Toplevel):
         self.bind("<Configure>", layout)
         f.bind("<Configure>", update_region)
         body.bind("<Configure>", update_region)
-        SettingsWindow._enable_resize(self, min(width, max(600,
-            max(entry.winfo_reqwidth() for _, _, entry in hotkey_rows) + 2 * RADIUS +
-            scrollbar.winfo_reqwidth() + 48)), min(height, 360))
+        SettingsWindow._lock_size(self, width, height)
         self.geometry("%dx%d+%d+%d" % (width, height,
                        work.left + (work.right - work.left - width) // 2,
                        work.top + (work.bottom - work.top - height) // 2))
@@ -2794,32 +2807,31 @@ class SettingsWindow(tk.Toplevel):
         user32.SetWindowPos(hwnd, None, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | 0x04 | 0x20)
         self.deiconify()
 
-    def _enable_resize(self, width, height):
+    def _lock_size(self, width, height):
         self.minsize(width, height)
+        self.maxsize(width, height)
+        self.resizable(False, False)
         self._resize = None
-        self.bind("<Motion>", lambda e: self.configure(cursor=SettingsWindow._resize_edges(self, e)[1]))
-        self.bind("<ButtonRelease-1>", lambda _e: (setattr(self, "_drag", None), setattr(self, "_resize", None)))
 
-    def _resize_edges(self, event):
-        x, y = event.x_root - self.winfo_rootx(), event.y_root - self.winfo_rooty()
-        w, h = self.winfo_width(), self.winfo_height()
-        edges = (0 <= x < EDGE, w - EDGE < x <= w, 0 <= y < EDGE, h - EDGE < y <= h)
-        if not (0 <= x <= w and 0 <= y <= h):
-            edges = (False, False, False, False)
-        elif (x < CORNER or x > w - CORNER) and (y < CORNER or y > h - CORNER):
-            edges = (x < w / 2, x >= w / 2, y < h / 2, y >= h / 2)
-        l, r, t, b = edges
-        cursor = ("size_nw_se" if (l and t) or (r and b) else
-                  "size_ne_sw" if (l and b) or (r and t) else
-                  "size_we" if l or r else "size_ns" if t or b else "")
-        return edges, cursor
+    def _work_area(self):
+        class MonitorInfo(ctypes.Structure):
+            _fields_ = [("size", wintypes.DWORD), ("monitor", wintypes.RECT),
+                        ("work", wintypes.RECT), ("flags", wintypes.DWORD)]
+        info = MonitorInfo()
+        info.size = ctypes.sizeof(info)
+        monitor = user32.MonitorFromPoint(wintypes.POINT(*cursor_pos()), 2)
+        if user32.GetMonitorInfoW(monitor, ctypes.byref(info)):
+            return info.work
+        work = wintypes.RECT()
+        user32.SystemParametersInfoW(48, 0, ctypes.byref(work), 0)
+        return work
 
     def _drag_press(self, event):
-        edges, _ = SettingsWindow._resize_edges(self, event)
-        if any(edges):
+        x, y = event.x_root-self.winfo_rootx(), event.y_root-self.winfo_rooty()
+        w, h = self.winfo_width(), self.winfo_height()
+        if (x < EDGE or x > w-EDGE or y < EDGE or y > h-EDGE or
+                ((x < CORNER or x > w-CORNER) and (y < CORNER or y > h-CORNER))):
             self._drag = None
-            self._resize = (edges, event.x_root, event.y_root, self.winfo_x(), self.winfo_y(),
-                            self.winfo_width(), self.winfo_height())
             return
         if (event.widget in (self._close_button, self._minimize_button, *self._hotkey_borders) or
                 isinstance(event.widget, (SettingsScale, VerticalThumb, tk.Checkbutton, tk.Button, tk.Scrollbar, tk.Entry))):
@@ -2831,14 +2843,6 @@ class SettingsWindow(tk.Toplevel):
         user32.ShowWindow(user32.GetParent(self.winfo_id()) or self.winfo_id(), 6)  # SW_MINIMIZE
 
     def _drag_move(self, event):
-        if getattr(self, "_resize", None):
-            (l, r, t, b), mx, my, x, y, w, h = self._resize
-            dx, dy = event.x_root - mx, event.y_root - my
-            min_w, min_h = self.minsize()
-            width = max(min_w, w + dx if r else w - dx if l else w)
-            height = max(min_h, h + dy if b else h - dy if t else h)
-            self.geometry(f"{width}x{height}+{x + w - width if l else x}+{y + h - height if t else y}")
-            return
         if self._drag is None:
             return
         self.geometry("+%d+%d" % (event.x_root - self._drag[0],
@@ -3013,10 +3017,11 @@ class HistoryWindow(tk.Toplevel):
         self.content = self.right.content
         self.bind("<MouseWheel>", self.wheel)
         self.bind("<Escape>", lambda e: self.destroy())
-        work = wintypes.RECT()
-        user32.SystemParametersInfoW(48, 0, ctypes.byref(work), 0)
-        width = min(max(960, self.winfo_reqwidth()), work.right-work.left-32)
-        height = min(720, work.bottom-work.top-32)
+        work = SettingsWindow._work_area(self)
+        scale = max(1, round(self.winfo_fpixels("1i")) / 96)
+        margin = max(8, round(16 * scale))
+        width = min(max(round(640 * scale), self.winfo_reqwidth()), work.right-work.left-2*margin)
+        height = min(round(480 * scale), work.bottom-work.top-2*margin)
         self.geometry(f"{width}x{height}+{work.left+(work.right-work.left-width)//2}+{work.top+(work.bottom-work.top-height)//2}")
         self.update_idletasks()
         hwnd = user32.GetParent(self.winfo_id()) or self.winfo_id()
@@ -3025,8 +3030,7 @@ class HistoryWindow(tk.Toplevel):
         style = user32.GetWindowLongPtrW(hwnd, -20)
         user32.SetWindowLongPtrW(hwnd, -20, style & ~0x80 | 0x40000)
         user32.SetWindowPos(hwnd, None, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | 0x04 | 0x20)
-        SettingsWindow._enable_resize(self, min(width, max(640, tabs.winfo_reqwidth() + self.delete_button.winfo_reqwidth() + 58,
-            header.winfo_reqwidth() + 42)), min(height, 360))
+        SettingsWindow._lock_size(self, width, height)
         self.hint.bind("<Configure>", lambda e: self.hint.configure(wraplength=max(1, e.width), justify="left"))
         self.refresh()
         self.deiconify()
