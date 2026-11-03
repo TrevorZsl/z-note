@@ -14,6 +14,7 @@ import pystray
 from PIL import Image, ImageDraw, ImageFont, ImageTk
 
 from storage import DATA_FILE, DEFAULT_SETTINGS, load_data, save_data
+from resize_surface import ResizeSurface
 
 APP_NAME = "z-note"
 UI_FONT = "Times New Roman"
@@ -32,12 +33,25 @@ user32 = ctypes.WinDLL("user32")
 kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
 user32.SetWindowPos.argtypes = [wintypes.HWND, wintypes.HWND, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int, wintypes.UINT]
 user32.SetWindowPos.restype = wintypes.BOOL
-user32.RedrawWindow.argtypes = [wintypes.HWND, ctypes.c_void_p, wintypes.HANDLE, wintypes.UINT]
-user32.RedrawWindow.restype = wintypes.BOOL
-user32.GetDC.argtypes = [wintypes.HWND]
-user32.GetDC.restype = wintypes.HDC
-user32.ReleaseDC.argtypes = [wintypes.HWND, wintypes.HDC]
-user32.ReleaseDC.restype = ctypes.c_int
+user32.PostMessageW.argtypes = [wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM]
+user32.PostMessageW.restype = wintypes.BOOL
+user32.SetCapture.argtypes = [wintypes.HWND]
+user32.SetCapture.restype = wintypes.HWND
+user32.GetCapture.argtypes = []
+user32.GetCapture.restype = wintypes.HWND
+user32.IsChild.argtypes = [wintypes.HWND, wintypes.HWND]
+user32.IsChild.restype = wintypes.BOOL
+user32.SetForegroundWindow.argtypes = [wintypes.HWND]
+user32.ClientToScreen.argtypes = [wintypes.HWND, ctypes.c_void_p]
+user32.PeekMessageW.argtypes = [ctypes.POINTER(wintypes.MSG), wintypes.HWND,
+                               wintypes.UINT, wintypes.UINT, wintypes.UINT]
+user32.PeekMessageW.restype = wintypes.BOOL
+user32.ReleaseCapture.argtypes = []
+user32.ReleaseCapture.restype = wintypes.BOOL
+user32.GetAsyncKeyState.argtypes = [ctypes.c_int]
+user32.GetAsyncKeyState.restype = ctypes.c_short
+user32.GetWindowRect.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.RECT)]
+user32.GetWindowRect.restype = wintypes.BOOL
 user32.ShowWindow.argtypes = [wintypes.HWND, ctypes.c_int]
 user32.ShowWindow.restype = wintypes.BOOL
 user32.GetWindowLongPtrW.argtypes = [wintypes.HWND, ctypes.c_int]
@@ -445,6 +459,7 @@ class EdgeFade:
         self.height = 0
         self._size = None
         self._visible = (False, False)
+        self._resize_visible = (False, False)
         self.windows = []
         for _ in range(2):
             hwnd = user32.CreateWindowExW(
@@ -459,6 +474,15 @@ class EdgeFade:
     def update(self, first, last):
         width, viewport = self.body.winfo_width(), self.body.winfo_height()
         height = min(max(1, round(self.body.winfo_fpixels("18p"))), viewport // 4)
+        self._resize_visible = (float(first) > 1e-6, float(last) < 1-1e-6)
+        note = self.body.master
+        if getattr(note, "_resizing", False) and note._resize_surface is not None:
+            for hwnd, visible in zip(self.windows, self._visible):
+                if visible:
+                    user32.ShowWindow(hwnd, 0)
+            self._visible = (False, False)
+            self.height = height
+            return
         if width < 1 or height < 1:
             for hwnd in self.windows:
                 user32.ShowWindow(hwnd, 0)
@@ -525,69 +549,9 @@ gdi32.CreateDIBSection.restype = wintypes.HBITMAP
 gdi32.SelectObject.argtypes = [wintypes.HDC, wintypes.HANDLE]
 gdi32.SelectObject.restype = wintypes.HANDLE
 gdi32.DeleteDC.argtypes = [wintypes.HDC]
-gdi32.BitBlt.argtypes = [wintypes.HDC, ctypes.c_int, ctypes.c_int, ctypes.c_int,
-    ctypes.c_int, wintypes.HDC, ctypes.c_int, ctypes.c_int, wintypes.DWORD]
-gdi32.BitBlt.restype = wintypes.BOOL
 user32.UpdateLayeredWindow.argtypes = [wintypes.HWND, wintypes.HDC, ctypes.c_void_p,
     ctypes.c_void_p, wintypes.HDC, ctypes.c_void_p, wintypes.DWORD, ctypes.c_void_p, wintypes.DWORD]
 user32.UpdateLayeredWindow.restype = wintypes.BOOL
-
-
-class ResizeFrame:
-    """准备一帧布局时保留上一完整画面；每帧结束即撤掉，不冻结整次拖动。"""
-    def __init__(self, note, target):
-        self.hwnd = self.dc = self.bitmap = self.old_bitmap = None
-        x, y, w, h = target
-        left = min(x, note.winfo_x()) - 12
-        top = min(y, note.winfo_y()) - 12
-        width = max(x+w, note.winfo_x()+note.winfo_width()) + 12 - left
-        height = max(y+h, note.winfo_y()+note.winfo_height()) + 12 - top
-        screen_dc = user32.GetDC(None)
-        try:
-            self.dc = gdi32.CreateCompatibleDC(screen_dc)
-            header = ctypes.create_string_buffer(struct.pack(
-                "<IiiHHIIiiII", 40, width, -height, 1, 32, 0, width*height*4, 0, 0, 0, 0))
-            bits = ctypes.c_void_p()
-            self.bitmap = gdi32.CreateDIBSection(screen_dc, header, 0, ctypes.byref(bits), None, 0)
-            if not screen_dc or not self.dc or not self.bitmap:
-                raise ctypes.WinError()
-            self.old_bitmap = gdi32.SelectObject(self.dc, self.bitmap)
-            if not gdi32.BitBlt(self.dc, 0, 0, width, height, screen_dc,
-                               left, top, 0x40CC0020):  # SRCCOPY | CAPTUREBLT
-                raise ctypes.WinError()
-            # 无焦点、鼠标穿透的原生缓冲面；不参与 Tk 布局或便签层级。
-            self.hwnd = user32.CreateWindowExW(0x080800A0, "STATIC", None,
-                0x80000000, left, top, width, height, None, None, None, None)
-            if not self.hwnd:
-                raise ctypes.WinError()
-            position, size, origin = _POINT(left, top), wintypes.SIZE(width, height), _POINT(0, 0)
-            blend = ctypes.c_uint32(0x00FF0000)  # 常量 alpha=255，屏幕位图已经合成透明度。
-            if not user32.UpdateLayeredWindow(self.hwnd, screen_dc, ctypes.byref(position),
-                    ctypes.byref(size), self.dc, ctypes.byref(origin), 0, ctypes.byref(blend), 2):
-                raise ctypes.WinError()
-            if not user32.SetWindowPos(self.hwnd, wintypes.HWND(-1), left, top, width, height,
-                                       0x0010 | 0x0040):  # NOACTIVATE | SHOWWINDOW
-                raise ctypes.WinError()
-        except Exception:
-            self.close()
-            raise
-        finally:
-            if screen_dc:
-                user32.ReleaseDC(None, screen_dc)
-
-    def close(self):
-        if self.hwnd:
-            user32.DestroyWindow(self.hwnd)
-            self.hwnd = None
-        if self.old_bitmap:
-            gdi32.SelectObject(self.dc, self.old_bitmap)
-            self.old_bitmap = None
-        if self.bitmap:
-            gdi32.DeleteObject(self.bitmap)
-            self.bitmap = None
-        if self.dc:
-            gdi32.DeleteDC(self.dc)
-            self.dc = None
 
 
 class NoteWindow(tk.Toplevel):
@@ -600,10 +564,12 @@ class NoteWindow(tk.Toplevel):
         self.geometry(f"{data['w']}x{data['h']}+{data['x']}+{data['y']}")
         self.attributes("-alpha", data["opacity"])
         self.overrideredirect(True)
+        self.minsize(280, 230)
 
         # 画布画圆角底板，控件都放圆角内部
         self.cv = tk.Canvas(self, bg=self._bg, highlightthickness=0, bd=0)
         self.cv.pack(fill="both", expand=True)
+        self._border_item = self.cv.create_rectangle(0, 0, 1, 1, fill=self._bg, outline=self._border)
 
         # -- 工具栏 --
         self.toolbar = tk.Frame(self, bg=self._bg)
@@ -652,7 +618,7 @@ class NoteWindow(tk.Toplevel):
                             selectbackground=self._bg, inactiveselectbackground=self._bg,
                             selectforeground="#2B2F36", selectborderwidth=0,
                             font=app.base_font, insertbackground="#2B2F36", cursor="xterm")
-        self.text.place(x=0, y=0)
+        self.text.place(x=0, y=0, relwidth=1)
         self.scroll_thumb = VerticalThumb(self, self.body, self._bg)
         self._make_check_images()
         self.text.tag_config("done", font=self.done_font)  # 只加删除线，不改字色
@@ -678,7 +644,7 @@ class NoteWindow(tk.Toplevel):
         self.clear_btn.bind("<Enter>", lambda e: self.clear_btn.config(fg="#454B52"))
         self.clear_btn.bind("<Leave>", lambda e: self.update_status())
         self.clear_btn.bind("<Button-1>", lambda e: self.clear_done())
-        self.add_pill = tk.Label(self.bar, bg=self._bg, bd=0, padx=0, pady=0,
+        self.add_pill = tk.Label(self.bar, bg=self._bg, bd=0, padx=2, pady=2,
                                  highlightthickness=0, cursor="hand2")
         self.add_pill.bind("<Button-1>", self._pill_press)
         Tooltip(self.add_pill, lambda: "添加待办")
@@ -691,21 +657,29 @@ class NoteWindow(tk.Toplevel):
         self._buffer_margin = 0
         self._layout_busy = False
         self._layout_pending = False
-        self._resize_busy = False
-        self._resize_pending = None
-        self._resize_release_pending = False
+        self._layout_measure_pending = False
+        self._resizing = self._resize_busy = self._resize_ending = False
+        self._resize_ready = self._resize_cancel_requested = self._resize_release_pending = False
+        self._resize_target = self._resize_start = self._resize_surface = None
+        self._resize_next_frame = 0
+        self._resize_dirty = False
+        self._resize_key_widgets = []
+        self._resize_pointer = self._resize_release_point = None
+        self._resize_up_since = None
+        self._edge_sizing = self._dragging = False
         self._resize_job = None
+        self._relayout_job = None
         self._row_layout = {}
         self._wheel_job = None
         self._wheel_remaining = 0
         self._selection_scroll_job = None
         self._edge_fade = EdgeFade(self.body)
         self.body.configure(yscrollcommand=self._text_scrolled)
-        self.body.bind("<Configure>", lambda e: self._queue_strikes())
+        self.body.bind("<Configure>", self._body_configured)
         self._bind_ime(self.text)
         self._draw_chip()
 
-        self.bind("<Configure>", lambda e: self._relayout() if e.widget == self else None)
+        self.bind("<Configure>", lambda e: self._queue_relayout() if e.widget == self else None)
         for surface in (self.cv, self.bar):
             surface.bind("<Motion>", self._edge_cursor)
             surface.bind("<Button-1>", self._edge_press)
@@ -774,38 +748,60 @@ class NoteWindow(tk.Toplevel):
         self._install_inline_ime()
         self._install_z_order()
         self.apply_z()
+        self._configure_frameless()
         self._restyle()
         if not data.get("visible", True):
             self.withdraw()
 
+    def _queue_relayout(self):
+        if self._relayout_job is None:
+            self._relayout_job = self.after_idle(self._run_relayout)
+
+    def _run_relayout(self):
+        self._relayout_job = None
+        self._relayout()
+
+    def _body_configured(self, event):
+        changed = event.width != getattr(self, "_body_width", None)
+        self._body_width = event.width
+        self._queue_strikes(measure=changed)
+
     def _relayout(self):
-        w, h = self.winfo_width(), self.winfo_height()
+        w, h = self._layout_dimensions()
         if w < 50 or h < 50 or (w, h) == getattr(self, "_last_sz", None):
             return  # 尺寸没变（纯移动触发的 Configure）不重画
         previous = getattr(self, "_last_sz", None)
         self._last_sz = (w, h)
         if previous is None or previous[0] != w:
             self._draw_chip()
-        self.cv.delete("all")
-        self.cv.create_rectangle(0, 0, w - 1, h - 1, fill=self._bg, outline=self._border)
+        self.cv.coords(self._border_item, 0, 0, w - 1, h - 1)
         ix = RADIUS + 4
         toolbar_h = max(48, self.title_chip.winfo_reqheight())
         text_y = toolbar_h + 12
-        self.toolbar.place(x=ix, y=6, width=w - 2 * ix, height=toolbar_h)
+        if getattr(self, "_toolbar_size", None) != (w, toolbar_h):
+            self.toolbar.place(x=ix, y=6, width=w - 2 * ix, height=toolbar_h)
+            self._toolbar_size = (w, toolbar_h)
         self._layout_footer(text_y)
-        self._queue_strikes()
 
     def _layout_footer(self, text_y=None):
-        w, h = self.winfo_width(), self.winfo_height()
+        w, h = self._layout_dimensions()
         if w < 50 or h < 50:
             return
         edge = max(12, min(24, round(w * .06)))
         available = w - 2 * edge
-        self.clear_btn.config(text="清除已完成")
-        label_width = max(self.status.winfo_reqwidth(), self.clear_btn.winfo_reqwidth())
+        label_font = self.clear_btn.cget("font")
+        if getattr(self, "_footer_label_widths", (None,))[0] != label_font:
+            self._footer_label_widths = (label_font,
+                int(self.tk.call("font", "measure", label_font, "清除已完成")),
+                int(self.tk.call("font", "measure", label_font, "清除完成")))
+        _, long_width, short_width = self._footer_label_widths
+        clear_text = "清除已完成"
+        label_width = max(self.status.winfo_reqwidth(), long_width)
         if available - 2 * label_width - 20 < 64:
-            self.clear_btn.config(text="清除完成")
-            label_width = max(self.status.winfo_reqwidth(), self.clear_btn.winfo_reqwidth())
+            clear_text = "清除完成"
+            label_width = max(self.status.winfo_reqwidth(), short_width)
+        if self.clear_btn.cget("text") != clear_text:
+            self.clear_btn.config(text=clear_text)
         gap = min(10, max(6, (available - 2 * label_width - 36) // 2))
         pill_width = min(112, max(36, available - 2 * label_width - 2 * gap))
         pill_height = min(max(36, self.title_chip.winfo_reqheight()), pill_width - 4)
@@ -821,10 +817,13 @@ class NoteWindow(tk.Toplevel):
         self.bar.place(x=0, y=bar_y, width=w, height=h - 1 - bar_y)
         center_y = 8 + pill_height / 2
         # 底栏内统一使用局部坐标，移动容器即可带动全部控件。
-        self.status.place(x=pill_x / 2, y=center_y, anchor="center", height=26)
-        self.clear_btn.place(x=(pill_x + pill_width + w) / 2, y=center_y, anchor="center")
-        self.add_pill.place(x=pill_x, y=8,
-                            width=pill_width, height=pill_height)
+        content_size = (w, pill_width, pill_height, self.status.winfo_reqwidth(), label_font)
+        if getattr(self, "_footer_content_size", None) != content_size:
+            self.status.place(x=pill_x / 2, y=center_y, anchor="center", height=26)
+            self.clear_btn.place(x=(pill_x + pill_width + w) / 2, y=center_y, anchor="center")
+            # 原图位置不变，四周留两像素背景，保护原生移动时的抗锯齿边缘。
+            self.add_pill.place(x=pill_x-2, y=6, width=pill_width+4, height=pill_height+4)
+            self._footer_content_size = content_size
         if getattr(self, "_pill_render", (None, None))[:2] != (pill_width, pill_height):
             self._draw_pill(pill_width, pill_height)
 
@@ -960,9 +959,12 @@ class NoteWindow(tk.Toplevel):
     def destroy(self):
         self._stop_wheel()
         self._stop_selection_scroll()
-        if self._resize_job is not None:
-            self.after_cancel(self._resize_job)
-            self._resize_job = None
+        self._finish_resize(cancel=True, redraw=False, hidden=True)
+        if hasattr(self, "_resize_key_tag"):
+            self.unbind_class(self._resize_key_tag, "<Escape>")
+        if self._relayout_job is not None:
+            self.after_cancel(self._relayout_job)
+            self._relayout_job = None
         if getattr(self, "_strike_job", None):
             self.after_cancel(self._strike_job)
             self._strike_job = None
@@ -1026,10 +1028,38 @@ class NoteWindow(tk.Toplevel):
         self._ime_pending = queue.SimpleQueue()
         self.text.tag_configure("ime_preedit", underline=True)
         hwnd = self.winfo_id()  # Tk 将原生输入焦点保留在顶层客户窗口。
+        self._resize_client_hwnd = hwnd
 
         @_WNDPROC
         def window_proc(handle, message, wparam, lparam):
-            # 原生消息可能嵌套在 Tcl 调用中；这里只读 IMM 数据，不能调用 Tk。
+            # 原生消息可能嵌套在 Tcl 调用中；这里只处理原生状态，不能调用 Tk。
+            if message == 0x0200 and self._resizing:  # coalesce before Tk creates a second motion queue
+                if wparam & 0x0001 and self._resize_release_point is None:
+                    point = _POINT(ctypes.c_short(lparam & 0xFFFF).value,
+                                   ctypes.c_short((lparam >> 16) & 0xFFFF).value)
+                    user32.ClientToScreen(handle, ctypes.byref(point))
+                    self._resize_pointer = (point.x, point.y)
+                pending = wintypes.MSG()
+                while user32.PeekMessageW(ctypes.byref(pending), None, 0x0200, 0x0200, 1):
+                    if pending.wParam & 0x0001 and self._resize_release_point is None:
+                        self._resize_pointer = (pending.pt.x, pending.pt.y)
+                return 0
+            if message == 0x0202 and self._resizing:  # latch the release coordinates, not a later cursor position
+                point = _POINT(ctypes.c_short(lparam & 0xFFFF).value,
+                               ctypes.c_short((lparam >> 16) & 0xFFFF).value)
+                user32.ClientToScreen(handle, ctypes.byref(point))
+                self._resize_release_point = (point.x, point.y)
+                self._resize_release_pending = True
+            if message in (0x0100, 0x0104, 0x0290) and wparam == 0x1B and self._resizing:
+                self._resize_cancel_requested = True
+                return 0
+            if (message == 0x001F and self._resizing and self._resize_ready and
+                    user32.GetAsyncKeyState(0x01) < 0):
+                self._resize_cancel_requested = True
+            if (message == 0x0215 and self._resizing and self._resize_ready and lparam and
+                    lparam != self.hwnd and not user32.IsChild(self.hwnd, lparam) and
+                    user32.GetAsyncKeyState(0x01) < 0):
+                self._resize_cancel_requested = True
             try:
                 if message == 0x0281 and self._ime_target is not None:  # 正文与标题均使用行内预编辑。
                     lparam &= ~0x80000000
@@ -1180,6 +1210,9 @@ class NoteWindow(tk.Toplevel):
                 point = _POINT(box[0], box[1])
                 focus = user32.GetFocus() or hwnd
                 user32.MapWindowPoints(hwnd, focus, ctypes.byref(point), 1)
+                if self._resizing:
+                    point.x += self._resize_target[0] - self.winfo_rootx()
+                    point.y += self._resize_target[1] - self.winfo_rooty()
                 area = wintypes.RECT(point.x, point.y, point.x + box[2], point.y + box[3])
                 form = _CANDIDATEFORM(0, 0x0040, _POINT(point.x, area.bottom + 6), area)
                 imm32.ImmSetCandidateWindow(context, ctypes.byref(form))
@@ -1200,15 +1233,18 @@ class NoteWindow(tk.Toplevel):
         for event in ("<KeyPress>", "<ButtonRelease-1>"):
             widget.bind(event, lambda e: widget.after_idle(self._sync_ime, widget), add="+")
 
-    def _queue_strikes(self):
+    def _queue_strikes(self, measure=True):
+        if self._resizing:
+            self._resize_dirty = True
         if self._layout_busy:
             self._layout_pending = True
+            self._layout_measure_pending |= measure
             return
-        self._document_height = 0
-        self._row_layout.clear()
-        if getattr(self, "_strike_job", None):
-            self.after_cancel(self._strike_job)
-        self._strike_job = self.after_idle(self._draw_strikes)
+        if measure:
+            self._document_height = 0
+            self._row_layout.clear()
+        if getattr(self, "_strike_job", None) is None:
+            self._strike_job = self.after_idle(self._draw_strikes)
 
     def _draw_strikes(self):
         if self._layout_busy:
@@ -1216,12 +1252,14 @@ class NoteWindow(tk.Toplevel):
         self._layout_busy = True
         try:
             self._layout_text()
-            self.body.update_idletasks()
+            if not self._resizing:
+                self.body.update_idletasks()
         finally:
             self._layout_busy = False
         if self._layout_pending:
             self._layout_pending = False
-            self._queue_strikes()
+            measure, self._layout_measure_pending = self._layout_measure_pending, False
+            self._queue_strikes(measure=measure)
 
     def _layout_text(self):
         if getattr(self, "_strike_job", None):
@@ -1234,9 +1272,10 @@ class NoteWindow(tk.Toplevel):
         for bar in self._strike_widgets:
             if self.text.compare(bar._text_start, ">=", f"{bar._text_start} lineend"):
                 bar.place_forget()
+                bar._layout_bounds = None
         # 正文和所有装饰始终留在同一内容坐标系，滚动只移动整个 Text 窗口。
-        self.text.place_configure(width=width)
-        self.body.update_idletasks()
+        if self.text.winfo_width() != width:
+            self.body.update_idletasks()
         if not self._document_height:
             self._document_height = self.text.count("1.0", "end", "update", "ypixels")
         pad = int(self.text.cget("pady"))
@@ -1247,15 +1286,29 @@ class NoteWindow(tk.Toplevel):
         height = min(self._content_height, max(self.body.winfo_height(),
                      min(16000, max(self.body.winfo_height() * 5,
                                     self.body.winfo_height() + 4 * self._buffer_margin))))
-        self.text.place_configure(height=height)
-        self.body.configure(scrollregion=(0, 0, width, self._content_height))
-        self.body.update_idletasks()
+        region = (0, 0, width, self._content_height)
+        geometry_changed = self.text.winfo_height() != height
+        region_changed = getattr(self, "_body_region", None) != region
+        if geometry_changed:
+            self.text.place_configure(height=height)
+        if region_changed:
+            self.body.configure(scrollregion=region)
+            self._body_region = region
+        # 顶部未滚动且 Text 高度未变时，横向 scrollregion 更新不影响行坐标。
+        if geometry_changed or (region_changed and self.body.canvasy(0) != 0):
+            self.body.update_idletasks()
         top = round(self.body.canvasy(0))
         target = max(0, top - (height - self.body.winfo_height()) // 2)
-        self.text.yview_moveto(target / self._document_height)
+        view_changed = round(self.text.yview()[0] * self._document_height) != target
+        if view_changed:
+            self.text.yview_moveto(target / self._document_height)
         self._chunk_start = round(self.text.yview()[0] * self._document_height)
-        self.text.place_configure(y=self._chunk_start - top)
-        self.body.update_idletasks()
+        text_y = self._chunk_start - top
+        if self.text.winfo_y() != text_y:
+            self.text.place_configure(y=text_y)
+            view_changed = True
+        if view_changed:
+            self.body.update_idletasks()
         used_masks = used_boxes = used_bars = 0
         content_height = self.text.winfo_height()
         visible_start = self.text.index("@0,0")
@@ -1304,12 +1357,15 @@ class NoteWindow(tk.Toplevel):
                         box.bind("<Control-MouseWheel>", self._ctrl_wheel)
                         self._checkbox_widgets.append(box)
                     used_boxes += 1
-                    box._todo_row = row
-                    box.place(x=int(self.text.cget("padx")) + self._check_margin + self._check_margin // 2,
-                              y=y, width=size, height=size,
-                              bordermode="ignore")
-                    box.lift()
-                    box.bind("<Button-1>", lambda _e, r=row-1: self.toggle_done(r))
+                    bounds = (int(self.text.cget("padx")) + self._check_margin + self._check_margin // 2,
+                              y, size, size)
+                    if getattr(box, "_layout_bounds", None) != bounds:
+                        box.place(x=bounds[0], y=y, width=size, height=size, bordermode="ignore")
+                        box._layout_bounds = bounds
+                        box.lift()
+                    if getattr(box, "_todo_row", None) != row:
+                        box._todo_row = row
+                        box.bind("<Button-1>", lambda _e, r=row-1: self.toggle_done(r))
             if line["type"] != "todo" or not line["checked"]:
                 continue
             start = f"{row}.{self._prefix_len(line)}"
@@ -1340,9 +1396,12 @@ class NoteWindow(tk.Toplevel):
                     bar._text_start = start
                     baseline = display[1] + display[4]
                     middle = baseline - round(self.done_font.metrics("ascent") * 0.33)
-                    bar.place(x=first[0], y=middle - thickness // 2,
-                              width=max(1, last[0] + last[2] - first[0]),
-                              height=thickness, bordermode="ignore")
+                    bounds = (first[0], middle - thickness // 2,
+                              max(1, last[0] + last[2] - first[0]), thickness)
+                    if getattr(bar, "_layout_bounds", None) != bounds:
+                        bar.place(x=bounds[0], y=bounds[1], width=bounds[2],
+                                  height=thickness, bordermode="ignore")
+                        bar._layout_bounds = bounds
                 if display[1] + display[3] >= content_height:
                     break
                 next_start = self.text.index(f"@0,{display[1] + display[3]}")
@@ -1433,8 +1492,8 @@ class NoteWindow(tk.Toplevel):
 
     def _draw_pill(self, width=None, height=None, pressed=False):
         c = self.add_pill
-        w = width or c.winfo_width()
-        h = height or c.winfo_height()
+        w = width or c.winfo_width() - 4
+        h = height or c.winfo_height() - 4
         if w < 30 or h < 30:
             return
         if getattr(self, "_pill_render", None) == (w, h, pressed):
@@ -1448,10 +1507,10 @@ class NoteWindow(tk.Toplevel):
                                fill="#EFF1F3" if pressed else "#FFFFFF",
                                outline="#2B2F36", width=round(2.5 * scale))
         img = img.resize((w, h), Image.Resampling.LANCZOS)
-        with Image.open(os.path.join(ICON_DIR, "plus-normal.png")) as source:
-            icon = source.resize((26, 26), Image.Resampling.LANCZOS)
-            img.paste(icon, (round((w-26)/2), round((h-26)/2)), icon)
-        self._pill_bitmap = img
+        if not hasattr(self, "_pill_icon"):
+            with Image.open(os.path.join(ICON_DIR, "plus-normal.png")) as source:
+                self._pill_icon = source.resize((26, 26), Image.Resampling.LANCZOS)
+        img.paste(self._pill_icon, (round((w-26)/2), round((h-26)/2)), self._pill_icon)
         self._pill_image = ImageTk.PhotoImage(img, master=c)
         c.configure(image=self._pill_image)
         self._pill_render = (w, h, pressed)
@@ -1463,11 +1522,10 @@ class NoteWindow(tk.Toplevel):
             padding = button.pack_info()["padx"]
             padding = (padding, padding) if isinstance(padding, int) else self.tk.splitlist(padding)
             reserved += button.winfo_reqwidth() + sum(int(value) for value in padding)
-        return max(44, self.winfo_width() - 2 * (RADIUS + 4) - reserved)
+        return max(44, self._layout_dimensions()[0] - 2 * (RADIUS + 4) - reserved)
 
     def _draw_chip(self):
         c = self.title_chip
-        c.delete("all")
         editing = self._title_editor is not None and self._title_editor.winfo_exists()
         title = self._title_var.get() if editing else self.d.get("title", "")
         text = title or "无标题"
@@ -1475,6 +1533,11 @@ class NoteWindow(tk.Toplevel):
         natural_width = font.measure(text) + 36
         w = min(self._title_max_width(), max(44, natural_width))
         h = max(28, font.metrics("linespace") + 12)
+        render_key = (title, tuple(sorted(font.actual().items())), w, h, editing)
+        if not editing and getattr(self, "_chip_render", None) == render_key:
+            return
+        self._chip_render = render_key
+        c.delete("all")
         c.config(width=w, height=h)
         self.title_chip.pack_configure(pady=max(0, (44 - h) // 2))
         round_rect(c, 1, 1, w - 1, h - 1, min(11, h // 2),
@@ -1801,6 +1864,7 @@ class NoteWindow(tk.Toplevel):
                 removes_text = len(t.get(start, end)) == 1 and t.compare("insert", "==", position)
             if removes_text:
                 bar.place_forget()
+                bar._layout_bounds = None
 
     def _on_backspace(self, _e):
         if self._ime_composing(self.text):
@@ -2033,10 +2097,17 @@ class NoteWindow(tk.Toplevel):
 
     # ---- 窗口操作 ----
     def _drag_press(self, e):
+        self._edge_sizing = False
+        self._dragging = True
         self._dx, self._dy = e.x_root - self.winfo_x(), e.y_root - self.winfo_y()
     def _drag_move(self, e):
+        if not self._dragging:
+            return "break"
         self.geometry(f"+{e.x_root - self._dx}+{e.y_root - self._dy}")
     def _drag_release(self, _e):
+        if not self._dragging:
+            return "break"
+        self._dragging = False
         self.d["x"], self.d["y"] = self.winfo_x(), self.winfo_y()
         self.app.schedule_save()
 
@@ -2044,7 +2115,7 @@ class NoteWindow(tk.Toplevel):
     def _edge_hit(self, x, y, widget=None):
         if widget is self.bar:
             y += self.bar.winfo_y()
-        w, h = self.winfo_width(), self.winfo_height()
+        w, h = self._layout_dimensions()
         l, r, t, b = x < EDGE, x > w - EDGE, y < EDGE, y > h - EDGE  # 左 右 上 下
         if (x < CORNER or x > w - CORNER) and (y < CORNER or y > h - CORNER):
             # 圆角区整块判定为斜向，光标与拉伸方向随所在角自动匹配
@@ -2053,6 +2124,8 @@ class NoteWindow(tk.Toplevel):
         return l, r, t, b
 
     def _edge_cursor(self, e):
+        if self._resizing:
+            return "break"
         surface = getattr(e, "widget", self.cv)
         l, r, t, b = self._edge_hit(e.x, e.y, surface)
         if (l and t) or (r and b):
@@ -2068,124 +2141,299 @@ class NoteWindow(tk.Toplevel):
         if cur != surface.cget("cursor"):
             surface.config(cursor=cur)
 
-    def _edge_press(self, e):
-        l, r, t, b = self._edge_hit(e.x, e.y, getattr(e, "widget", None))
-        if not (l or r or t or b):
-            return self._drag_press(e)
-        self._rs = [l, r, t, b, self.winfo_width(), self.winfo_height(),
-                    self.winfo_x(), self.winfo_y(), e.x_root, e.y_root]
-        return "break"
+    def _configure_frameless(self):
+        style = user32.GetWindowLongPtrW(self.hwnd, -16)
+        user32.SetWindowLongPtrW(self.hwnd, -16, style | 0x00040000)
+        user32.SetWindowPos(self.hwnd, None, 0, 0, 0, 0,
+                            SWP_NOMOVE | SWP_NOSIZE | 0x0004 | 0x0010 | 0x0020)
 
-    def _edge_move(self, e):
-        if self._resize_busy:
-            self._resize_pending = e
+    def _layout_dimensions(self):
+        if self._resizing:
+            return self._resize_target[2:]
+        return self.winfo_width(), self.winfo_height()
+
+    @staticmethod
+    def _resize_rectangle(rect, delta, edges, maximum):
+        x, y, width, height = rect
+        dx, dy = delta
+        left, right, top, bottom = edges
+        w = min(maximum[0], max(280, width + dx if right else width - dx if left else width))
+        h = min(maximum[1], max(230, height + dy if bottom else height - dy if top else height))
+        return (x + width - w if left else x, y + height - h if top else y, w, h)
+
+    def _edge_press(self, event):
+        if self._resizing or self._resize_ending:
             return "break"
-        if not getattr(self, "_rs", None):
-            return self._drag_move(e)
-        l, r, t, b, w0, h0, x0, y0, mx0, my0 = self._rs
-        dx, dy = e.x_root - mx0, e.y_root - my0
-        x, y, w, h = x0, y0, w0, h0
-        if r:
-            w = max(280, w0 + dx)
-        if b:
-            h = max(230, h0 + dy)
-        if l:
-            w = max(280, w0 - dx)
-            x = x0 + w0 - w
-        if t:
-            h = max(230, h0 - dy)
-            y = y0 + h0 - h
-        if (x, y, w, h) == (self.winfo_x(), self.winfo_y(),
-                            self.winfo_width(), self.winfo_height()):
-            return "break"
-        # 原生缓冲面覆盖旧、新矩形的并集，Tk 的中间布局不会直接出现在桌面上。
-        self._resize_busy = True
-        frame = None
+        edges = self._edge_hit(event.x, event.y, getattr(event, "widget", None))
+        if not any(edges):
+            return self._drag_press(event)
+        native = wintypes.RECT()
+        user32.GetWindowRect(self.hwnd, ctypes.byref(native))
+        rect = (native.left, native.top, native.right-native.left, native.bottom-native.top)
+        maximum = self.maxsize()
+        self._resize_limits = (max(rect[2], maximum[0]), max(rect[3], maximum[1]))
+        self._resize_pointer = (event.x_root, event.y_root)
+        self._resize_release_point = self._resize_up_since = None
+        self._resize_start = (rect, self._resize_pointer, edges)
+        self._resize_target = rect
+        self._resizing = self._resize_busy = True
+        self._resize_ready = self._resize_cancel_requested = self._resize_release_pending = False
+        self._edge_sizing, self._dragging = True, False
         try:
-            frame = ResizeFrame(self, (x, y, w, h))
-            flags = 0x0004 | 0x0010 | 0x0008 | 0x0100  # NOZORDER | NOACTIVATE | NOREDRAW | NOCOPYBITS
-            if not user32.SetWindowPos(self.hwnd, None, x, y, w, h, flags):
-                raise ctypes.WinError()
-            self._relayout()
+            user32.SetForegroundWindow(self.hwnd)
+            self._resize_surface = ResizeSurface(self, self._resize_client_hwnd, rect)
+            width, height = self._resize_surface.capacity
+            # Keep the source allocation fixed. Only its three logical regions
+            # reflow; the completed visible frame moves/resizes in one submission.
+            self.geometry(f"{width}x{height}+{rect[0]}+{rect[1]}")
+            self._edge_fade.update(*self.body.yview())
             self.update_idletasks()
-            if self.winfo_exists():
-                # Tk 的照片实例可能沿用移动前的裁剪缓存，重新提交现有位图。
-                for image in self._check_images.values():
-                    image.paste(ImageTk.getimage(image))
-                for button in self._tool_btns:
-                    image = button._active_image if button._active else button._image
-                    image.paste(ImageTk.getimage(image))
-                self._pill_image.paste(self._pill_bitmap)
-                widgets = [self]
-                while widgets:
-                    widget = widgets.pop()
-                    widgets.extend(widget.winfo_children())
-                    if widget.winfo_ismapped():
-                        widget.event_generate("<Expose>", x=0, y=0,
-                                              width=widget.winfo_width(), height=widget.winfo_height())
-                user32.RedrawWindow(self.hwnd, None, None,
-                                    0x0001 | 0x0004 | 0x0080 | 0x0100 | 0x0400)
-                # 只处理窗口事件；新拖动和松手由 busy 守卫合并，不运行下一帧计时器。
-                while self.winfo_exists() and self.tk.dooneevent(WINDOW_EVENTS | DONT_WAIT):
-                    pass
-                if self.winfo_exists():
-                    self.update_idletasks()
-                    self._edge_fade.update(*self.body.yview())
-                    dwmapi.DwmFlush()
+            self._grab_resize_keys()
+            self.cv.grab_set_global()
+            user32.SetCapture(self._resize_client_hwnd)
+            self._resize_ready = True
+            self._resize_next_frame = 0
+            self._resize_dirty = True
+        except Exception:
+            self._resize_busy = False
+            self._finish_resize(cancel=True, redraw=False)
+            raise
         finally:
-            if frame is not None:
-                frame.close()
-            try:
-                if self.winfo_exists():
-                    # 缓冲面撤掉产生的 Expose 必须在下一次取帧之前完成。
-                    user32.RedrawWindow(self.hwnd, None, None, 0x0001 | 0x0080 | 0x0100)
-                    while self.winfo_exists() and self.tk.dooneevent(WINDOW_EVENTS | DONT_WAIT):
-                        pass
-                    if self.winfo_exists():
-                        self.update_idletasks()
-                        dwmapi.DwmFlush()
-            finally:
-                self._resize_busy = False
-                if ((self._resize_pending is not None or self._resize_release_pending) and
-                        self.winfo_exists()):
-                    self._resize_job = self.after_idle(self._flush_resize)
+            self._resize_busy = False
+        if self._resize_release_pending:
+            self._finish_resize()
+        else:
+            self._resize_job = self.after(1, self._poll_resize)
         return "break"
 
-    def _flush_resize(self):
-        if self._resize_job is not None:
-            self.after_cancel(self._resize_job)
-            self._resize_job = None
-        pending, self._resize_pending = self._resize_pending, None
-        released, self._resize_release_pending = self._resize_release_pending, False
-        if not getattr(self, "_rs", None):
-            return
-        if pending is not None:
-            self._edge_move(pending)
-        if released:
-            self._edge_release(None)
+    def _edge_move(self, event):
+        if not self._resizing:
+            return self._drag_move(event)
+        if self._resize_release_point is None:
+            self._resize_pointer = (event.x_root, event.y_root)
+        if not self._resize_busy and time.perf_counter() >= self._resize_next_frame:
+            if self._resize_job is not None:
+                self.after_cancel(self._resize_job)
+                self._resize_job = None
+            self._poll_resize()
+        return "break"
 
-    def _edge_release(self, _e):
-        if self._resize_busy:
-            self._resize_release_pending = True
+    def _edge_release(self, event):
+        if not self._resizing:
+            return self._drag_release(event)
+        if self._resize_release_point is None:
+            self._resize_release_point = (event.x_root, event.y_root)
+        return self._finish_resize()
+
+    def _poll_resize(self):
+        self._resize_job = None
+        if not self._resizing or self._resize_busy:
+            return
+        if self._resize_cancel_requested:
+            self._finish_resize(cancel=True)
+            return
+        capture = user32.GetCapture()
+        if (self._resize_ready and capture != self._resize_client_hwnd and
+                (not capture or user32.IsChild(self.hwnd, capture)) and user32.GetAsyncKeyState(0x01) < 0):
+            user32.SetCapture(self._resize_client_hwnd)
+        start = time.perf_counter()
+        self._resize_busy = True
+        try:
+            rect, (mx, my), edges = self._resize_start
+            down = user32.GetAsyncKeyState(0x01) < 0
+            if down and self._resize_release_point is None:
+                self._resize_pointer = cursor_pos()
+            px, py = self._resize_release_point or self._resize_pointer
+            target = self._resize_rectangle(rect, (px-mx, py-my), edges, self._resize_limits)
+            if target != self._resize_target or self._resize_dirty:
+                self._resize_target = target
+                self._render_resize_frame()
+                self._resize_next_frame = start + .016
+        except Exception:
+            self._resize_busy = False
+            self._finish_resize(cancel=True, redraw=False)
+            raise
+        finally:
+            self._resize_busy = False
+        if not self._resizing:
+            return
+        up = user32.GetAsyncKeyState(0x01) >= 0
+        if up and self._resize_up_since is None:
+            self._resize_up_since = time.perf_counter()
+        if (self._resize_release_pending or
+                (up and time.perf_counter() - self._resize_up_since >= .020)):
+            self._finish_resize()
+        elif self._resize_job is None:
+            # Polling also handles mouse-up if Tk's pointer timer released capture.
+            self._resize_job = self.after(1, self._poll_resize)
+
+    def _render_resize_frame(self):
+        surface = self._resize_surface
+        if not surface:
+            return
+        x, y, width, height = self._resize_target
+        if surface.ensure_capacity(width, height):
+            sx, sy = self._resize_start[0][:2]
+            self.geometry(f"{surface.capacity[0]}x{surface.capacity[1]}+{sx}+{sy}")
+        self._relayout()
+        # Configure queues text layout after the new body size is installed.
+        # Drain it once, instead of first measuring the previous viewport.
+        self.update_idletasks()
+        if not self.winfo_exists() or not self._resizing:
+            return
+        body = self.body
+        fade = self._edge_fade
+        span = min(body.winfo_width(), max(0, self.scroll_thumb.winfo_x()-body.winfo_x()))
+        bottom_edge = min(body.winfo_y()+body.winfo_height(), self.bar.winfo_y())
+        rows = min(fade.height, max(0, bottom_edge-body.winfo_y()))
+        regions = []
+        for bottom, visible in enumerate(fade._resize_visible):
+            if visible and span > 0 and rows > 0:
+                regions.append((body.winfo_x(), body.winfo_y() +
+                    (bottom_edge-body.winfo_y()-rows if bottom else 0), span, rows, bool(bottom)))
+        surface.present(self._resize_target, regions)
+        self._resize_dirty = False
+        if self._ime_active and self._ime_widget is not None:
+            self._sync_ime(self._ime_widget)
+
+    def _grab_resize_keys(self):
+        if not hasattr(self, "_resize_key_tag"):
+            self._resize_key_tag = f"Resize:{self._w}"
+            self.bind_class(self._resize_key_tag, "<Escape>", lambda _e: self._finish_resize(cancel=True))
+        self._resize_key_widgets = []
+        widgets = [self]
+        while widgets:
+            widget = widgets.pop()
+            widgets.extend(widget.winfo_children())
+            tags = widget.bindtags()
+            self._resize_key_widgets.append((widget, tags))
+            widget.bindtags((self._resize_key_tag, *tags))
+
+    def _repair_resize_frame(self):
+        # Only at the handover to the real window: invalidate Tk image clipping
+        # caches after its native origin changes. Never walk this tree per frame.
+        images = {*self._check_images.values(), self._pill_image}
+        for button in self._tool_btns:
+            images.update((button._image, button._active_image))
+        for image in images:
+            image.paste(ImageTk.getimage(image))
+        widgets = [self]
+        while widgets:
+            widget = widgets.pop()
+            widgets.extend(widget.winfo_children())
+            if widget.winfo_ismapped():
+                widget.event_generate("<Expose>", x=0, y=0,
+                                      width=widget.winfo_width(), height=widget.winfo_height())
+        self.update_idletasks()
+        self._edge_fade._size = None
+        self._edge_fade.update(*self.body.yview())
+        dwmapi.DwmFlush()  # one handover fence, not part of the drag-frame path
+
+    def _finish_resize(self, cancel=False, redraw=True, hidden=False):
+        if not self._resizing:
             return "break"
-        if self._resize_pending is not None:
-            self._flush_resize()
-        if getattr(self, "_rs", None):
-            self._rs = None
-            self.d.update(w=self.winfo_width(), h=self.winfo_height(),
-                          x=self.winfo_x(), y=self.winfo_y())
-            self.app.schedule_save()
-        else:
-            self._drag_release(_e)
+        cancel |= self._resize_cancel_requested
+        if self._resize_ending:
+            if hidden:
+                self._resize_cancel_requested |= cancel
+                target = self._resize_start[0] if cancel else self._resize_target
+                self.d.update(zip(("x", "y", "w", "h"), target))
+                if self._resize_surface:
+                    self._resize_surface.hide()
+                self.withdraw()
+                self._resizing = False
+                if self._resize_surface:
+                    self._resize_surface.close()
+                    self._resize_surface = None
+            return "break"
+        if self._resize_busy and not hidden:
+            self._resize_release_pending = True
+            self._resize_cancel_requested |= cancel
+            return "break"
+        self._resize_ending = True
+        self._resize_busy = True
+        self._resize_ready = False
+        surface = self._resize_surface
+        target = self._resize_start[0] if cancel else self._resize_target
+        restored_geometry = False
+        try:
+            if not cancel:
+                rect, (mx, my), edges = self._resize_start
+                if user32.GetAsyncKeyState(0x01) < 0 and self._resize_release_point is None:
+                    self._resize_pointer = cursor_pos()
+                px, py = self._resize_release_point or self._resize_pointer
+                target = self._resize_rectangle(rect, (px-mx, py-my), edges, self._resize_limits)
+            self._resize_target = target
+            if redraw and not hidden and surface:
+                self._render_resize_frame()
+                if not self.winfo_exists() or self._resize_surface is not surface:
+                    return "break"
+            self._resizing = self._edge_sizing = False
+            if hidden:
+                if surface:
+                    surface.hide()
+                self.withdraw()
+            self.geometry(f"{target[2]}x{target[3]}+{target[0]}+{target[1]}")
+            if hidden:
+                self.attributes("-alpha", self.d["opacity"])
+            if not hidden:
+                self.update_idletasks()
+                self.attributes("-alpha", self.d["opacity"])
+                if surface:
+                    surface.keep_source_hidden()
+                    surface.prepare_restore()
+                if redraw:
+                    self._repair_resize_frame()
+            restored_geometry = True
+            self.d.update(zip(("x", "y", "w", "h"), target))
+            if not hidden:
+                self.app.schedule_save()
+        finally:
+            self._resizing = self._edge_sizing = self._resize_ready = False
+            if self._resize_cancel_requested:
+                target = self._resize_start[0]
+            if not restored_geometry and self.winfo_exists():
+                self.geometry(f"{target[2]}x{target[3]}+{target[0]}+{target[1]}")
+                if not hidden:
+                    user32.SetWindowPos(self.hwnd, None, *target, 0x0004 | 0x0010)
+            if self._resize_job is not None:
+                self.after_cancel(self._resize_job)
+                self._resize_job = None
+            for widget, tags in getattr(self, "_resize_key_widgets", ()):
+                if widget.winfo_exists():
+                    widget.bindtags(tags)
+            self._resize_key_widgets = []
+            if self.cv.winfo_exists() and self.cv.grab_current() is self.cv:
+                self.cv.grab_release()
+            if user32.GetCapture() == self._resize_client_hwnd:
+                user32.ReleaseCapture()
+            if surface:
+                surface.close()
+            self._resize_surface = None
+            self._resize_busy = self._resize_ending = self._resize_release_pending = self._resize_cancel_requested = False
+        return "break"
 
     # ---- 层级 / 透明度 / 颜色 ----
     def _install_z_order(self):
         @_WNDPROC
         def window_proc(hwnd, message, wparam, lparam):
-            if message == 0x0046:  # WM_WINDOWPOSCHANGING
+            if message == 0x0083 and wparam:  # full client area
+                return 0
+            if message == 0x0085:
+                return 0
+            if message == 0x0086:
+                return 1
+            if message == 0x0084:
+                return 1  # HTCLIENT; all eight resize zones are handled together.
+            if message == 0x0112 and wparam & 0xFFF0 == 0xF000:
+                return 0
+            if (self._resizing and self._resize_ready and user32.GetAsyncKeyState(0x01) < 0 and
+                    (message == 0x001F or (message == 0x0006 and wparam & 0xFFFF == 0))):
+                self._resize_cancel_requested = True
+            if message == 0x0046:
                 position = ctypes.cast(lparam, ctypes.POINTER(_WINDOWPOS)).contents
-                if self.d["z"] == "bottom" and not position.flags & 0x0004:  # SWP_NOZORDER
-                    position.hwndInsertAfter = 1  # HWND_BOTTOM，激活或拖动也保持置底。
+                if self.d["z"] == "bottom" and not position.flags & 0x0004:
+                    position.hwndInsertAfter = 1
             return user32.CallWindowProcW(self._z_old_proc, hwnd, message, wparam, lparam)
 
         self._z_proc = window_proc
@@ -2217,6 +2465,8 @@ class NoteWindow(tk.Toplevel):
                                 SWP_NOMOVE | SWP_NOSIZE | 0x0010)  # SWP_NOACTIVATE
 
     def hide(self):
+        if self._resizing:
+            self._finish_resize(cancel=True, redraw=False, hidden=True)
         self.d["visible"] = False
         self.withdraw()
         self.app.schedule_save()
@@ -2226,6 +2476,7 @@ class NoteWindow(tk.Toplevel):
         self.deiconify()
         self.overrideredirect(True)
         self._round_window()
+        self._configure_frameless()
         # 先前移到置顶层，再恢复原状态，确保被其他进程覆盖后也能显示到前面。
         if self.d["z"] != "bottom":
             self.attributes("-topmost", True)
@@ -3056,7 +3307,10 @@ class App:
         self.data["settings"]["opacity"] = value
         for note in self.notes.values():
             note.d["opacity"] = value
-            note.attributes("-alpha", value)
+            if note._resizing:
+                note._resize_dirty = True
+            else:
+                note.attributes("-alpha", value)
         scale = getattr(self, "opacity_scale", None)
         if scale is not None and scale.winfo_exists() and scale.get() != 100 - percent:
             scale.set(100 - percent)
@@ -3380,7 +3634,10 @@ class App:
 
     def quit(self):
         for w in self.notes.values():
-            w.d["x"], w.d["y"] = w.winfo_x(), w.winfo_y()
+            if w._resizing:
+                w._finish_resize(cancel=w._resize_cancel_requested, redraw=False, hidden=True)
+            else:
+                w.d["x"], w.d["y"] = w.winfo_x(), w.winfo_y()
         self.save_now()
         try:
             self.icon.stop()
