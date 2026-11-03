@@ -1,6 +1,5 @@
-; z-note 安装包脚本，编译前先用 PyInstaller 生成 dist\z-note：
-;   python -m PyInstaller --noconfirm --clean --windowed --onedir --name z-note ^
-;     --icon assets\icons\app.ico --add-data "assets\icons;assets\icons" main.py
+; z-note 安装包脚本，编译前先生成包含内置字体的 dist\z-note.exe：
+;   powershell -ExecutionPolicy Bypass -File scripts\package.ps1
 ; 然后编译本脚本：ISCC.exe installer\z-note.iss
 
 [Setup]
@@ -23,7 +22,7 @@ Name: "chinesesimplified"; MessagesFile: "Languages\ChineseSimplified.isl"
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"
 
 [Files]
-Source: "..\dist\z-note\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "..\dist\z-note.exe"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]
 Name: "{autoprograms}\z-note"; Filename: "{app}\z-note.exe"

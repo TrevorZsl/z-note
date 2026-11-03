@@ -33,6 +33,18 @@ python main.py
 
 设置的“快捷键”区域可修改“文字／待办切换”，自动保存并立即生效；“重置快捷键”恢复默认组合。右键菜单右侧显示当前组合键。此快捷键仅在便签正文内生效，输入法组词时不执行，不占用其他软件的快捷键。
 
+## 字体
+
+设置 → 外观 → 字体可选 **Times New Roman（中文宋体）**、**微软雅黑**、
+**宋体**和**电脑默认**。默认使用 Times New Roman（中文宋体），旧版本升级后
+同样保持这套搭配。选择后立即应用到所有便签正文与标题，并自动保存。
+前三项由软件内置，目标电脑无需安装字体，也无需联网；字体只供当前应用进程使用。
+字体来源与构建说明见 `assets/fonts/README.md`。
+
+使用 `powershell -ExecutionPolicy Bypass -File scripts/package.ps1` 构建包含字体的
+`dist/z-note.exe`，可直接运行；需要安装包时再编译 `installer/z-note.iss`。
+构建环境需要安装 `pyinstaller`、`requirements.txt` 中的依赖。
+
 ## 数据与备份
 
 - 数据保存在 `%APPDATA%\z-note\notes.json`，设置页面也显示实际路径。
