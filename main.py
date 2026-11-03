@@ -388,7 +388,7 @@ class ToolButton(tk.Canvas):
                          highlightthickness=0, bd=0, cursor="hand2")
         self._bg, self._active = bg, False
         self._image = load_icon(self, icon)
-        self._active_image = load_icon(self, icon, active=True) if icon in ("pin", "arrow-down-to-line") else self._image
+        self._active_image = load_icon(self, icon, active=True) if icon in ("pin", "arrow-down-to-line", "columns-2") else self._image
         r = 13
         self._pill = self.create_oval(size/2 - r, size/2 - r, size/2 + r, size/2 + r,
                                       state="hidden", outline="")
@@ -559,6 +559,934 @@ user32.UpdateLayeredWindow.argtypes = [wintypes.HWND, wintypes.HDC, ctypes.c_voi
 user32.UpdateLayeredWindow.restype = wintypes.BOOL
 
 
+class NoteEditor:
+    """一栏正文编辑器：Text + 勾选框/删除线覆盖层 + 分块滚动。NoteWindow 持有 1~2 个实例。"""
+
+    def __init__(self, win, col):
+        self.win, self.col = win, col
+        self.d = win.d  # 与窗口共享同一便签字典；只有 lines 按 col 分流
+        self.app, self._bg, self.tk = win.app, win._bg, win.tk
+        self.done_font = tkfont.Font(family=UI_FONT,
+                                     size=win.app.data["settings"]["fontSize"])
+        self.body = tk.Canvas(win, bg=self._bg, bd=0, highlightthickness=0, yscrollincrement=1)
+        self.text = tk.Text(self.body, bg=self._bg, fg="#2B2F36", bd=0, highlightthickness=0,
+                            padx=12, pady=10, wrap="char", spacing1=9, spacing3=10,
+                            selectbackground=self._bg, inactiveselectbackground=self._bg,
+                            selectforeground="#2B2F36", selectborderwidth=0,
+                            font=win.app.base_font, insertbackground="#2B2F36", cursor="xterm")
+        self.text.place(x=0, y=0, relwidth=1)
+        self.scroll_thumb = VerticalThumb(win, self.body, self._bg)
+        self._make_check_images()
+        self.text.tag_config("done", font=self.done_font)  # 只加删除线，不改字色
+        self.text.tag_config("selection_fill", background="#DCE7F3", foreground="#2B2F36")
+        self.text.tag_raise("selection_fill", "sel")
+        self.text.bind("<<Selection>>", self._paint_selection)
+        self.text.tag_configure("ime_preedit", underline=True)
+        self._strike_widgets = []
+        self._selection_masks = []
+        self._checkbox_widgets = []
+        self._document_height = 0
+        self._content_height = 1
+        self._chunk_start = 0
+        self._buffer_margin = 0
+        self._layout_busy = False
+        self._layout_pending = False
+        self._layout_measure_pending = False
+        self._row_layout = {}
+        self._wheel_job = None
+        self._wheel_remaining = 0
+        self._selection_scroll_job = None
+        self._strike_job = None
+        self._edge_fade = EdgeFade(self.body)
+        self.body.configure(yscrollcommand=self._text_scrolled)
+        self.body.bind("<Configure>", self._body_configured)
+        win._bind_ime(self.text)
+        t = self.text
+        t.bind("<KeyRelease>", self._on_keyrelease)
+        t.bind("<KeyPress-Return>", self._on_enter)
+        t.bind("<KeyPress-BackSpace>", self._on_backspace)
+        t.bind("<KeyPress-BackSpace>", self._hide_strikes_before_delete, add="+")
+        t.bind("<KeyPress-Delete>", self._hide_strikes_before_delete)
+        t.bind("<Left>", self._on_left)
+        t.bind("<Up>", self._on_vertical)
+        t.bind("<Down>", self._on_vertical)
+        tags = t.bindtags()
+        t.bindtags(("NoteShortcuts", tags[0], tags[1], "TodoCaret", *tags[2:]))
+        t.bind("<<Copy>>", lambda e: self._clipboard_edit("tk_textCopy"))
+        t.bind("<<Cut>>", lambda e: self._clipboard_edit("tk_textCut"))
+        t.bind("<<Paste>>", lambda e: self._clipboard_edit("tk_textPaste"))
+        t.bind("<<Undo>>", lambda e: self._undo_edit())
+        t.bind("<<Redo>>", lambda e: self._undo_edit(redo=True))
+        t.bind("<Control-a>", self._select_all)
+        t.bind("<Control-Shift-Z>", lambda e: self._undo_edit(redo=True))
+        t.bind("<Prior>", self._page_key)
+        t.bind("<Next>", self._page_key)
+        t.bind("<Button-1>", self._on_click)
+        t.bind("<Button-3>", self._on_rightclick)
+        t.bind("<MouseWheel>", self._text_wheel)
+        self.body.bind("<MouseWheel>", self._text_wheel)
+        self.scroll_thumb.bind("<MouseWheel>", self._text_wheel)
+        self.scroll_thumb.bind("<Button-1>", self._stop_wheel, add="+")
+        t.bind("<KeyPress>", self._stop_wheel, add="+")
+        t.bind("<Control-MouseWheel>", self.win._ctrl_wheel)
+        self.body.bind("<Control-MouseWheel>", self.win._ctrl_wheel)
+        t.bind("<B1-Motion>", self._selection_scroll, add="+")
+        t.bind("<ButtonRelease-1>", self._stop_selection_scroll, add="+")
+        t.bind("<Unmap>", self._stop_selection_scroll)
+        t.bind("<Unmap>", self._stop_wheel, add="+")
+        self.render()
+
+    # ---- 便签数据按栏分流 ----
+    @property
+    def lines(self):
+        if self.col == 0:
+            return self.d["lines"]
+        return self.d.setdefault("lines2", [{"type": "text", "text": "", "checked": False}])
+
+    @lines.setter
+    def lines(self, value):
+        if self.col == 0:
+            self.d["lines"] = value
+        else:
+            self.d["lines2"] = value
+
+    # 编辑器不是控件，定时器等委托给所在窗口。
+    def after(self, *args):
+        return self.win.after(*args)
+
+    def after_idle(self, *args):
+        return self.win.after_idle(*args)
+
+    def after_cancel(self, *args):
+        return self.win.after_cancel(*args)
+
+    def update_idletasks(self):
+        self.win.update_idletasks()
+
+    def focus_get(self):
+        return self.win.focus_get()
+
+    def teardown(self):
+        self._stop_wheel()
+        self._stop_selection_scroll()
+        if self._strike_job is not None:
+            self.win.after_cancel(self._strike_job)
+            self._strike_job = None
+        self.scroll_thumb.destroy()
+        self.body.destroy()
+
+    def _body_configured(self, event):
+        changed = event.width != getattr(self, "_body_width", None)
+        self._body_width = event.width
+        self._queue_strikes(measure=changed)
+
+    def _text_scrolled(self, first, last):
+        self.scroll_thumb.set(first, last)
+        self._edge_fade.update(first, last)
+        if self._layout_busy:
+            return
+        top = round(self.body.canvasy(0))
+        if ((self._chunk_start > 0 and top < self._chunk_start + self._buffer_margin) or
+                (self.text.yview()[1] < 1 and
+                 top + self.body.winfo_height() > self._chunk_start + self.text.winfo_height() - self._buffer_margin)):
+            self._draw_strikes()
+        else:
+            self.text.place_configure(y=self._chunk_start - top)
+
+    def _text_wheel(self, event):
+        first, last = self.body.yview()
+        if last-first < .999:
+            # 每格移动 36 个逻辑像素，随界面缩放，不随字体大小改变。
+            distance = -event.delta / 120 * self.text.winfo_fpixels("27p")
+            if distance * self._wheel_remaining < 0:
+                self._wheel_remaining = 0
+            self._wheel_remaining += distance
+            if self._wheel_job is None:
+                self._wheel_time = time.monotonic() - .016
+                self._step_wheel()
+        else:
+            self._stop_wheel()
+            self.body.yview_moveto(0)
+        return "break"
+
+    def _step_wheel(self):
+        self._wheel_job = None
+        remaining = self._wheel_remaining
+        if abs(remaining) < 1:
+            # 不足一像素的移动留给下次输入，精细滚轮和触控板的小增量不能丢。
+            return
+        now = time.monotonic()
+        # 按实际经过时间推进，电脑繁忙时下一帧会追上进度。
+        progress = -math.expm1(-(now - self._wheel_time) / .04)
+        self._wheel_time = now
+        step = min(int(abs(remaining)), max(1, round(abs(remaining) * progress)))
+        step *= 1 if remaining > 0 else -1
+        self.body.yview_scroll(step, "units")
+        self._wheel_remaining -= step
+        self._wheel_job = self.win.after(16, self._step_wheel)
+        self.body.update_idletasks()
+        # 先处理整体移动产生的窗口重画事件，再提交这一帧；不运行下一帧的计时器。
+        while self.tk.dooneevent(WINDOW_EVENTS | DONT_WAIT):
+            pass
+        self.body.update_idletasks()
+
+    def _stop_wheel(self, _event=None):
+        if self._wheel_job is not None:
+            self.win.after_cancel(self._wheel_job)
+            self._wheel_job = None
+        self._wheel_remaining = 0
+
+    def _body_index(self, x=0, y=0):
+        return self.text.index(f"@{x},{round(self.body.canvasy(y)) - self._chunk_start}")
+
+    def _scroll_to(self, y):
+        self.body.yview_moveto(y / self._content_height)
+
+    def _see_text(self, index):
+        if getattr(self, "_strike_job", None):
+            self._draw_strikes()
+        box = self.text.bbox(index)
+        if box is None:
+            self.text.see(index)
+            self._chunk_start = round(self.text.yview()[0] * self._document_height)
+            box = self.text.bbox(index)
+        if box:
+            if self.text.compare(index, "==", "insert"):
+                row, col = self._row_col(self.text.index("insert"))
+                if col < self._prefix_len(self.lines[row]) and row + 1 in self._row_layout:
+                    height, offset = self._row_layout[row + 1]
+                    size = self._check_images[False].width()
+                    box = (box[0], int(self.text.cget("pady")) + offset - self._chunk_start +
+                           height // 2 - size // 2, box[2], size)
+            top = self.body.canvasy(0)
+            pad = max(int(self.text.cget("pady")), self._edge_fade.height)
+            y = box[1] + self._chunk_start
+            if y < top + pad:
+                self._scroll_to(y - pad)
+            elif y + box[3] > top + self.body.winfo_height() - pad:
+                self._scroll_to(y + box[3] + pad - self.body.winfo_height())
+            self._draw_strikes()
+
+    def _stop_selection_scroll(self, _event=None):
+        if self._selection_scroll_job is not None:
+            self.win.after_cancel(self._selection_scroll_job)
+            self._selection_scroll_job = None
+
+    def _page_key(self, event):
+        self._stop_wheel()
+        box = self.text.bbox("insert")
+        cursor_y = box[1] + self._chunk_start - self.body.canvasy(0) if box else -1
+        if not 0 <= cursor_y < self.body.winfo_height():
+            box = None
+        direction = 1 if event.keysym == "Next" else -1
+        distance = direction * max(1, self.body.winfo_height() - self.app.base_font.metrics("linespace"))
+        self.body.yview_scroll(distance, "units")
+        self.body.update_idletasks()
+        target = (self._body_index(box[0], round(cursor_y)) if box else
+                  self._body_index(self.body.winfo_height() // 2, 0))
+        command = "tk::TextKeySelect" if event.state & 1 else "tk::TextSetCursor"
+        self.text.tk.call(command, self.text, target)
+        self._clamp_todo_cursor()
+        self._see_text("insert")
+        return "break"
+
+    def _selection_scroll(self, event=None):
+        self._stop_selection_scroll()
+        if event is not None:
+            self._selection_x = event.x
+            self._selection_y = event.y_root - self.body.winfo_rooty()
+        height = self.body.winfo_height()
+        direction = -1 if self._selection_y < 0 else (1 if self._selection_y >= height else 0)
+        if not direction:
+            return
+        before = self.body.yview()
+        self.body.yview_scroll(direction * 8, "units")
+        self.body.update_idletasks()
+        y = self.body.canvasy(max(0, min(height - 1, self._selection_y))) - self._chunk_start
+        self.text.tk.call("tk::TextSelectTo", self.text, self._selection_x, round(y))
+        self._clamp_todo_cursor()
+        if self.body.yview() != before:
+            self._selection_scroll_job = self.win.after(30, self._selection_scroll)
+        return "break"
+
+    def _make_check_images(self):
+        size = max(18, round(self.app.base_font.metrics("ascent") * 1.1))
+        self._check_images = check_images(self.text, size)
+        # 原生插入光标跨在字符边界上，勾选框子窗口不能覆盖占位符的左右边界。
+        self._check_margin = max(1, int(self.text.cget("insertwidth")))
+        slot_width = size + 2 * self._check_margin
+        self._check_slots = {checked: ImageTk.PhotoImage(Image.new("RGBA", (slot_width, size)), master=self.text)
+                             for checked in (False, True)}
+        # Text 在左内边距处裁切光标，首行也要留出半个光标的绘制宽度。
+        caret_margin = self._check_margin // 2
+        self.text.tag_config("todo_indent", lmargin1=caret_margin,
+                             lmargin2=caret_margin + slot_width + self.app.base_font.measure(PREFIX_PAD))
+
+    def _queue_strikes(self, measure=True):
+        if self.win._resizing:
+            self.win._resize_dirty = True
+        if self._layout_busy:
+            self._layout_pending = True
+            self._layout_measure_pending |= measure
+            return
+        if measure:
+            self._document_height = 0
+            self._row_layout.clear()
+        if getattr(self, "_strike_job", None) is None:
+            self._strike_job = self.win.after_idle(self._draw_strikes)
+
+    def _draw_strikes(self):
+        if self._layout_busy:
+            return
+        self._layout_busy = True
+        try:
+            self._layout_text()
+            if not self.win._resizing:
+                self.body.update_idletasks()
+        finally:
+            self._layout_busy = False
+        if self._layout_pending:
+            self._layout_pending = False
+            measure, self._layout_measure_pending = self._layout_measure_pending, False
+            self._queue_strikes(measure=measure)
+
+    def _layout_text(self):
+        if getattr(self, "_strike_job", None):
+            self.win.after_cancel(self._strike_job)
+        self._strike_job = None
+        width = self.body.winfo_width()
+        if width < 50:
+            return
+        # 测量布局会刷新画面，先隐藏文字已删掉的旧横线，避免空行残留一帧。
+        for bar in self._strike_widgets:
+            if self.text.compare(bar._text_start, ">=", f"{bar._text_start} lineend"):
+                bar.place_forget()
+                bar._layout_bounds = None
+        # 正文和所有装饰始终留在同一内容坐标系，滚动只移动整个 Text 窗口。
+        if self.text.winfo_width() != width:
+            self.body.update_idletasks()
+        if not self._document_height:
+            self._document_height = self.text.count("1.0", "end", "update", "ypixels")
+        pad = int(self.text.cget("pady"))
+        self._buffer_margin = (max(self.app.base_font.metrics("linespace"), self._check_images[False].width()) +
+                               int(self.text.cget("spacing1")) + int(self.text.cget("spacing3")) + pad)
+        self._content_height = max(self.body.winfo_height(), self._document_height + 2 * pad)
+        # Windows 子窗口坐标有范围限制；正文保留数屏缓冲，跨段时整组一起切换。
+        height = min(self._content_height, max(self.body.winfo_height(),
+                     min(16000, max(self.body.winfo_height() * 5,
+                                    self.body.winfo_height() + 4 * self._buffer_margin))))
+        region = (0, 0, width, self._content_height)
+        geometry_changed = self.text.winfo_height() != height
+        region_changed = getattr(self, "_body_region", None) != region
+        if geometry_changed:
+            self.text.place_configure(height=height)
+        if region_changed:
+            self.body.configure(scrollregion=region)
+            self._body_region = region
+        # 顶部未滚动且 Text 高度未变时，横向 scrollregion 更新不影响行坐标。
+        if geometry_changed or (region_changed and self.body.canvasy(0) != 0):
+            self.body.update_idletasks()
+        top = round(self.body.canvasy(0))
+        target = max(0, top - (height - self.body.winfo_height()) // 2)
+        view_changed = round(self.text.yview()[0] * self._document_height) != target
+        if view_changed:
+            self.text.yview_moveto(target / self._document_height)
+        self._chunk_start = round(self.text.yview()[0] * self._document_height)
+        text_y = self._chunk_start - top
+        if self.text.winfo_y() != text_y:
+            self.text.place_configure(y=text_y)
+            view_changed = True
+        if view_changed:
+            self.body.update_idletasks()
+        used_masks = used_boxes = used_bars = 0
+        content_height = self.text.winfo_height()
+        visible_start = self.text.index("@0,0")
+        first_row = int(visible_start.split(".")[0])
+        last_row = min(len(self.lines), int(self.text.index(f"@0,{content_height}").split(".")[0]))
+        for row in range(first_row, last_row + 1):
+            line = self.lines[row - 1]
+            if line["type"] == "todo":
+                if row not in self._row_layout:
+                    row_height = self.text.count(f"{row}.0", f"{row+1}.0", "ypixels")[0]
+                    offset = self.text.count("1.0", f"{row}.0", "ypixels")
+                    self._row_layout[row] = (row_height, offset[0] if offset else 0)
+                row_height, offset = self._row_layout[row]
+                row_top = pad + offset - self._chunk_start
+                # Tk 会把软换行的选区背景画进左边距，盖回勾选框旁的留白。
+                if self.text.tag_nextrange("selection_fill", f"{row}.0", f"{row}.end"):
+                    top, bottom = max(0, row_top), min(content_height, row_top + row_height)
+                    if top is not None:
+                        if used_masks < len(self._selection_masks):
+                            mask = self._selection_masks[used_masks]
+                        else:
+                            mask = tk.Frame(self.text, bg=self._bg)
+                            mask.bind("<MouseWheel>", self._text_wheel)
+                            mask.bind("<Control-MouseWheel>", self.win._ctrl_wheel)
+                            for event in ("<Button-1>", "<B1-Motion>", "<ButtonRelease-1>"):
+                                mask.bind(event, lambda e, sequence=event: self.text.event_generate(
+                                    sequence, x=e.x_root - self.text.winfo_rootx(),
+                                    y=e.y_root - self.text.winfo_rooty(), time=e.time, state=e.state))
+                            self._selection_masks.append(mask)
+                        used_masks += 1
+                        mask.place(x=int(self.text.cget("padx")), y=top,
+                                   width=int(self.text.tag_cget("todo_indent", "lmargin2")),
+                                   height=bottom - top, bordermode="ignore")
+                        mask.lift()
+                size = self._check_images[False].width()
+                y = row_top + row_height // 2 - size // 2
+                if -size < y < content_height:
+                    image = self._check_images[line["checked"]]
+                    if used_boxes < len(self._checkbox_widgets):
+                        box = self._checkbox_widgets[used_boxes]
+                        if str(box.cget("image")) != str(image):
+                            box.configure(image=image)
+                    else:
+                        box = tk.Label(self.text, image=image, bg=self._bg, bd=0, cursor="hand2")
+                        box.bind("<MouseWheel>", self._text_wheel)
+                        box.bind("<Control-MouseWheel>", self.win._ctrl_wheel)
+                        self._checkbox_widgets.append(box)
+                    used_boxes += 1
+                    bounds = (int(self.text.cget("padx")) + self._check_margin + self._check_margin // 2,
+                              y, size, size)
+                    if getattr(box, "_layout_bounds", None) != bounds:
+                        box.place(x=bounds[0], y=y, width=size, height=size, bordermode="ignore")
+                        box._layout_bounds = bounds
+                        box.lift()
+                    if getattr(box, "_todo_row", None) != row:
+                        box._todo_row = row
+                        box.bind("<Button-1>", lambda _e, r=row-1: self.toggle_done(r))
+            if line["type"] != "todo" or not line["checked"]:
+                continue
+            start = f"{row}.{self._prefix_len(line)}"
+            if self.text.compare(start, "<", visible_start):
+                start = visible_start
+            end = f"{row}.end"
+            while self.text.compare(start, "<", end):
+                display = self.text.dlineinfo(start)
+                if not display or display[1] >= content_height:
+                    break
+                stop = self.text.index(f"@{self.text.winfo_width()},{max(0, display[1])}")
+                first = self.text.bbox(start)
+                last = self.text.bbox(f"{end}-1c" if self.text.compare(stop, ">=", end) else stop)
+                if first and last:
+                    thickness = max(2, round(self.done_font.metrics("ascent") * 0.12))
+                    if used_bars < len(self._strike_widgets):
+                        bar = self._strike_widgets[used_bars]
+                    else:
+                        bar = tk.Frame(self.text, bg="#505761", height=thickness, cursor="xterm")
+                        bar.bind("<MouseWheel>", self._text_wheel)
+                        bar.bind("<Control-MouseWheel>", self.win._ctrl_wheel)
+                        for event in ("<Button-1>", "<B1-Motion>", "<ButtonRelease-1>"):
+                            bar.bind(event, lambda e, sequence=event: self.text.event_generate(
+                                sequence, x=e.x_root - self.text.winfo_rootx(),
+                                y=e.y_root - self.text.winfo_rooty(), time=e.time, state=e.state))
+                        self._strike_widgets.append(bar)
+                    used_bars += 1
+                    bar._text_start = start
+                    baseline = display[1] + display[4]
+                    middle = baseline - round(self.done_font.metrics("ascent") * 0.33)
+                    bounds = (first[0], middle - thickness // 2,
+                              max(1, last[0] + last[2] - first[0]), thickness)
+                    if getattr(bar, "_layout_bounds", None) != bounds:
+                        bar.place(x=bounds[0], y=bounds[1], width=bounds[2],
+                                  height=thickness, bordermode="ignore")
+                        bar._layout_bounds = bounds
+                if display[1] + display[3] >= content_height:
+                    break
+                next_start = self.text.index(f"@0,{display[1] + display[3]}")
+                if self.text.compare(next_start, "<=", start):
+                    break
+                start = next_start
+
+        # 这次没排上的控件回收掉，池子始终只留当前需要的。
+        for pool, used in ((self._selection_masks, used_masks),
+                           (self._checkbox_widgets, used_boxes),
+                           (self._strike_widgets, used_bars)):
+            for widget in pool[used:]:
+                widget.destroy()
+            del pool[used:]
+
+        if self._selection_masks:
+            self.win.after_idle(lambda: [w.lift() for w in self._selection_masks + self._checkbox_widgets
+                                         if w.winfo_exists()])
+        self._clamp_todo_cursor()
+
+    def _on_vertical(self, event):
+        if self.win._ime_composing(self.text):
+            return
+        self._stop_wheel()
+        t = self.text
+        current = t.index("insert")
+        self._see_text(current)
+        box = t.bbox(current)
+        if not box:
+            return "break"
+        x = box[0]
+        direction = 1 if event.keysym == "Down" else -1
+        start = t.index("insert display linestart")
+        target = t.index(f"{start} {direction:+d} displaylines display linestart")
+        if t.compare(target, "!=", start):
+            self._see_text(target)
+            display = t.dlineinfo(target)
+            end = t.index(f"{target} display lineend")
+            target = t.tk.call("tk::TextClosestGap", t, x, display[1] + display[3] // 2)
+            if t.compare(target, ">", end):
+                target = end
+            command = "tk::TextKeySelect" if event.state & 1 else "tk::TextSetCursor"
+            t.tk.call(command, t, target)
+            self._clamp_todo_cursor()
+            self._see_text("insert")
+        return "break"
+
+    def _on_left(self, event):
+        if self.win._ime_composing(self.text):
+            return
+        row, col = self._row_col(self.text.index("insert"))
+        pre = self._prefix_len(self.lines[row])
+        if pre and col <= pre:
+            target = f"{row}.end" if row else f"1.{pre}"
+            command = "tk::TextKeySelect" if event.state & 1 else "tk::TextSetCursor"
+            self.text.tk.call(command, self.text, target)
+            self._clamp_todo_cursor()
+            self._see_text("insert")
+            return "break"
+
+    def _clamp_todo_cursor(self, _event=None):
+        if self.win._ime_composing(self.text):
+            return
+        t = self.text
+        start = t.index("insert linestart")
+        images = t.dump(start, f"{start}+1c", image=True)
+        if images and t.image_cget(start, "image") in {str(i) for i in self._check_slots.values()}:
+            target = f"{start}+{1 + len(PREFIX_PAD)}c"
+            if t.compare("insert", "<", target):
+                t.mark_set("insert", target)
+
+    # ---- 底部添加条 ----
+    def add_todo(self):
+        row = int(self.text.index("insert").split(".")[0])
+        self.lines.insert(row, {"type": "todo", "text": "", "checked": False})
+        self.render(keep_cursor=False)
+        self.text.mark_set("insert", f"{row+1}.0+{self._prefix_len(self.lines[row])}c")
+        self._see_text(f"{row+1}.0")
+        self.text.focus_set()
+        self.d["editedAt"] = datetime.now().isoformat(timespec="microseconds")
+        self.app.schedule_save()
+
+    # ---- 渲染 ----
+    def render(self, keep_cursor=True):
+        self._stop_wheel()
+        cur = self.text.index("insert")
+        view = self._body_index()
+        scroll_y = self.body.canvasy(0)
+        old_chunk = self._chunk_start
+        top = self.text.dlineinfo(view)
+        self.text.delete("1.0", "end")
+        lines = self.lines or [{"type": "text", "text": "", "checked": False}]
+        self.lines = lines
+        for i, ln in enumerate(lines):
+            row = i + 1
+            if ln["type"] == "todo":
+                self.text.image_create("end", image=self._check_slots[ln["checked"]], align="center")
+                self.text.insert("end", PREFIX_PAD)
+            self.text.insert("end", ln["text"])
+            if ln["type"] == "todo":
+                self.text.tag_add("todo_indent", f"{row}.0", f"{row}.end")
+            if ln["type"] == "todo" and ln["checked"]:
+                self.text.tag_add("done", f"{row}.{self._prefix_len(ln)}", f"{row}.end")
+            if i < len(lines) - 1:
+                self.text.insert("end", "\n")
+        if keep_cursor:
+            end = self.text.index("end-1c")
+            if self.text.compare(cur, ">", end):
+                cur = end
+            self.text.mark_set("insert", cur)
+        self._clamp_todo_cursor()
+        self.win.update_status()
+        self._queue_strikes()
+        self.body.update_idletasks()
+        restored = self.text.dlineinfo(view)
+        if top and restored:
+            self._scroll_to(scroll_y + restored[1] + self._chunk_start - top[1] - old_chunk)
+        self._remember_edit()
+
+    @staticmethod
+    def _prefix_len(ln):
+        return 1 + len(PREFIX_PAD) if ln["type"] == "todo" else 0
+
+    @staticmethod
+    def _row_col(index):
+        r, c = index.split(".")
+        return int(r) - 1, int(c)
+
+    # ---- 编辑事件 ----
+    def _remember_edit(self):
+        state = (deepcopy(self.lines), self.text.index("insert"))
+        if not hasattr(self, "_edit_history"):
+            self._edit_history, self._edit_redo = [state], []
+        elif self._edit_history[-1][0] != state[0]:
+            self._edit_history.append(state)
+            self._edit_redo.clear()
+        else:
+            self._edit_history[-1] = state
+
+    def _undo_edit(self, redo=False):
+        if self.win._ime_composing(self.text):
+            return "break"
+        self._sync_lines_from_text()
+        if redo:
+            if not self._edit_redo:
+                return "break"
+            state = self._edit_redo.pop()
+            self._edit_history.append(state)
+        else:
+            if len(self._edit_history) < 2:
+                return "break"
+            self._edit_redo.append(self._edit_history.pop())
+            state = self._edit_history[-1]
+        self.lines = deepcopy(state[0])
+        self.render(keep_cursor=False)
+        self.text.mark_set("insert", state[1])
+        self._clamp_todo_cursor()
+        self._see_text("insert")
+        self.d["editedAt"] = datetime.now().isoformat(timespec="microseconds")
+        self.app.schedule_save()
+        return "break"
+
+    def _clipboard_edit(self, command):
+        if self.win._ime_composing(self.text):
+            return "break"
+        self._sync_lines_from_text()
+        self._clamp_todo_cursor()
+        t = self.text
+        if command in ("tk_textCopy", "tk_textCut"):
+            if not t.tag_ranges("sel"):
+                return "break"
+            first, last = t.index("sel.first"), t.index("sel.last")
+            chunks = []
+            copied_lines = []
+            for row in range(int(first.split(".")[0]), int(last.split(".")[0]) + 1):
+                start = first if t.compare(first, ">", f"{row}.0") else f"{row}.0"
+                end = last if t.compare(last, "<", f"{row}.end") else f"{row}.end"
+                line = self.lines[row - 1]
+                body = f"{row}.{self._prefix_len(line)}"
+                whole_todo = (line["type"] == "todo" and
+                              t.compare(start, "<=", body) and
+                              t.compare(end, "==", f"{row}.end") and
+                              t.compare(last, ">", f"{row}.0"))
+                if line["type"] == "todo" and t.compare(start, "<", body):
+                    start = body
+                content = t.get(start, end) if t.compare(start, "<=", end) else ""
+                chunks.append(content)
+                copied_lines.append({"type": "todo" if whole_todo else "text",
+                                     "text": content, "checked": whole_todo and line["checked"]})
+            t.clipboard_clear()
+            content = "\n".join(chunks)
+            t.clipboard_append(content)
+            # 结构只留在应用内；序号防止外部软件重新复制相同文字时误用旧结构。
+            self.app._clipboard_lines = (user32.GetClipboardSequenceNumber(), content, copied_lines)
+            if command == "tk_textCopy":
+                return "break"
+            t.delete(first, last)
+            self._on_keyrelease(None)
+            return "break"
+        if command == "tk_textPaste":
+            try:
+                content = t.clipboard_get()
+            except tk.TclError:
+                return "break"
+            copied = getattr(self.app, "_clipboard_lines", None)
+            if (copied and copied[:2] == (user32.GetClipboardSequenceNumber(), content) and
+                    any(line["type"] == "todo" for line in copied[2])):
+                self._paste_lines(deepcopy(copied[2]))
+                self._on_keyrelease(None)
+                return "break"
+        if command == "tk_textPaste" and self.text.tag_ranges("sel"):
+            self.text.mark_set("insert", "sel.first")
+        self.text.tk.call(command, self.text)
+        self._on_keyrelease(None)
+        return "break"
+
+    def _paste_lines(self, incoming):
+        t = self.text
+        selected = t.tag_ranges("sel")
+        first, last = map(str, selected) if selected else (t.index("insert"), t.index("insert"))
+        start_row, _ = self._row_col(first)
+        end_row, _ = self._row_col(last)
+        lines = self.lines
+        body = f"{start_row + 1}.{self._prefix_len(lines[start_row])}"
+        left = t.get(body, first) if t.compare(first, ">", body) else ""
+        body = f"{end_row + 1}.{self._prefix_len(lines[end_row])}"
+        right = t.get(last if t.compare(last, ">", body) else body, f"{end_row + 1}.end")
+        if incoming[0]["type"] == "text" and left:
+            incoming[0] = dict(lines[start_row], text=left + incoming[0]["text"])
+        elif incoming[0]["type"] == "todo" and left:
+            incoming.insert(0, dict(lines[start_row], text=left))
+        if (len(incoming) > 1 and incoming[-1]["type"] == "text" and
+                not incoming[-1]["text"] and last == f"{end_row + 1}.0"):
+            incoming[-1] = dict(lines[end_row], text="")
+        # 用 Tk 的字符计数定位，兼容 emoji 等占用多个 Tcl 字符的文字。
+        cursor_row = start_row + len(incoming)
+        cursor_col = self._prefix_len(incoming[-1]) + int(t.tk.call("string", "length", incoming[-1]["text"]))
+        incoming[-1]["text"] += right
+        lines[start_row:end_row + 1] = incoming
+        self.render(keep_cursor=False)
+        t.mark_set("insert", f"{cursor_row}.{cursor_col}")
+
+    def _select_all(self, _event):
+        self.text.tag_add("sel", "1.0", "end-1c")
+        self.text.mark_set("insert", "end-1c")
+        return "break"
+
+    def _paint_selection(self, _event=None):
+        # 原生选区保留复制/删除语义；背景只画文字，避开勾选框和换行后的空白。
+        t = self.text
+        t.tag_remove("selection_fill", "1.0", "end")
+        selected = t.tag_ranges("sel")
+        self._queue_strikes()
+        if not selected:
+            return
+        first, last = selected
+        for row in range(int(str(first).split(".")[0]), int(str(last).split(".")[0]) + 1):
+            start = first if t.compare(first, ">", f"{row}.0") else f"{row}.0"
+            if row <= len(self.lines) and self.lines[row-1]["type"] == "todo":
+                text_start = f"{row}.{self._prefix_len(self.lines[row-1])}"
+                if t.compare(start, "<", text_start):
+                    start = text_start
+            end = last if t.compare(last, "<", f"{row}.end") else f"{row}.end"
+            if t.compare(start, "<", end):
+                t.tag_add("selection_fill", start, end)
+
+    def _sync_lines_from_text(self):
+        # 选区删除和粘贴都可能改变多行，不能只保存光标所在行。
+        t = self.text
+        images = {index: t.image_cget(index, "image")
+                  for kind, name, index in t.dump("1.0", "end-1c", image=True)}
+        checkbox_images = {str(image) for image in self._check_slots.values()}
+        old = self.lines
+        lines = []
+        for row in range(1, int(t.index("end-1c").split(".")[0]) + 1):
+            image = images.get(f"{row}.0")
+            todo = image in checkbox_images
+            content = t.get(f"{row}.0", f"{row}.end")
+            if todo and content.startswith(PREFIX_PAD):
+                content = content[len(PREFIX_PAD):]
+            if (todo and not content and image == str(self._check_slots[True]) and
+                    row <= len(old) and old[row - 1]["type"] == "todo" and old[row - 1]["text"]):
+                image = str(self._check_slots[False])
+                t.image_configure(f"{row}.0", image=self._check_slots[False])
+                t.tag_remove("done", f"{row}.0", f"{row}.end")
+            lines.append({"type": "todo" if todo else "text", "text": content,
+                          "checked": todo and image == str(self._check_slots[True])})
+        self.lines = lines
+        if old != lines:
+            self.d["editedAt"] = datetime.now().isoformat(timespec="microseconds")
+        structure_changed = (len(old) != len(lines) or
+                             any(a["type"] != b["type"] for a, b in zip(old, lines)))
+        if structure_changed:
+            self.render()
+        else:
+            for row, line in enumerate(lines, 1):
+                if line["type"] == "todo":
+                    t.tag_add("todo_indent", f"{row}.0", f"{row}.end")
+            self.win.update_status()
+        self._remember_edit()
+
+    def _on_keyrelease(self, _e):
+        if self.win._ime_composing(self.text):
+            return
+        self._queue_strikes()
+        self._sync_lines_from_text()
+        if _e is None or _e.keysym not in ("Shift_L", "Shift_R", "Control_L", "Control_R", "Alt_L", "Alt_R"):
+            self._see_text("insert")
+        self.app.schedule_save()
+
+    def _on_enter(self, _e):
+        if self.win._ime_composing(self.text):
+            return
+        if self.text.tag_ranges("sel"):
+            self.text.delete("sel.first", "sel.last")
+        self._sync_lines_from_text()
+        row, col = self._row_col(self.text.index("insert"))
+        lines = self.lines
+        ln = lines[row]
+        pre = self._prefix_len(ln)
+        rel = max(0, col - pre)
+        left, right = ln["text"][:rel], ln["text"][rel:]
+        ln["text"] = left
+        lines.insert(row + 1, {"type": ln["type"], "text": right, "checked": False})
+        self.render(keep_cursor=False)
+        nrow = row + 2
+        self.text.mark_set("insert", f"{nrow}.0+{self._prefix_len(lines[row+1])}c")
+        self._see_text(f"{nrow}.0")
+        self.d["editedAt"] = datetime.now().isoformat(timespec="microseconds")
+        self.app.schedule_save()
+        return "break"
+
+    def _hide_strikes_before_delete(self, event):
+        if self.win._ime_composing(self.text):
+            return
+        t = self.text
+        selected = t.tag_ranges("sel")
+        for bar in self._strike_widgets:
+            row = bar._text_start.split(".")[0]
+            start, end = f"{row}.{1 + len(PREFIX_PAD)}", f"{row}.end"
+            if selected:
+                removes_text = (t.compare(selected[0], "<=", start) and
+                                t.compare(selected[1], ">=", end))
+            else:
+                position = end if event.keysym == "BackSpace" else start
+                removes_text = len(t.get(start, end)) == 1 and t.compare("insert", "==", position)
+            if removes_text:
+                bar.place_forget()
+                bar._layout_bounds = None
+
+    def _on_backspace(self, _e):
+        if self.win._ime_composing(self.text):
+            return
+        if self.text.tag_ranges("sel"):
+            return None  # 交给 Text 默认绑定删除选区，随后统一同步所有行。
+        row, col = self._row_col(self.text.index("insert"))
+        lines = self.lines
+        ln = lines[row]
+        if col <= self._prefix_len(ln) and row > 0:
+            prev = lines[row - 1]
+            target = self.text.index(f"{row}.end")
+            prev["text"] += ln["text"]
+            del lines[row]
+            self.render(keep_cursor=False)
+            self.text.mark_set("insert", target)
+            self._see_text("insert")
+            self.d["editedAt"] = datetime.now().isoformat(timespec="microseconds")
+            self.app.schedule_save()
+            return "break"
+        if ln["type"] == "todo" and col <= self._prefix_len(ln):
+            return "break"
+        return None
+
+    def _on_click(self, e):
+        self.win.focus_set(); self.text.focus_set()
+
+    def _local_shortcut(self, event):
+        modifiers = sum(value for mask, value in ((4, 2), (0x20000, 1), (1, 4)) if event.state & mask)
+        if (modifiers, event.keycode) == parse_hotkey(self.app.hotkey_text("convert")):
+            if event.type == tk.EventType.KeyRelease:
+                return "break"  # 转换已保存，松键不再走普通输入的同步和保存流程。
+            return self.toggle_line_type()
+
+    def _conversion_rows(self):
+        selected = self.text.tag_ranges("sel")
+        if not selected:
+            return [self._row_col(self.text.index("insert"))[0]]
+        first, _ = self._row_col(str(selected[0]))
+        last, col = self._row_col(str(selected[1]))
+        if col == 0 and last > first:
+            last -= 1
+        return list(range(first, last + 1))
+
+    def _conversion_target(self, rows):
+        todos = sum(self.lines[row]["type"] == "todo" for row in rows)
+        return "text" if todos * 2 > len(rows) else "todo"
+
+    def toggle_line_type(self):
+        if self.win._ime_composing(self.text):
+            return "break"
+        self._sync_lines_from_text()
+        rows = self._conversion_rows()
+        self.convert_rows(rows, self._conversion_target(rows))
+        return "break"
+
+    def _on_rightclick(self, e):
+        if self.win._ime_composing(self.text):
+            return "break"
+        self.win.focus_set(); self.text.focus_set()
+        self._sync_lines_from_text()
+        try:
+            row, _ = self._row_col(self.text.index(f"@{e.x},{e.y}"))
+        except Exception:
+            return
+        lines = self.lines
+        if row >= len(lines):
+            return
+        if not self.text.tag_ranges("sel") or row not in self._conversion_rows():
+            self.text.tag_remove("sel", "1.0", "end")
+            self.text.mark_set("insert", self.text.index(f"@{e.x},{e.y}"))
+            self._clamp_todo_cursor()
+        rows = self._conversion_rows()
+        target = self._conversion_target(rows)
+        label = "转为文字" if target == "text" else "转为待办"
+        if len(rows) > 1:
+            label = f"全部{label}（{len(rows)} 行）"
+        actions = [
+            (label, lambda: self.convert_rows(rows, target)),
+            ("在下方插入新行", lambda: self.insert_line(row)),
+            ("删除此行", lambda: self.delete_line(row)),
+        ]
+        self.win._show_context_menu(e.x_root, e.y_root, actions, shortcuts={0: self.app.hotkey_text("convert")})
+
+    def toggle_done(self, row):
+        ln = self.lines[row]
+        ln["checked"] = not ln["checked"]
+        self.render()
+        self.d["editedAt"] = datetime.now().isoformat(timespec="microseconds")
+        self.app.schedule_save()
+
+    def convert(self, row, to):
+        self.convert_rows([row], to)
+
+    def convert_rows(self, rows, to):
+        if self.win._ime_composing(self.text):
+            return
+        t = self.text
+        positions = [t.index("insert"), *map(str, t.tag_ranges("sel"))]
+        positions = [index if t.compare(index, "<=", "end-1c") else t.index("end-1c")
+                     for index in positions]
+        anchors = []
+        for index in positions:
+            row, col = self._row_col(index)
+            body = f"{row+1}.{self._prefix_len(self.lines[row])}"
+            count = t.count(body, index, "chars") if t.compare(index, ">", body) else None
+            anchors.append((row, count[0] if count else 0, col == 0))
+        for row in rows:
+            ln = self.lines[row]
+            if to == "text" or ln["type"] != "todo":
+                ln["checked"] = False
+            ln["type"] = to
+        self.render(keep_cursor=False)
+        restored = [t.index(f"{row+1}.0" if at_start else
+                            f"{row+1}.{self._prefix_len(self.lines[row]) + offset}")
+                    for row, offset, at_start in anchors]
+        t.mark_set("insert", restored[0])
+        if len(restored) == 3:
+            t.tag_add("sel", restored[1], restored[2])
+        self._clamp_todo_cursor()
+        self._remember_edit()
+        t.focus_set()
+        self._see_text("insert")
+        self.d["editedAt"] = datetime.now().isoformat(timespec="microseconds")
+        self.app.schedule_save()
+
+    def insert_line(self, row):
+        self.lines.insert(row + 1, {"type": "text", "text": "", "checked": False})
+        self.render(keep_cursor=False)
+        self.text.mark_set("insert", f"{row+2}.0")
+        self._see_text("insert")
+        self.d["editedAt"] = datetime.now().isoformat(timespec="microseconds")
+        self.app.schedule_save()
+
+    def delete_line(self, row):
+        if len(self.lines) <= 1:
+            self.lines = [{"type": "text", "text": "", "checked": False}]
+        else:
+            del self.lines[row]
+        self.render(keep_cursor=False)
+        row = min(row, len(self.lines) - 1)
+        self.text.mark_set("insert", f"{row+1}.{self._prefix_len(self.lines[row])}")
+        self._see_text("insert")
+        self.d["editedAt"] = datetime.now().isoformat(timespec="microseconds")
+        self.app.schedule_save()
+
+
 class NoteWindow(tk.Toplevel):
     def __init__(self, app, data):
         super().__init__(app.root)
@@ -613,23 +1541,10 @@ class NoteWindow(tk.Toplevel):
         btn("plus", lambda: f"新建便签（{self.app.hotkey_text('new')}）",
             lambda: self.app.new_note()).pack(side="right", padx=5, pady=9)
         btn("trash", lambda: "删除便签", self.delete_self).pack(side="right", padx=5, pady=9)
-
-        # -- 正文 --
-        self.done_font = tkfont.Font(family=UI_FONT,
-                                     size=app.data["settings"]["fontSize"])
-        self.body = tk.Canvas(self, bg=self._bg, bd=0, highlightthickness=0, yscrollincrement=1)
-        self.text = tk.Text(self.body, bg=self._bg, fg="#2B2F36", bd=0, highlightthickness=0,
-                            padx=12, pady=10, wrap="char", spacing1=9, spacing3=10,
-                            selectbackground=self._bg, inactiveselectbackground=self._bg,
-                            selectforeground="#2B2F36", selectborderwidth=0,
-                            font=app.base_font, insertbackground="#2B2F36", cursor="xterm")
-        self.text.place(x=0, y=0, relwidth=1)
-        self.scroll_thumb = VerticalThumb(self, self.body, self._bg)
-        self._make_check_images()
-        self.text.tag_config("done", font=self.done_font)  # 只加删除线，不改字色
-        self.text.tag_config("selection_fill", background="#DCE7F3", foreground="#2B2F36")
-        self.text.tag_raise("selection_fill", "sel")
-        self.text.bind("<<Selection>>", self._paint_selection)
+        self.b_columns = btn("columns-2",
+                             lambda: "切回单栏" if self.d.get("twoColumn") else "切换双栏",
+                             self.toggle_columns)
+        self.b_columns.pack(side="right", padx=5, pady=9)
 
         # -- 底部状态栏 + 添加条 --
         self.bar = tk.Frame(self, bg=self._bg)
@@ -653,16 +1568,6 @@ class NoteWindow(tk.Toplevel):
                                  highlightthickness=0, cursor="hand2")
         self.add_pill.bind("<Button-1>", self._pill_press)
         Tooltip(self.add_pill, lambda: "添加待办")
-        self._strike_widgets = []
-        self._selection_masks = []
-        self._checkbox_widgets = []
-        self._document_height = 0
-        self._content_height = 1
-        self._chunk_start = 0
-        self._buffer_margin = 0
-        self._layout_busy = False
-        self._layout_pending = False
-        self._layout_measure_pending = False
         self._resizing = self._resize_busy = self._resize_ending = False
         self._resize_ready = self._resize_cancel_requested = self._resize_release_pending = False
         self._resize_target = self._resize_start = self._resize_surface = None
@@ -674,14 +1579,12 @@ class NoteWindow(tk.Toplevel):
         self._edge_sizing = self._dragging = False
         self._resize_job = None
         self._relayout_job = None
-        self._row_layout = {}
-        self._wheel_job = None
-        self._wheel_remaining = 0
-        self._selection_scroll_job = None
-        self._edge_fade = EdgeFade(self.body)
-        self.body.configure(yscrollcommand=self._text_scrolled)
-        self.body.bind("<Configure>", self._body_configured)
-        self._bind_ime(self.text)
+        self.divider = None
+        # 编辑器在状态栏之后创建：render 会立即更新底部状态文字。
+        self.editors = [NoteEditor(self, 0)]
+        if self.d.get("twoColumn"):
+            self.d.setdefault("lines2", [{"type": "text", "text": "", "checked": False}])
+            self.editors.append(NoteEditor(self, 1))
         self._draw_chip()
 
         self.bind("<Configure>", lambda e: self._queue_relayout() if e.widget == self else None)
@@ -690,57 +1593,23 @@ class NoteWindow(tk.Toplevel):
             surface.bind("<Button-1>", self._edge_press)
             surface.bind("<B1-Motion>", self._edge_move)
             surface.bind("<ButtonRelease-1>", self._edge_release)
-        t = self.text
-        t.bind("<KeyRelease>", self._on_keyrelease)
-        t.bind("<KeyPress-Return>", self._on_enter)
-        t.bind("<KeyPress-BackSpace>", self._on_backspace)
-        t.bind("<KeyPress-BackSpace>", self._hide_strikes_before_delete, add="+")
-        t.bind("<KeyPress-Delete>", self._hide_strikes_before_delete)
-        t.bind("<Left>", self._on_left)
-        t.bind("<Up>", self._on_vertical)
-        t.bind("<Down>", self._on_vertical)
-        caret_tag = "TodoCaret"
-        tags = t.bindtags()
-        t.bindtags(("NoteShortcuts", tags[0], tags[1], caret_tag, *tags[2:]))
+        # 类级绑定按事件来源的顶层窗口分发，多编辑器也能路由到正确的一栏。
         for sequence in ("<KeyPress>", "<KeyRelease>"):
-            if not t.bind_class("NoteShortcuts", sequence):
-                t.bind_class("NoteShortcuts", sequence,
-                             lambda e: e.widget.winfo_toplevel()._local_shortcut(e))
+            if not self.bind_class("NoteShortcuts", sequence):
+                self.bind_class("NoteShortcuts", sequence,
+                                lambda e: e.widget.winfo_toplevel()._local_shortcut(e))
         # 在 Text 默认移动完成后立即校正，避免连续按键在前缀中插入文字。
         for sequence in ("<KeyPress>", "<KeyRelease>", "<Button-1>", "<B1-Motion>",
                          "<ButtonRelease-1>", "<FocusIn>"):
-            if not t.bind_class(caret_tag, sequence):
-                t.bind_class(caret_tag, sequence,
-                             lambda e: e.widget.winfo_toplevel()._clamp_todo_cursor())
+            if not self.bind_class("TodoCaret", sequence):
+                self.bind_class("TodoCaret", sequence,
+                                lambda e: e.widget.winfo_toplevel()._clamp_todo_cursor(e))
         # Text 类绑定完成删除后立即同步，长按删除也不必等 KeyRelease 才刷新。
         for sequence in ("<KeyPress-BackSpace>", "<KeyPress-Delete>"):
-            if not t.bind_class(caret_tag, sequence):
-                t.bind_class(caret_tag, sequence,
-                             lambda e: e.widget.winfo_toplevel()._on_keyrelease(None))
-        t.bind("<<Copy>>", lambda e: self._clipboard_edit("tk_textCopy"))
-        t.bind("<<Cut>>", lambda e: self._clipboard_edit("tk_textCut"))
-        t.bind("<<Paste>>", lambda e: self._clipboard_edit("tk_textPaste"))
-        t.bind("<<Undo>>", lambda e: self._undo_edit())
-        t.bind("<<Redo>>", lambda e: self._undo_edit(redo=True))
-        t.bind("<Control-a>", self._select_all)
-        t.bind("<Control-Shift-Z>", lambda e: self._undo_edit(redo=True))
-        t.bind("<Prior>", self._page_key)
-        t.bind("<Next>", self._page_key)
-        t.bind("<Button-1>", self._on_click)
-        t.bind("<Button-3>", self._on_rightclick)
-        t.bind("<MouseWheel>", self._text_wheel)
-        self.body.bind("<MouseWheel>", self._text_wheel)
-        self.scroll_thumb.bind("<MouseWheel>", self._text_wheel)
-        self.scroll_thumb.bind("<Button-1>", self._stop_wheel, add="+")
-        t.bind("<KeyPress>", self._stop_wheel, add="+")
-        t.bind("<Control-MouseWheel>", self._ctrl_wheel)
-        self.body.bind("<Control-MouseWheel>", self._ctrl_wheel)
-        t.bind("<B1-Motion>", self._selection_scroll, add="+")
-        t.bind("<ButtonRelease-1>", self._stop_selection_scroll, add="+")
-        t.bind("<Unmap>", self._stop_selection_scroll)
-        t.bind("<Unmap>", self._stop_wheel, add="+")
+            if not self.bind_class("TodoCaret", sequence):
+                self.bind_class("TodoCaret", sequence,
+                                lambda e: e.widget.winfo_toplevel()._on_keyrelease(e))
 
-        self.render()
         self.update_idletasks()
         self._relayout()
         self.hwnd = user32.GetParent(self.winfo_id()) or self.winfo_id()
@@ -766,10 +1635,74 @@ class NoteWindow(tk.Toplevel):
         self._relayout_job = None
         self._relayout()
 
-    def _body_configured(self, event):
-        changed = event.width != getattr(self, "_body_width", None)
-        self._body_width = event.width
-        self._queue_strikes(measure=changed)
+    # ---- 多编辑器转发：单栏行为不变，测试与旧调用方继续走窗口属性 ----
+    def __getattr__(self, name):
+        if name == "editors":
+            raise AttributeError(name)
+        return getattr(self.editors[0], name)
+
+    @property
+    def _layout_busy(self):
+        return self.editors[0]._layout_busy
+
+    @_layout_busy.setter
+    def _layout_busy(self, value):
+        self.editors[0]._layout_busy = value
+
+    @property
+    def _wheel_remaining(self):
+        return self.editors[0]._wheel_remaining
+
+    @_wheel_remaining.setter
+    def _wheel_remaining(self, value):
+        self.editors[0]._wheel_remaining = value
+
+    @property
+    def _wheel_time(self):
+        return getattr(self.editors[0], "_wheel_time", 0)
+
+    @_wheel_time.setter
+    def _wheel_time(self, value):
+        self.editors[0]._wheel_time = value
+
+    def _editor_for(self, widget):
+        for editor in self.editors:
+            if widget in (editor.text, editor.body, editor.scroll_thumb):
+                return editor
+        return self.editors[0]
+
+    @property
+    def _editor_texts(self):
+        return [editor.text for editor in self.editors]
+
+    @property
+    def focused(self):
+        current = self.focus_get()
+        for editor in self.editors:
+            if current is editor.text:
+                return editor
+        return self.editors[0]
+
+    def _local_shortcut(self, event):
+        return self._editor_for(event.widget)._local_shortcut(event)
+
+    def _clamp_todo_cursor(self, _event=None):
+        editor = (self._editor_for(_event.widget) if _event is not None and
+                  hasattr(_event, "widget") else self.focused)
+        editor._clamp_todo_cursor()
+
+    def _on_keyrelease(self, event=None):
+        editor = (self._editor_for(event.widget) if event is not None and
+                  hasattr(event, "widget") else self.focused)
+        editor._on_keyrelease(None)
+
+    def render(self, keep_cursor=True):
+        for editor in self.editors:
+            editor.render(keep_cursor)
+
+    def _sync_lines_from_text(self):
+        for editor in self.editors:
+            editor._sync_lines_from_text()
 
     def _relayout(self):
         w, h = self._layout_dimensions()
@@ -814,11 +1747,24 @@ class NoteWindow(tk.Toplevel):
         # 底栏包含按钮上下留白，不能把子窗口的裁剪边界贴在按钮边框上。
         bar_y = h - 10 - pill_height - 8
         if text_y is not None:
-            self.body.place(x=RADIUS + 4, y=text_y, width=w - 2 * (RADIUS + 4),
-                            height=max(20, bar_y - text_y))
-            self.scroll_thumb.place(x=w-RADIUS-10, y=text_y+4,
-                                    width=8, height=max(12,bar_y-text_y-8))
-            tk.Misc.lift(self.scroll_thumb)
+            ix = RADIUS + 4
+            avail = w - 2 * ix
+            height = max(20, bar_y - text_y)
+            if len(self.editors) > 1:
+                gap = 14
+                col_w = (avail - gap) // 2
+                for i, editor in enumerate(self.editors):
+                    x = ix + i * (col_w + gap)
+                    editor.body.place(x=x, y=text_y, width=col_w, height=height)
+                    editor.scroll_thumb.place(x=x + col_w - 6, y=text_y + 4,
+                                              width=8, height=max(12, height - 8))
+                    tk.Misc.lift(editor.scroll_thumb)
+                self._layout_divider(ix + col_w, text_y, height)
+            else:
+                self.editors[0].body.place(x=ix, y=text_y, width=avail, height=height)
+                self.editors[0].scroll_thumb.place(x=w - RADIUS - 10, y=text_y + 4,
+                                                   width=8, height=max(12, height - 8))
+                tk.Misc.lift(self.editors[0].scroll_thumb)
         self.bar.place(x=0, y=bar_y, width=w, height=h - 1 - bar_y)
         center_y = 8 + pill_height / 2
         # 底栏内统一使用局部坐标，移动容器即可带动全部控件。
@@ -832,147 +1778,15 @@ class NoteWindow(tk.Toplevel):
         if getattr(self, "_pill_render", (None, None))[:2] != (pill_width, pill_height):
             self._draw_pill(pill_width, pill_height)
 
-    def _text_scrolled(self, first, last):
-        self.scroll_thumb.set(first, last)
-        self._edge_fade.update(first, last)
-        if self._layout_busy:
-            return
-        top = round(self.body.canvasy(0))
-        if ((self._chunk_start > 0 and top < self._chunk_start + self._buffer_margin) or
-                (self.text.yview()[1] < 1 and
-                 top + self.body.winfo_height() > self._chunk_start + self.text.winfo_height() - self._buffer_margin)):
-            self._draw_strikes()
-        else:
-            self.text.place_configure(y=self._chunk_start - top)
-
-    def _text_wheel(self, event):
-        first, last = self.body.yview()
-        if last-first < .999:
-            # 每格移动 36 个逻辑像素，随界面缩放，不随字体大小改变。
-            distance = -event.delta / 120 * self.text.winfo_fpixels("27p")
-            if distance * self._wheel_remaining < 0:
-                self._wheel_remaining = 0
-            self._wheel_remaining += distance
-            if self._wheel_job is None:
-                self._wheel_time = time.monotonic() - .016
-                self._step_wheel()
-        else:
-            self._stop_wheel()
-            self.body.yview_moveto(0)
-        return "break"
-
-    def _step_wheel(self):
-        self._wheel_job = None
-        remaining = self._wheel_remaining
-        if abs(remaining) < 1:
-            # 不足一像素的移动留给下次输入，精细滚轮和触控板的小增量不能丢。
-            return
-        now = time.monotonic()
-        # 按实际经过时间推进，电脑繁忙时下一帧会追上进度。
-        progress = -math.expm1(-(now - self._wheel_time) / .04)
-        self._wheel_time = now
-        step = min(int(abs(remaining)), max(1, round(abs(remaining) * progress)))
-        step *= 1 if remaining > 0 else -1
-        self.body.yview_scroll(step, "units")
-        self._wheel_remaining -= step
-        self._wheel_job = self.after(16, self._step_wheel)
-        self.body.update_idletasks()
-        # 先处理整体移动产生的窗口重画事件，再提交这一帧；不运行下一帧的计时器。
-        while self.tk.dooneevent(WINDOW_EVENTS | DONT_WAIT):
-            pass
-        self.body.update_idletasks()
-
-    def _stop_wheel(self, _event=None):
-        if self._wheel_job is not None:
-            self.after_cancel(self._wheel_job)
-            self._wheel_job = None
-        self._wheel_remaining = 0
-
-    def _body_index(self, x=0, y=0):
-        return self.text.index(f"@{x},{round(self.body.canvasy(y)) - self._chunk_start}")
-
-    def _scroll_to(self, y):
-        self.body.yview_moveto(y / self._content_height)
-
-    def _see_text(self, index):
-        if getattr(self, "_strike_job", None):
-            self._draw_strikes()
-        box = self.text.bbox(index)
-        if box is None:
-            self.text.see(index)
-            self._chunk_start = round(self.text.yview()[0] * self._document_height)
-            box = self.text.bbox(index)
-        if box:
-            if self.text.compare(index, "==", "insert"):
-                row, col = self._row_col(self.text.index("insert"))
-                if col < self._prefix_len(self.d["lines"][row]) and row + 1 in self._row_layout:
-                    height, offset = self._row_layout[row + 1]
-                    size = self._check_images[False].width()
-                    box = (box[0], int(self.text.cget("pady")) + offset - self._chunk_start +
-                           height // 2 - size // 2, box[2], size)
-            top = self.body.canvasy(0)
-            pad = max(int(self.text.cget("pady")), self._edge_fade.height)
-            y = box[1] + self._chunk_start
-            if y < top + pad:
-                self._scroll_to(y - pad)
-            elif y + box[3] > top + self.body.winfo_height() - pad:
-                self._scroll_to(y + box[3] + pad - self.body.winfo_height())
-            self._draw_strikes()
-
-    def _stop_selection_scroll(self, _event=None):
-        if self._selection_scroll_job is not None:
-            self.after_cancel(self._selection_scroll_job)
-            self._selection_scroll_job = None
-
-    def _page_key(self, event):
-        self._stop_wheel()
-        box = self.text.bbox("insert")
-        cursor_y = box[1] + self._chunk_start - self.body.canvasy(0) if box else -1
-        if not 0 <= cursor_y < self.body.winfo_height():
-            box = None
-        direction = 1 if event.keysym == "Next" else -1
-        distance = direction * max(1, self.body.winfo_height() - self.app.base_font.metrics("linespace"))
-        self.body.yview_scroll(distance, "units")
-        self.body.update_idletasks()
-        target = (self._body_index(box[0], round(cursor_y)) if box else
-                  self._body_index(self.body.winfo_height() // 2, 0))
-        command = "tk::TextKeySelect" if event.state & 1 else "tk::TextSetCursor"
-        self.text.tk.call(command, self.text, target)
-        self._clamp_todo_cursor()
-        self._see_text("insert")
-        return "break"
-
-    def _selection_scroll(self, event=None):
-        self._stop_selection_scroll()
-        if event is not None:
-            self._selection_x = event.x
-            self._selection_y = event.y_root - self.body.winfo_rooty()
-        height = self.body.winfo_height()
-        direction = -1 if self._selection_y < 0 else (1 if self._selection_y >= height else 0)
-        if not direction:
-            return
-        before = self.body.yview()
-        self.body.yview_scroll(direction * 8, "units")
-        self.body.update_idletasks()
-        y = self.body.canvasy(max(0, min(height - 1, self._selection_y))) - self._chunk_start
-        self.text.tk.call("tk::TextSelectTo", self.text, self._selection_x, round(y))
-        self._clamp_todo_cursor()
-        if self.body.yview() != before:
-            self._selection_scroll_job = self.after(30, self._selection_scroll)
-        return "break"
-
     def destroy(self):
-        self._stop_wheel()
-        self._stop_selection_scroll()
+        for editor in getattr(self, "editors", ()):
+            editor.teardown()
         self._finish_resize(cancel=True, redraw=False, hidden=True)
         if hasattr(self, "_resize_key_tag"):
             self.unbind_class(self._resize_key_tag, "<Escape>")
         if self._relayout_job is not None:
             self.after_cancel(self._relayout_job)
             self._relayout_job = None
-        if getattr(self, "_strike_job", None):
-            self.after_cancel(self._strike_job)
-            self._strike_job = None
         if hasattr(self, "_ime_pump_job"):
             self.after_cancel(self._ime_pump_job)
             user32.SetWindowLongPtrW(self.winfo_id(), -4, self._ime_old_proc)
@@ -986,24 +1800,13 @@ class NoteWindow(tk.Toplevel):
         preference = ctypes.c_int(2)  # DWMWCP_ROUND
         dwmapi.DwmSetWindowAttribute(self.hwnd, 33, ctypes.byref(preference), ctypes.sizeof(preference))
 
-    def _make_check_images(self):
-        size = max(18, round(self.app.base_font.metrics("ascent") * 1.1))
-        self._check_images = check_images(self.text, size)
-        # 原生插入光标跨在字符边界上，勾选框子窗口不能覆盖占位符的左右边界。
-        self._check_margin = max(1, int(self.text.cget("insertwidth")))
-        slot_width = size + 2 * self._check_margin
-        self._check_slots = {checked: ImageTk.PhotoImage(Image.new("RGBA", (slot_width, size)), master=self.text)
-                             for checked in (False, True)}
-        # Text 在左内边距处裁切光标，首行也要留出半个光标的绘制宽度。
-        caret_margin = self._check_margin // 2
-        self.text.tag_config("todo_indent", lmargin1=caret_margin,
-                             lmargin2=caret_margin + slot_width + self.app.base_font.measure(PREFIX_PAD))
-
     def _restyle(self):
         for b in self._tool_btns:
             b.set_bg(self._bg)
         self.b_pin.set_active(self.d["z"] == "top")
         self.b_bottom.set_active(self.d["z"] == "bottom")
+        if hasattr(self, "b_columns"):
+            self.b_columns.set_active(bool(self.d.get("twoColumn")))
 
     def toggle_pin(self):
         self.set_z("normal" if self.d["z"] == "top" else "top")
@@ -1031,7 +1834,6 @@ class NoteWindow(tk.Toplevel):
         self._ime_active = False
         self._ime_widget = self._ime_target = self._ime_native_widget = None
         self._ime_pending = queue.SimpleQueue()
-        self.text.tag_configure("ime_preedit", underline=True)
         hwnd = self.winfo_id()  # Tk 将原生输入焦点保留在顶层客户窗口。
         self._resize_client_hwnd = hwnd
 
@@ -1133,15 +1935,17 @@ class NoteWindow(tk.Toplevel):
 
     def _begin_preedit(self, widget=None):
         widget = widget or self.focus_get()
-        if widget != self.text and not isinstance(widget, tk.Entry):
+        editor = (self._editor_for(widget) if not isinstance(widget, tk.Entry)
+                  and widget in self._editor_texts else None)
+        if editor is None and not isinstance(widget, tk.Entry):
             return False
         if self._ime_active:
             return True
         self._ime_widget = widget
         self._ime_selected = ""
         self._ime_selected_images = []
-        if widget == self.text:
-            self._clamp_todo_cursor()
+        if editor is not None:
+            editor._clamp_todo_cursor()
             selection = widget.tag_ranges("sel")
             if selection:
                 widget.mark_set("insert", selection[0])
@@ -1167,15 +1971,16 @@ class NoteWindow(tk.Toplevel):
         widget, start = self._ime_widget, self._ime_start
         length = int(widget.tk.call("string", "length", value))
         cursor = length if cursor is None else max(0, min(cursor, length))
-        if widget == self.text:
+        editor = self._editor_for(widget) if not isinstance(widget, tk.Entry) else None
+        if editor is not None:
             widget.delete(start, f"{start}+{self._ime_length}c")
             tags = ["ime_preedit"]
             if "todo_indent" in widget.tag_names(f"{start} linestart"):
                 tags.append("todo_indent")
             widget.insert(start, value, tags)
             widget.mark_set("insert", f"{start}+{cursor}c")
-            self._queue_strikes()
-            self._see_text("insert")
+            editor._queue_strikes()
+            editor._see_text("insert")
         else:
             widget.delete(start, start + self._ime_length)
             widget.insert(start, value)
@@ -1188,8 +1993,9 @@ class NoteWindow(tk.Toplevel):
         if not self._ime_active:
             return
         widget = self._ime_widget
+        editor = self._editor_for(widget) if not isinstance(widget, tk.Entry) else None
         self._replace_preedit(self._ime_selected if result is None else result)
-        if widget == self.text:
+        if editor is not None:
             if result is None:
                 for offset, image in self._ime_selected_images:
                     widget.image_create(f"{self._ime_start}+{offset}c", image=image, align="center")
@@ -1197,8 +2003,8 @@ class NoteWindow(tk.Toplevel):
             widget.tag_remove("ime_preedit", "1.0", "end")
         self._ime_active = False
         self._ime_widget = None
-        if widget == self.text:
-            self.after_idle(self._on_keyrelease, None)
+        if editor is not None:
+            self.after_idle(editor._on_keyrelease, None)
         elif self.focus_get() != widget:
             self.after_idle(lambda: widget.event_generate("<FocusOut>") if widget.winfo_exists() else None)
 
@@ -1238,256 +2044,8 @@ class NoteWindow(tk.Toplevel):
         for event in ("<KeyPress>", "<ButtonRelease-1>"):
             widget.bind(event, lambda e: widget.after_idle(self._sync_ime, widget), add="+")
 
-    def _queue_strikes(self, measure=True):
-        if self._resizing:
-            self._resize_dirty = True
-        if self._layout_busy:
-            self._layout_pending = True
-            self._layout_measure_pending |= measure
-            return
-        if measure:
-            self._document_height = 0
-            self._row_layout.clear()
-        if getattr(self, "_strike_job", None) is None:
-            self._strike_job = self.after_idle(self._draw_strikes)
-
-    def _draw_strikes(self):
-        if self._layout_busy:
-            return
-        self._layout_busy = True
-        try:
-            self._layout_text()
-            if not self._resizing:
-                self.body.update_idletasks()
-        finally:
-            self._layout_busy = False
-        if self._layout_pending:
-            self._layout_pending = False
-            measure, self._layout_measure_pending = self._layout_measure_pending, False
-            self._queue_strikes(measure=measure)
-
-    def _layout_text(self):
-        if getattr(self, "_strike_job", None):
-            self.after_cancel(self._strike_job)
-        self._strike_job = None
-        width = self.body.winfo_width()
-        if width < 50:
-            return
-        # 测量布局会刷新画面，先隐藏文字已删掉的旧横线，避免空行残留一帧。
-        for bar in self._strike_widgets:
-            if self.text.compare(bar._text_start, ">=", f"{bar._text_start} lineend"):
-                bar.place_forget()
-                bar._layout_bounds = None
-        # 正文和所有装饰始终留在同一内容坐标系，滚动只移动整个 Text 窗口。
-        if self.text.winfo_width() != width:
-            self.body.update_idletasks()
-        if not self._document_height:
-            self._document_height = self.text.count("1.0", "end", "update", "ypixels")
-        pad = int(self.text.cget("pady"))
-        self._buffer_margin = (max(self.app.base_font.metrics("linespace"), self._check_images[False].width()) +
-                               int(self.text.cget("spacing1")) + int(self.text.cget("spacing3")) + pad)
-        self._content_height = max(self.body.winfo_height(), self._document_height + 2 * pad)
-        # Windows 子窗口坐标有范围限制；正文保留数屏缓冲，跨段时整组一起切换。
-        height = min(self._content_height, max(self.body.winfo_height(),
-                     min(16000, max(self.body.winfo_height() * 5,
-                                    self.body.winfo_height() + 4 * self._buffer_margin))))
-        region = (0, 0, width, self._content_height)
-        geometry_changed = self.text.winfo_height() != height
-        region_changed = getattr(self, "_body_region", None) != region
-        if geometry_changed:
-            self.text.place_configure(height=height)
-        if region_changed:
-            self.body.configure(scrollregion=region)
-            self._body_region = region
-        # 顶部未滚动且 Text 高度未变时，横向 scrollregion 更新不影响行坐标。
-        if geometry_changed or (region_changed and self.body.canvasy(0) != 0):
-            self.body.update_idletasks()
-        top = round(self.body.canvasy(0))
-        target = max(0, top - (height - self.body.winfo_height()) // 2)
-        view_changed = round(self.text.yview()[0] * self._document_height) != target
-        if view_changed:
-            self.text.yview_moveto(target / self._document_height)
-        self._chunk_start = round(self.text.yview()[0] * self._document_height)
-        text_y = self._chunk_start - top
-        if self.text.winfo_y() != text_y:
-            self.text.place_configure(y=text_y)
-            view_changed = True
-        if view_changed:
-            self.body.update_idletasks()
-        used_masks = used_boxes = used_bars = 0
-        content_height = self.text.winfo_height()
-        visible_start = self.text.index("@0,0")
-        first_row = int(visible_start.split(".")[0])
-        last_row = min(len(self.d["lines"]), int(self.text.index(f"@0,{content_height}").split(".")[0]))
-        for row in range(first_row, last_row + 1):
-            line = self.d["lines"][row - 1]
-            if line["type"] == "todo":
-                if row not in self._row_layout:
-                    row_height = self.text.count(f"{row}.0", f"{row+1}.0", "ypixels")[0]
-                    offset = self.text.count("1.0", f"{row}.0", "ypixels")
-                    self._row_layout[row] = (row_height, offset[0] if offset else 0)
-                row_height, offset = self._row_layout[row]
-                row_top = pad + offset - self._chunk_start
-                # Tk 会把软换行的选区背景画进左边距，盖回勾选框旁的留白。
-                if self.text.tag_nextrange("selection_fill", f"{row}.0", f"{row}.end"):
-                    top, bottom = max(0, row_top), min(content_height, row_top + row_height)
-                    if top is not None:
-                        if used_masks < len(self._selection_masks):
-                            mask = self._selection_masks[used_masks]
-                        else:
-                            mask = tk.Frame(self.text, bg=self._bg)
-                            mask.bind("<MouseWheel>", self._text_wheel)
-                            mask.bind("<Control-MouseWheel>", self._ctrl_wheel)
-                            for event in ("<Button-1>", "<B1-Motion>", "<ButtonRelease-1>"):
-                                mask.bind(event, lambda e, sequence=event: self.text.event_generate(
-                                    sequence, x=e.x_root - self.text.winfo_rootx(),
-                                    y=e.y_root - self.text.winfo_rooty(), time=e.time, state=e.state))
-                            self._selection_masks.append(mask)
-                        used_masks += 1
-                        mask.place(x=int(self.text.cget("padx")), y=top,
-                                   width=int(self.text.tag_cget("todo_indent", "lmargin2")),
-                                   height=bottom - top, bordermode="ignore")
-                        mask.lift()
-                size = self._check_images[False].width()
-                y = row_top + row_height // 2 - size // 2
-                if -size < y < content_height:
-                    image = self._check_images[line["checked"]]
-                    if used_boxes < len(self._checkbox_widgets):
-                        box = self._checkbox_widgets[used_boxes]
-                        if str(box.cget("image")) != str(image):
-                            box.configure(image=image)
-                    else:
-                        box = tk.Label(self.text, image=image, bg=self._bg, bd=0, cursor="hand2")
-                        box.bind("<MouseWheel>", self._text_wheel)
-                        box.bind("<Control-MouseWheel>", self._ctrl_wheel)
-                        self._checkbox_widgets.append(box)
-                    used_boxes += 1
-                    bounds = (int(self.text.cget("padx")) + self._check_margin + self._check_margin // 2,
-                              y, size, size)
-                    if getattr(box, "_layout_bounds", None) != bounds:
-                        box.place(x=bounds[0], y=y, width=size, height=size, bordermode="ignore")
-                        box._layout_bounds = bounds
-                        box.lift()
-                    if getattr(box, "_todo_row", None) != row:
-                        box._todo_row = row
-                        box.bind("<Button-1>", lambda _e, r=row-1: self.toggle_done(r))
-            if line["type"] != "todo" or not line["checked"]:
-                continue
-            start = f"{row}.{self._prefix_len(line)}"
-            if self.text.compare(start, "<", visible_start):
-                start = visible_start
-            end = f"{row}.end"
-            while self.text.compare(start, "<", end):
-                display = self.text.dlineinfo(start)
-                if not display or display[1] >= content_height:
-                    break
-                stop = self.text.index(f"@{self.text.winfo_width()},{max(0, display[1])}")
-                first = self.text.bbox(start)
-                last = self.text.bbox(f"{end}-1c" if self.text.compare(stop, ">=", end) else stop)
-                if first and last:
-                    thickness = max(2, round(self.done_font.metrics("ascent") * 0.12))
-                    if used_bars < len(self._strike_widgets):
-                        bar = self._strike_widgets[used_bars]
-                    else:
-                        bar = tk.Frame(self.text, bg="#505761", height=thickness, cursor="xterm")
-                        bar.bind("<MouseWheel>", self._text_wheel)
-                        bar.bind("<Control-MouseWheel>", self._ctrl_wheel)
-                        for event in ("<Button-1>", "<B1-Motion>", "<ButtonRelease-1>"):
-                            bar.bind(event, lambda e, sequence=event: self.text.event_generate(
-                                sequence, x=e.x_root - self.text.winfo_rootx(),
-                                y=e.y_root - self.text.winfo_rooty(), time=e.time, state=e.state))
-                        self._strike_widgets.append(bar)
-                    used_bars += 1
-                    bar._text_start = start
-                    baseline = display[1] + display[4]
-                    middle = baseline - round(self.done_font.metrics("ascent") * 0.33)
-                    bounds = (first[0], middle - thickness // 2,
-                              max(1, last[0] + last[2] - first[0]), thickness)
-                    if getattr(bar, "_layout_bounds", None) != bounds:
-                        bar.place(x=bounds[0], y=bounds[1], width=bounds[2],
-                                  height=thickness, bordermode="ignore")
-                        bar._layout_bounds = bounds
-                if display[1] + display[3] >= content_height:
-                    break
-                next_start = self.text.index(f"@0,{display[1] + display[3]}")
-                if self.text.compare(next_start, "<=", start):
-                    break
-                start = next_start
-
-        # 这次没排上的控件回收掉，池子始终只留当前需要的。
-        for pool, used in ((self._selection_masks, used_masks),
-                           (self._checkbox_widgets, used_boxes),
-                           (self._strike_widgets, used_bars)):
-            for widget in pool[used:]:
-                widget.destroy()
-            del pool[used:]
-
-        if self._selection_masks:
-            self.after_idle(lambda: [w.lift() for w in self._selection_masks + self._checkbox_widgets
-                                     if w.winfo_exists()])
-        self._clamp_todo_cursor()
-
-    def _on_vertical(self, event):
-        if self._ime_composing(self.text):
-            return
-        self._stop_wheel()
-        t = self.text
-        current = t.index("insert")
-        self._see_text(current)
-        box = t.bbox(current)
-        if not box:
-            return "break"
-        x = box[0]
-        direction = 1 if event.keysym == "Down" else -1
-        start = t.index("insert display linestart")
-        target = t.index(f"{start} {direction:+d} displaylines display linestart")
-        if t.compare(target, "!=", start):
-            self._see_text(target)
-            display = t.dlineinfo(target)
-            end = t.index(f"{target} display lineend")
-            target = t.tk.call("tk::TextClosestGap", t, x, display[1] + display[3] // 2)
-            if t.compare(target, ">", end):
-                target = end
-            command = "tk::TextKeySelect" if event.state & 1 else "tk::TextSetCursor"
-            t.tk.call(command, t, target)
-            self._clamp_todo_cursor()
-            self._see_text("insert")
-        return "break"
-
-    def _on_left(self, event):
-        if self._ime_composing(self.text):
-            return
-        row, col = self._row_col(self.text.index("insert"))
-        pre = self._prefix_len(self.d["lines"][row])
-        if pre and col <= pre:
-            target = f"{row}.end" if row else f"1.{pre}"
-            command = "tk::TextKeySelect" if event.state & 1 else "tk::TextSetCursor"
-            self.text.tk.call(command, self.text, target)
-            self._clamp_todo_cursor()
-            self._see_text("insert")
-            return "break"
-
-    def _clamp_todo_cursor(self, _event=None):
-        if self._ime_composing(self.text):
-            return
-        t = self.text
-        start = t.index("insert linestart")
-        images = t.dump(start, f"{start}+1c", image=True)
-        if images and t.image_cget(start, "image") in {str(i) for i in self._check_slots.values()}:
-            target = f"{start}+{1 + len(PREFIX_PAD)}c"
-            if t.compare("insert", "<", target):
-                t.mark_set("insert", target)
-
-    # ---- 底部添加条 ----
     def add_todo(self):
-        row = int(self.text.index("insert").split(".")[0])
-        self.d["lines"].insert(row, {"type": "todo", "text": "", "checked": False})
-        self.render(keep_cursor=False)
-        self.text.mark_set("insert", f"{row+1}.0+{self._prefix_len(self.d['lines'][row])}c")
-        self._see_text(f"{row+1}.0")
-        self.text.focus_set()
-        self.d["editedAt"] = datetime.now().isoformat(timespec="microseconds")
-        self.app.schedule_save()
+        return self.focused.add_todo()
 
     def _pill_press(self, _e):
         # 按压态：短暂加深再回弹
@@ -1527,7 +2085,8 @@ class NoteWindow(tk.Toplevel):
             padding = button.pack_info()["padx"]
             padding = (padding, padding) if isinstance(padding, int) else self.tk.splitlist(padding)
             reserved += button.winfo_reqwidth() + sum(int(value) for value in padding)
-        return max(44, self._layout_dimensions()[0] - 2 * (RADIUS + 4) - reserved)
+        # 工具栏加到 4 个右侧按钮后窄窗口余量变小，极限时允许胶囊缩到 22，保证按钮不挤掉。
+        return max(22, self._layout_dimensions()[0] - 2 * (RADIUS + 4) - reserved)
 
     def _draw_chip(self):
         c = self.title_chip
@@ -1598,362 +2157,73 @@ class NoteWindow(tk.Toplevel):
         e.bind("<FocusOut>", commit, add="+")
 
     # ---- 渲染 ----
-    def render(self, keep_cursor=True):
-        self._stop_wheel()
-        cur = self.text.index("insert")
-        view = self._body_index()
-        scroll_y = self.body.canvasy(0)
-        old_chunk = self._chunk_start
-        top = self.text.dlineinfo(view)
-        self.text.delete("1.0", "end")
-        lines = self.d["lines"] or [{"type": "text", "text": "", "checked": False}]
-        self.d["lines"] = lines
-        for i, ln in enumerate(lines):
-            row = i + 1
-            if ln["type"] == "todo":
-                self.text.image_create("end", image=self._check_slots[ln["checked"]], align="center")
-                self.text.insert("end", PREFIX_PAD)
-            self.text.insert("end", ln["text"])
-            if ln["type"] == "todo":
-                self.text.tag_add("todo_indent", f"{row}.0", f"{row}.end")
-            if ln["type"] == "todo" and ln["checked"]:
-                self.text.tag_add("done", f"{row}.{self._prefix_len(ln)}", f"{row}.end")
-            if i < len(lines) - 1:
-                self.text.insert("end", "\n")
-        if keep_cursor:
-            end = self.text.index("end-1c")
-            if self.text.compare(cur, ">", end):
-                cur = end
-            self.text.mark_set("insert", cur)
-        self._clamp_todo_cursor()
-        self.update_status()
-        self._queue_strikes()
-        self.body.update_idletasks()
-        restored = self.text.dlineinfo(view)
-        if top and restored:
-            self._scroll_to(scroll_y + restored[1] + self._chunk_start - top[1] - old_chunk)
-        self._remember_edit()
-
-    @staticmethod
-    def _prefix_len(ln):
-        return 1 + len(PREFIX_PAD) if ln["type"] == "todo" else 0
-
-    def _row_col(self, index):
-        r, c = index.split(".")
-        return int(r) - 1, int(c)
-
     def update_status(self):
-        todos = [l for l in self.d["lines"] if l["type"] == "todo"]
+        columns = [self.d["lines"]] + ([self.d["lines2"]] if self.d.get("twoColumn") else [])
+        todos = [l for lines in columns for l in lines if l["type"] == "todo"]
         done = sum(1 for l in todos if l["checked"])
         self.status.config(text=f"待办 {done}/{len(todos)}" if todos else "")
         self.clear_btn.config(fg="#6F7780" if done else "#A9AFB6")
         self._layout_footer()
 
+    # ---- 单双栏切换 ----
+    def toggle_columns(self):
+        focus = self.focus_get()
+        if focus in self._editor_texts and self._ime_composing(focus):
+            return
+        if self.d.get("twoColumn"):
+            for editor in self.editors:
+                editor._sync_lines_from_text()
+            keep = [ln for ln in self.d.get("lines2") or [] if ln["text"].strip()]
+            lines = self.d["lines"]
+            if keep and lines and lines[-1]["type"] == "text" and not lines[-1]["text"].strip():
+                lines.pop()  # 去掉左栏末尾的空行，合并后不留缝
+            self.d["lines"] = lines + keep
+            self.d["twoColumn"] = False
+            self.d.pop("lines2", None)
+            self.editors[1].teardown()
+            del self.editors[1]
+            if self.divider is not None:
+                self.divider.destroy()
+                self.divider = None
+            self.editors[0].render(keep_cursor=False)
+        else:
+            self.editors[0]._sync_lines_from_text()
+            self.d["twoColumn"] = True
+            self.d["lines2"] = [{"type": "text", "text": "", "checked": False}]
+            self.editors.append(NoteEditor(self, 1))
+            # 自动加宽约 1.8 倍，加宽后整体保持在工作区内。
+            sw = self.winfo_screenwidth()
+            new_w = min(round(self.d["w"] * 1.8), sw - 24)
+            if new_w > self.d["w"]:
+                self.d["w"] = new_w
+                self.d["x"] = min(self.d["x"], max(0, sw - new_w))
+                self.geometry(f"{new_w}x{self.d['h']}+{self.d['x']}+{self.d['y']}")
+        self._last_sz = None
+        self.update_idletasks()
+        self._relayout()
+        self._restyle()
+        self.d["editedAt"] = datetime.now().isoformat(timespec="microseconds")
+        self.app.schedule_save()
+
+    def _layout_divider(self, x, y, height):
+        if self.divider is None:
+            self.divider = tk.Canvas(self, bg=self._bg, highlightthickness=0, bd=0,
+                                     width=14, height=max(12, height))
+            self.divider.bind("<Configure>", lambda _e: self._draw_divider())
+        self.divider.place(x=x, y=y, width=14, height=max(12, height))
+
+    def _draw_divider(self):
+        c = self.divider
+        if c is None:
+            return
+        c.delete("all")
+        h = c.winfo_height()
+        if h > 48:  # 圆头细灰线，上下各留一段不顶满
+            margin = 16
+            c.create_line(7, margin, 7, h - margin, fill="#C9CED5",
+                          width=4, capstyle="round")
+
     # ---- 编辑事件 ----
-    def _remember_edit(self):
-        state = (deepcopy(self.d["lines"]), self.text.index("insert"))
-        if not hasattr(self, "_edit_history"):
-            self._edit_history, self._edit_redo = [state], []
-        elif self._edit_history[-1][0] != state[0]:
-            self._edit_history.append(state)
-            self._edit_redo.clear()
-        else:
-            self._edit_history[-1] = state
-
-    def _undo_edit(self, redo=False):
-        if self._ime_composing(self.text):
-            return "break"
-        self._sync_lines_from_text()
-        if redo:
-            if not self._edit_redo:
-                return "break"
-            state = self._edit_redo.pop()
-            self._edit_history.append(state)
-        else:
-            if len(self._edit_history) < 2:
-                return "break"
-            self._edit_redo.append(self._edit_history.pop())
-            state = self._edit_history[-1]
-        self.d["lines"] = deepcopy(state[0])
-        self.render(keep_cursor=False)
-        self.text.mark_set("insert", state[1])
-        self._clamp_todo_cursor()
-        self._see_text("insert")
-        self.d["editedAt"] = datetime.now().isoformat(timespec="microseconds")
-        self.app.schedule_save()
-        return "break"
-
-    def _clipboard_edit(self, command):
-        if self._ime_composing(self.text):
-            return "break"
-        self._sync_lines_from_text()
-        self._clamp_todo_cursor()
-        t = self.text
-        if command in ("tk_textCopy", "tk_textCut"):
-            if not t.tag_ranges("sel"):
-                return "break"
-            first, last = t.index("sel.first"), t.index("sel.last")
-            chunks = []
-            copied_lines = []
-            for row in range(int(first.split(".")[0]), int(last.split(".")[0]) + 1):
-                start = first if t.compare(first, ">", f"{row}.0") else f"{row}.0"
-                end = last if t.compare(last, "<", f"{row}.end") else f"{row}.end"
-                line = self.d["lines"][row - 1]
-                body = f"{row}.{self._prefix_len(line)}"
-                whole_todo = (line["type"] == "todo" and
-                              t.compare(start, "<=", body) and
-                              t.compare(end, "==", f"{row}.end") and
-                              t.compare(last, ">", f"{row}.0"))
-                if line["type"] == "todo" and t.compare(start, "<", body):
-                    start = body
-                content = t.get(start, end) if t.compare(start, "<=", end) else ""
-                chunks.append(content)
-                copied_lines.append({"type": "todo" if whole_todo else "text",
-                                     "text": content, "checked": whole_todo and line["checked"]})
-            t.clipboard_clear()
-            content = "\n".join(chunks)
-            t.clipboard_append(content)
-            # 结构只留在应用内；序号防止外部软件重新复制相同文字时误用旧结构。
-            self.app._clipboard_lines = (user32.GetClipboardSequenceNumber(), content, copied_lines)
-            if command == "tk_textCopy":
-                return "break"
-            t.delete(first, last)
-            self._on_keyrelease(None)
-            return "break"
-        if command == "tk_textPaste":
-            try:
-                content = t.clipboard_get()
-            except tk.TclError:
-                return "break"
-            copied = getattr(self.app, "_clipboard_lines", None)
-            if (copied and copied[:2] == (user32.GetClipboardSequenceNumber(), content) and
-                    any(line["type"] == "todo" for line in copied[2])):
-                self._paste_lines(deepcopy(copied[2]))
-                self._on_keyrelease(None)
-                return "break"
-        if command == "tk_textPaste" and self.text.tag_ranges("sel"):
-            self.text.mark_set("insert", "sel.first")
-        self.text.tk.call(command, self.text)
-        self._on_keyrelease(None)
-        return "break"
-
-    def _paste_lines(self, incoming):
-        t = self.text
-        selected = t.tag_ranges("sel")
-        first, last = map(str, selected) if selected else (t.index("insert"), t.index("insert"))
-        start_row, _ = self._row_col(first)
-        end_row, _ = self._row_col(last)
-        lines = self.d["lines"]
-        body = f"{start_row + 1}.{self._prefix_len(lines[start_row])}"
-        left = t.get(body, first) if t.compare(first, ">", body) else ""
-        body = f"{end_row + 1}.{self._prefix_len(lines[end_row])}"
-        right = t.get(last if t.compare(last, ">", body) else body, f"{end_row + 1}.end")
-        if incoming[0]["type"] == "text" and left:
-            incoming[0] = dict(lines[start_row], text=left + incoming[0]["text"])
-        elif incoming[0]["type"] == "todo" and left:
-            incoming.insert(0, dict(lines[start_row], text=left))
-        if (len(incoming) > 1 and incoming[-1]["type"] == "text" and
-                not incoming[-1]["text"] and last == f"{end_row + 1}.0"):
-            incoming[-1] = dict(lines[end_row], text="")
-        # 用 Tk 的字符计数定位，兼容 emoji 等占用多个 Tcl 字符的文字。
-        cursor_row = start_row + len(incoming)
-        cursor_col = self._prefix_len(incoming[-1]) + int(t.tk.call("string", "length", incoming[-1]["text"]))
-        incoming[-1]["text"] += right
-        lines[start_row:end_row + 1] = incoming
-        self.render(keep_cursor=False)
-        t.mark_set("insert", f"{cursor_row}.{cursor_col}")
-
-    def _select_all(self, _event):
-        self.text.tag_add("sel", "1.0", "end-1c")
-        self.text.mark_set("insert", "end-1c")
-        return "break"
-
-    def _paint_selection(self, _event=None):
-        # 原生选区保留复制/删除语义；背景只画文字，避开勾选框和换行后的空白。
-        t = self.text
-        t.tag_remove("selection_fill", "1.0", "end")
-        selected = t.tag_ranges("sel")
-        self._queue_strikes()
-        if not selected:
-            return
-        first, last = selected
-        for row in range(int(str(first).split(".")[0]), int(str(last).split(".")[0]) + 1):
-            start = first if t.compare(first, ">", f"{row}.0") else f"{row}.0"
-            if row <= len(self.d["lines"]) and self.d["lines"][row-1]["type"] == "todo":
-                text_start = f"{row}.{self._prefix_len(self.d['lines'][row-1])}"
-                if t.compare(start, "<", text_start):
-                    start = text_start
-            end = last if t.compare(last, "<", f"{row}.end") else f"{row}.end"
-            if t.compare(start, "<", end):
-                t.tag_add("selection_fill", start, end)
-
-    def _sync_lines_from_text(self):
-        # 选区删除和粘贴都可能改变多行，不能只保存光标所在行。
-        t = self.text
-        images = {index: t.image_cget(index, "image")
-                  for kind, name, index in t.dump("1.0", "end-1c", image=True)}
-        checkbox_images = {str(image) for image in self._check_slots.values()}
-        old = self.d["lines"]
-        lines = []
-        for row in range(1, int(t.index("end-1c").split(".")[0]) + 1):
-            image = images.get(f"{row}.0")
-            todo = image in checkbox_images
-            content = t.get(f"{row}.0", f"{row}.end")
-            if todo and content.startswith(PREFIX_PAD):
-                content = content[len(PREFIX_PAD):]
-            if (todo and not content and image == str(self._check_slots[True]) and
-                    row <= len(old) and old[row - 1]["type"] == "todo" and old[row - 1]["text"]):
-                image = str(self._check_slots[False])
-                t.image_configure(f"{row}.0", image=self._check_slots[False])
-                t.tag_remove("done", f"{row}.0", f"{row}.end")
-            lines.append({"type": "todo" if todo else "text", "text": content,
-                          "checked": todo and image == str(self._check_slots[True])})
-        self.d["lines"] = lines
-        if old != lines:
-            self.d["editedAt"] = datetime.now().isoformat(timespec="microseconds")
-        structure_changed = (len(old) != len(lines) or
-                             any(a["type"] != b["type"] for a, b in zip(old, lines)))
-        if structure_changed:
-            self.render()
-        else:
-            for row, line in enumerate(lines, 1):
-                if line["type"] == "todo":
-                    t.tag_add("todo_indent", f"{row}.0", f"{row}.end")
-            self.update_status()
-        self._remember_edit()
-
-    def _on_keyrelease(self, _e):
-        if self._ime_composing(self.text):
-            return
-        self._queue_strikes()
-        self._sync_lines_from_text()
-        if _e is None or _e.keysym not in ("Shift_L", "Shift_R", "Control_L", "Control_R", "Alt_L", "Alt_R"):
-            self._see_text("insert")
-        self.app.schedule_save()
-
-    def _on_enter(self, _e):
-        if self._ime_composing(self.text):
-            return
-        if self.text.tag_ranges("sel"):
-            self.text.delete("sel.first", "sel.last")
-        self._sync_lines_from_text()
-        row, col = self._row_col(self.text.index("insert"))
-        lines = self.d["lines"]
-        ln = lines[row]
-        pre = self._prefix_len(ln)
-        rel = max(0, col - pre)
-        left, right = ln["text"][:rel], ln["text"][rel:]
-        ln["text"] = left
-        lines.insert(row + 1, {"type": ln["type"], "text": right, "checked": False})
-        self.render(keep_cursor=False)
-        nrow = row + 2
-        self.text.mark_set("insert", f"{nrow}.0+{self._prefix_len(lines[row+1])}c")
-        self._see_text(f"{nrow}.0")
-        self.d["editedAt"] = datetime.now().isoformat(timespec="microseconds")
-        self.app.schedule_save()
-        return "break"
-
-    def _hide_strikes_before_delete(self, event):
-        if self._ime_composing(self.text):
-            return
-        t = self.text
-        selected = t.tag_ranges("sel")
-        for bar in self._strike_widgets:
-            row = bar._text_start.split(".")[0]
-            start, end = f"{row}.{1 + len(PREFIX_PAD)}", f"{row}.end"
-            if selected:
-                removes_text = (t.compare(selected[0], "<=", start) and
-                                t.compare(selected[1], ">=", end))
-            else:
-                position = end if event.keysym == "BackSpace" else start
-                removes_text = len(t.get(start, end)) == 1 and t.compare("insert", "==", position)
-            if removes_text:
-                bar.place_forget()
-                bar._layout_bounds = None
-
-    def _on_backspace(self, _e):
-        if self._ime_composing(self.text):
-            return
-        if self.text.tag_ranges("sel"):
-            return None  # 交给 Text 默认绑定删除选区，随后统一同步所有行。
-        row, col = self._row_col(self.text.index("insert"))
-        lines = self.d["lines"]
-        ln = lines[row]
-        if col <= self._prefix_len(ln) and row > 0:
-            prev = lines[row - 1]
-            target = self.text.index(f"{row}.end")
-            prev["text"] += ln["text"]
-            del lines[row]
-            self.render(keep_cursor=False)
-            self.text.mark_set("insert", target)
-            self._see_text("insert")
-            self.d["editedAt"] = datetime.now().isoformat(timespec="microseconds")
-            self.app.schedule_save()
-            return "break"
-        if ln["type"] == "todo" and col <= self._prefix_len(ln):
-            return "break"
-        return None
-
-    def _on_click(self, e):
-        self.focus_set(); self.text.focus_set()
-
-    def _local_shortcut(self, event):
-        modifiers = sum(value for mask, value in ((4, 2), (0x20000, 1), (1, 4)) if event.state & mask)
-        if (modifiers, event.keycode) == parse_hotkey(self.app.hotkey_text("convert")):
-            if event.type == tk.EventType.KeyRelease:
-                return "break"  # 转换已保存，松键不再走普通输入的同步和保存流程。
-            return self.toggle_line_type()
-
-    def _conversion_rows(self):
-        selected = self.text.tag_ranges("sel")
-        if not selected:
-            return [self._row_col(self.text.index("insert"))[0]]
-        first, _ = self._row_col(str(selected[0]))
-        last, col = self._row_col(str(selected[1]))
-        if col == 0 and last > first:
-            last -= 1
-        return list(range(first, last + 1))
-
-    def _conversion_target(self, rows):
-        todos = sum(self.d["lines"][row]["type"] == "todo" for row in rows)
-        return "text" if todos * 2 > len(rows) else "todo"
-
-    def toggle_line_type(self):
-        if self._ime_composing(self.text):
-            return "break"
-        self._sync_lines_from_text()
-        rows = self._conversion_rows()
-        self.convert_rows(rows, self._conversion_target(rows))
-        return "break"
-
-    def _on_rightclick(self, e):
-        if self._ime_composing(self.text):
-            return "break"
-        self.focus_set(); self.text.focus_set()
-        self._sync_lines_from_text()
-        try:
-            row, _ = self._row_col(self.text.index(f"@{e.x},{e.y}"))
-        except Exception:
-            return
-        lines = self.d["lines"]
-        if row >= len(lines):
-            return
-        if not self.text.tag_ranges("sel") or row not in self._conversion_rows():
-            self.text.tag_remove("sel", "1.0", "end")
-            self.text.mark_set("insert", self.text.index(f"@{e.x},{e.y}"))
-            self._clamp_todo_cursor()
-        rows = self._conversion_rows()
-        target = self._conversion_target(rows)
-        label = "转为文字" if target == "text" else "转为待办"
-        if len(rows) > 1:
-            label = f"全部{label}（{len(rows)} 行）"
-        actions = [
-            (label, lambda: self.convert_rows(rows, target)),
-            ("在下方插入新行", lambda: self.insert_line(row)),
-            ("删除此行", lambda: self.delete_line(row)),
-        ]
-        self._show_context_menu(e.x_root, e.y_root, actions, shortcuts={0: self.app.hotkey_text("convert")})
-
     def _show_context_menu(self, x, y, actions, shortcuts=None):
         shortcuts = shortcuts or {}
         old = getattr(self, "_context_menu", None)
@@ -2029,68 +2299,6 @@ class NoteWindow(tk.Toplevel):
         p.grab_set()
         p.focus_set()
 
-    def toggle_done(self, row):
-        ln = self.d["lines"][row]
-        ln["checked"] = not ln["checked"]
-        self.render()
-        self.d["editedAt"] = datetime.now().isoformat(timespec="microseconds")
-        self.app.schedule_save()
-
-    def convert(self, row, to):
-        self.convert_rows([row], to)
-
-    def convert_rows(self, rows, to):
-        if self._ime_composing(self.text):
-            return
-        t = self.text
-        positions = [t.index("insert"), *map(str, t.tag_ranges("sel"))]
-        positions = [index if t.compare(index, "<=", "end-1c") else t.index("end-1c")
-                     for index in positions]
-        anchors = []
-        for index in positions:
-            row, col = self._row_col(index)
-            body = f"{row+1}.{self._prefix_len(self.d['lines'][row])}"
-            count = t.count(body, index, "chars") if t.compare(index, ">", body) else None
-            anchors.append((row, count[0] if count else 0, col == 0))
-        for row in rows:
-            ln = self.d["lines"][row]
-            if to == "text" or ln["type"] != "todo":
-                ln["checked"] = False
-            ln["type"] = to
-        self.render(keep_cursor=False)
-        restored = [t.index(f"{row+1}.0" if at_start else
-                            f"{row+1}.{self._prefix_len(self.d['lines'][row]) + offset}")
-                    for row, offset, at_start in anchors]
-        t.mark_set("insert", restored[0])
-        if len(restored) == 3:
-            t.tag_add("sel", restored[1], restored[2])
-        self._clamp_todo_cursor()
-        self._remember_edit()
-        t.focus_set()
-        self._see_text("insert")
-        self.d["editedAt"] = datetime.now().isoformat(timespec="microseconds")
-        self.app.schedule_save()
-
-    def insert_line(self, row):
-        self.d["lines"].insert(row + 1, {"type": "text", "text": "", "checked": False})
-        self.render(keep_cursor=False)
-        self.text.mark_set("insert", f"{row+2}.0")
-        self._see_text("insert")
-        self.d["editedAt"] = datetime.now().isoformat(timespec="microseconds")
-        self.app.schedule_save()
-
-    def delete_line(self, row):
-        if len(self.d["lines"]) <= 1:
-            self.d["lines"] = [{"type": "text", "text": "", "checked": False}]
-        else:
-            del self.d["lines"][row]
-        self.render(keep_cursor=False)
-        row = min(row, len(self.d["lines"]) - 1)
-        self.text.mark_set("insert", f"{row+1}.{self._prefix_len(self.d['lines'][row])}")
-        self._see_text("insert")
-        self.d["editedAt"] = datetime.now().isoformat(timespec="microseconds")
-        self.app.schedule_save()
-
     def clear_done(self):
         self.app.archive_done(self)
 
@@ -2157,12 +2365,12 @@ class NoteWindow(tk.Toplevel):
             return self._resize_target[2:]
         return self.winfo_width(), self.winfo_height()
 
-    @staticmethod
-    def _resize_rectangle(rect, delta, edges, maximum):
+    def _resize_rectangle(self, rect, delta, edges, maximum):
         x, y, width, height = rect
         dx, dy = delta
         left, right, top, bottom = edges
-        w = min(maximum[0], max(280, width + dx if right else width - dx if left else width))
+        min_w = 520 if self.d.get("twoColumn") else 280  # 双栏每侧至少留出单栏的编辑宽度
+        w = min(maximum[0], max(min_w, width + dx if right else width - dx if left else width))
         h = min(maximum[1], max(230, height + dy if bottom else height - dy if top else height))
         return (x + width - w if left else x, y + height - h if top else y, w, h)
 
@@ -2191,7 +2399,8 @@ class NoteWindow(tk.Toplevel):
             # Keep the source allocation fixed. Only its three logical regions
             # reflow; the completed visible frame moves/resizes in one submission.
             self.geometry(f"{width}x{height}+{rect[0]}+{rect[1]}")
-            self._edge_fade.update(*self.body.yview())
+            for editor in self.editors:
+                editor._edge_fade.update(*editor.body.yview())
             self.update_idletasks()
             self._grab_resize_keys()
             self.cv.grab_set_global()
@@ -2286,16 +2495,16 @@ class NoteWindow(tk.Toplevel):
         self.update_idletasks()
         if not self.winfo_exists() or not self._resizing:
             return
-        body = self.body
-        fade = self._edge_fade
-        span = min(body.winfo_width(), max(0, self.scroll_thumb.winfo_x()-body.winfo_x()))
-        bottom_edge = min(body.winfo_y()+body.winfo_height(), self.bar.winfo_y())
-        rows = min(fade.height, max(0, bottom_edge-body.winfo_y()))
         regions = []
-        for bottom, visible in enumerate(fade._resize_visible):
-            if visible and span > 0 and rows > 0:
-                regions.append((body.winfo_x(), body.winfo_y() +
-                    (bottom_edge-body.winfo_y()-rows if bottom else 0), span, rows, bool(bottom)))
+        for editor in self.editors:
+            body, fade = editor.body, editor._edge_fade
+            span = min(body.winfo_width(), max(0, editor.scroll_thumb.winfo_x()-body.winfo_x()))
+            bottom_edge = min(body.winfo_y()+body.winfo_height(), self.bar.winfo_y())
+            rows = min(fade.height, max(0, bottom_edge-body.winfo_y()))
+            for bottom, visible in enumerate(fade._resize_visible):
+                if visible and span > 0 and rows > 0:
+                    regions.append((body.winfo_x(), body.winfo_y() +
+                        (bottom_edge-body.winfo_y()-rows if bottom else 0), span, rows, bool(bottom)))
         surface.present(self._resize_target, regions)
         self._resize_dirty = False
         if self._ime_active and self._ime_widget is not None:
@@ -2317,7 +2526,9 @@ class NoteWindow(tk.Toplevel):
     def _repair_resize_frame(self):
         # Only at the handover to the real window: invalidate Tk image clipping
         # caches after its native origin changes. Never walk this tree per frame.
-        images = {*self._check_images.values(), self._pill_image}
+        images = {self._pill_image}
+        for editor in self.editors:
+            images.update(editor._check_images.values())
         for button in self._tool_btns:
             images.update((button._image, button._active_image))
         for image in images:
@@ -2330,8 +2541,9 @@ class NoteWindow(tk.Toplevel):
                 widget.event_generate("<Expose>", x=0, y=0,
                                       width=widget.winfo_width(), height=widget.winfo_height())
         self.update_idletasks()
-        self._edge_fade._size = None
-        self._edge_fade.update(*self.body.yview())
+        for editor in self.editors:
+            editor._edge_fade._size = None
+            editor._edge_fade.update(*editor.body.yview())
         dwmapi.DwmFlush()  # one handover fence, not part of the drag-frame path
 
     def _finish_resize(self, cancel=False, redraw=True, hidden=False):
@@ -3160,17 +3372,17 @@ class HistoryWindow(tk.Toplevel):
                 data[mode] = [r for r in data[mode] if r[field] not in keys]
             self.app._store_history(change)
 
-    def label(self, text, bold=False):
-        label = tk.Label(self.content, text=text, bg=NOTE_BG, fg="#2B2F36",
+    def label(self, text, bold=False, parent=None):
+        label = tk.Label(parent or self.content, text=text, bg=NOTE_BG, fg="#2B2F36",
             font=(UI_FONT, 10, "bold") if bold else (UI_FONT, 10), justify="left", anchor="w")
         label.pack(fill="x", pady=(6, 4), padx=4)
         label.bind("<Configure>", lambda e: label.configure(wraplength=max(1, e.width-8)))
 
-    def preview_line(self, line):
+    def preview_line(self, line, parent=None):
         if line["type"] != "todo":
-            self.label(line["text"])
+            self.label(line["text"], parent=parent)
             return
-        row = tk.Frame(self.content, bg=NOTE_BG)
+        row = tk.Frame(parent or self.content, bg=NOTE_BG)
         row.pack(fill="x", padx=4, pady=(6, 4))
         marker = tk.Label(row, image=self._check_images[line["checked"]], bg=NOTE_BG)
         marker.pack(side="left", anchor="center", padx=(0, 8))
@@ -3178,6 +3390,15 @@ class HistoryWindow(tk.Toplevel):
                         font=(UI_FONT, 10), justify="left", anchor="w")
         text.pack(side="left", fill="x", expand=True)
         text.bind("<Configure>", lambda e: text.configure(wraplength=max(1, e.width-8)))
+
+    @staticmethod
+    def _preview_divider(canvas):
+        canvas.delete("all")
+        h = canvas.winfo_height()
+        if h > 48:
+            margin = 16
+            canvas.create_line(7, margin, 7, h - margin, fill="#C9CED5",
+                               width=4, capstyle="round")
 
     def select(self, _event=None):
         for child in self.content.winfo_children():
@@ -3196,8 +3417,23 @@ class HistoryWindow(tk.Toplevel):
             self.button(actions, "彻底删除", lambda: self.delete_record(note["id"])).pack(side="left")
             self.button(actions, "还原", lambda: self.app.recover_note(note["id"])).pack(side="left", padx=(8,0))
             self.label(note.get("title") or "无标题", True)
-            for line in note["lines"]:
-                self.preview_line(line)
+            if note.get("twoColumn"):
+                wrap = tk.Frame(self.content, bg=NOTE_BG)
+                wrap.pack(fill="both", expand=True)
+                left = tk.Frame(wrap, bg=NOTE_BG)
+                left.pack(side="left", fill="both", expand=True)
+                split = tk.Canvas(wrap, bg=NOTE_BG, width=14, highlightthickness=0, bd=0)
+                split.pack(side="left", fill="y")
+                split.bind("<Configure>", lambda e: self._preview_divider(e.widget))
+                right = tk.Frame(wrap, bg=NOTE_BG)
+                right.pack(side="left", fill="both", expand=True)
+                for line in note.get("lines") or []:
+                    self.preview_line(line, parent=left)
+                for line in note.get("lines2") or []:
+                    self.preview_line(line, parent=right)
+            else:
+                for line in note["lines"]:
+                    self.preview_line(line)
         else:
             for batch in records:
                 self.label("清除于 " + batch["clearedAt"].replace("T", " "), True)
@@ -3290,7 +3526,7 @@ class App:
             sw, sh = self.root.winfo_screenwidth(), self.root.winfo_screenheight()
             d["x"] = min(max(0, d["x"]), max(0, sw - 120))
             d["y"] = min(max(0, d["y"]), max(0, sh - 60))
-            d["w"] = max(d.get("w", 320), 300)  # 旧数据太窄会挤掉工具栏
+            d["w"] = max(d.get("w", 320), 520 if d.get("twoColumn") else 300)  # 旧数据太窄会挤掉工具栏
             d["h"] = max(d.get("h", 300), 240)
             if d.get("z") not in ("normal", "bottom", "top"):
                 d["z"] = "normal"
@@ -3302,9 +3538,10 @@ class App:
     def update_fonts(self):
         self.base_font.config(size=self.data["settings"]["fontSize"])
         for w in self.notes.values():
-            w.done_font.config(size=self.data["settings"]["fontSize"])
-            w._make_check_images()
-            w.render()
+            for editor in w.editors:
+                editor.done_font.config(size=self.data["settings"]["fontSize"])
+                editor._make_check_images()
+                editor.render()
 
     def set_opacity(self, percent):
         percent = min(100, max(50, 10 * round(percent / 10)))
@@ -3362,7 +3599,9 @@ class App:
 
     def archive_done(self, w):
         w._sync_lines_from_text()
-        done = [(i, deepcopy(line)) for i, line in enumerate(w.d["lines"])
+        keys = ("lines", "lines2") if w.d.get("twoColumn") else ("lines",)
+        done = [(key, i, deepcopy(line)) for key in keys
+                for i, line in enumerate(w.d.get(key) or [])
                 if line["type"] == "todo" and line["checked"]]
         if not done:
             return
@@ -3371,9 +3610,11 @@ class App:
             data["archives"].append({"id": str(uuid.uuid4()), "noteId": note["id"],
                 "title": note.get("title", ""), "editedAt": note.get("editedAt", ""),
                 "clearedAt": datetime.now().isoformat(timespec="seconds"),
-                "emptied": len(done) == len(note["lines"]),
-                "items": [{"index": i, "line": line} for i, line in done]})
-            note["lines"] = [line for line in note["lines"]
+                "emptied": len(done) == sum(len(note.get(key) or []) for key in keys),
+                "items": [{"col": 0 if key == "lines" else 1, "index": i, "line": line}
+                          for key, i, line in done]})
+            for key in keys:
+                note[key] = [line for line in note.get(key) or []
                              if not (line["type"] == "todo" and line["checked"])] or [
                                  {"type": "text", "text": "", "checked": False}]
         if self._store_history(change):
@@ -3422,16 +3663,17 @@ class App:
         def change(data):
             note = next(n for n in data["notes"] if n["id"] == note_id)
             items = batch["items"] if item_index is None else [batch["items"][item_index]]
-            if (item_index is not None or batch.get("emptied")) and note["lines"] == [
-                    {"type": "text", "text": "", "checked": False}]:
-                note["lines"] = []
             for item in items:
+                key = "lines2" if item.get("col") == 1 and note.get("twoColumn") else "lines"
+                if (item_index is not None or batch.get("emptied")) and note[key] == [
+                        {"type": "text", "text": "", "checked": False}]:
+                    note[key] = []
                 line = deepcopy(item["line"])
                 if item_index is None:
-                    note["lines"].insert(min(item["index"], len(note["lines"])), line)
+                    note[key].insert(min(item["index"], len(note[key])), line)
                 else:
                     line["checked"] = False
-                    note["lines"].append(line)
+                    note[key].append(line)
             note["editedAt"] = datetime.now().isoformat(timespec="microseconds")
             if item_index is None:
                 data["archives"] = [b for b in data["archives"] if b["id"] != batch_id]

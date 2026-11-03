@@ -809,7 +809,7 @@ class NoteEditingTests(unittest.TestCase):
         self.note.d["lines"] = [{"type": "text", "text": "", "checked": False}]
         self.note.render()
         self.app.root.update()
-        layout = self.note._layout_text
+        layout = self.note.editors[0]._layout_text
         visible = []
 
         def record_layout():
@@ -817,7 +817,7 @@ class NoteEditingTests(unittest.TestCase):
                 self.text.winfo_id(), -16) & 0x10000000))  # WS_VISIBLE
             layout()
 
-        with patch.object(self.note, "_layout_text", side_effect=record_layout):
+        with patch.object(self.note.editors[0], "_layout_text", side_effect=record_layout):
             for char in "abc":
                 self.text.insert("insert", char)
                 self.note._on_keyrelease(None)
@@ -1929,7 +1929,7 @@ class NoteEditingTests(unittest.TestCase):
                 text.mark_set("insert", "end-1c")
                 history = len(note._edit_history)
                 target = "text" if kinds.count("todo") * 2 > len(kinds) else "todo"
-                with patch.object(note, "render", wraps=note.render) as render, \
+                with patch.object(note.editors[0], "render", wraps=note.editors[0].render) as render, \
                         patch.object(self.app, "schedule_save") as save:
                     text.event_generate("<Control-Shift-L>")
                     text.event_generate("<KeyRelease>", keycode=76, state=5)
@@ -3388,6 +3388,8 @@ class NoteEditingTests(unittest.TestCase):
         self.assertEqual(body_heights_at_footer_move[-1], self.note.body.winfo_height())
 
     def test_title_grows_and_shrinks_while_editing_without_hiding_buttons(self):
+        self.note.geometry("543x477")  # 标题伸缩需要余量，按标准便签宽度验证
+        self.app.root.update()
         self.note.d["title"] = "日"
         self.note.edit_title()
         self.app.root.update()
@@ -3424,6 +3426,8 @@ class NoteEditingTests(unittest.TestCase):
         self.assertEqual(self.note.d["title"], title)
 
     def test_title_resizes_during_inline_ime_and_restores_on_cancel(self):
+        self.note.geometry("543x477")  # 标题伸缩需要余量，按标准便签宽度验证
+        self.app.root.update()
         self.note.d["title"] = "日"
         self.note.edit_title()
         self.app.root.update()
@@ -3534,6 +3538,74 @@ class NoteEditingTests(unittest.TestCase):
             if width == 280:
                 self.assertEqual(self.note.clear_btn.cget("text"), "清除完成")
         self.assertEqual(self.note.clear_btn.cget("text"), "清除已完成")
+
+    # ---- 单双栏切换 ----
+    def test_two_column_toggle_edits_and_merges_back(self):
+        note = self.note
+        note.d["lines"] = [{"type": "text", "text": "左栏", "checked": False},
+                           {"type": "todo", "text": "任务A", "checked": False}]
+        note.render()
+        note.toggle_columns()
+        self.app.root.update()
+        self.assertTrue(note.d["twoColumn"])
+        self.assertEqual(len(note.editors), 2)
+        self.assertEqual(note.d["lines2"], [{"type": "text", "text": "", "checked": False}])
+        self.assertGreater(note.winfo_width(), 320)  # 切换时自动加宽
+        self.assertEqual([l["text"] for l in note.d["lines"]], ["左栏", "任务A"])
+        # 两栏布局：左右等宽、中间隔条的圆头线上下留边不顶满
+        e0, e1 = note.editors
+        self.assertEqual(e0.body.winfo_width(), e1.body.winfo_width())
+        self.assertIsNotNone(note.divider)
+        (line,) = note.divider.find_all()
+        _, line_top, _, line_bottom = note.divider.coords(line)
+        self.assertGreater(line_top, 8)
+        self.assertLess(line_bottom, note.divider.winfo_height() - 8)
+        # 右栏独立编辑
+        e1.text.insert("end", "右栏内容")
+        e1._on_keyrelease(None)
+        self.app.root.update()
+        self.assertEqual(note.d["lines2"][0]["text"], "右栏内容")
+        # 切回单栏：右栏内容合并到左栏底部，宽度不缩
+        widened = note.winfo_width()
+        note.toggle_columns()
+        self.app.root.update()
+        self.assertFalse(note.d["twoColumn"])
+        self.assertNotIn("lines2", note.d)
+        self.assertEqual(len(note.editors), 1)
+        self.assertEqual(note.winfo_width(), widened)
+        self.assertEqual([l["text"] for l in note.d["lines"]], ["左栏", "任务A", "右栏内容"])
+
+    def test_two_column_clear_done_and_return_to_its_column(self):
+        note = self.note
+        note.toggle_columns()
+        self.app.root.update()
+        note.d["lines"] = [{"type": "todo", "text": "L", "checked": True}]
+        note.d["lines2"] = [{"type": "todo", "text": "R", "checked": True}]
+        note.render()
+        self.assertEqual(note.status.cget("text"), "待办 2/2")  # 状态汇总两栏
+        note.clear_done()
+        self.app.root.update()
+        batch = self.app.data["archives"][-1]
+        self.assertEqual([item["col"] for item in batch["items"]], [0, 1])
+        self.assertFalse(any(l["type"] == "todo" and l["checked"]
+                             for l in note.d["lines"] + note.d["lines2"]))
+        self.app.return_archive(batch["id"])
+        self.app.root.update()
+        self.assertEqual([l["text"] for l in note.d["lines"]], ["L"])
+        self.assertEqual([l["text"] for l in note.d["lines2"]], ["R"])
+
+    def test_two_column_note_round_trips_through_recycle_bin(self):
+        note = self.note
+        note.toggle_columns()
+        self.app.root.update()
+        note_id = note.d["id"]
+        note.delete_self()
+        self.app.root.update()
+        deleted = next(n for n in self.app.data["deletedNotes"] if n["id"] == note_id)
+        self.assertTrue(deleted.get("twoColumn"))
+        self.assertTrue(self.app.recover_note(note_id))
+        self.app.root.update()
+        self.assertEqual(len(self.app.notes[note_id].editors), 2)
 
 
 if __name__ == "__main__":
