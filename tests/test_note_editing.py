@@ -1230,11 +1230,12 @@ class NoteEditingTests(unittest.TestCase):
                 labels.append(widget)
         for widget in (settings, labels[0]):
             x, y = settings.winfo_x(), settings.winfo_y()
-            widget.event_generate("<Button-1>", x=5, y=5)
-            widget.event_generate("<B1-Motion>", x=35, y=25)
+            px, py = (settings.winfo_width()//2, 35) if widget is settings else (5, 5)
+            widget.event_generate("<Button-1>", x=px, y=py)
+            widget.event_generate("<B1-Motion>", x=px+30, y=py+20)
             self.app.root.update()
             self.assertEqual((settings.winfo_x(), settings.winfo_y()), (x + 30, y + 20))
-            widget.event_generate("<ButtonRelease-1>", x=35, y=25)
+            widget.event_generate("<ButtonRelease-1>", x=px+30, y=py+20)
         x, y = settings.winfo_x(), settings.winfo_y()
         scale = self.app.opacity_scale
         scale.event_generate("<Button-1>", x=12, y=14)
@@ -1351,18 +1352,16 @@ class NoteEditingTests(unittest.TestCase):
             for scale, screen_w, screen_h in ((scale, w, h)
                     for w, h in ((1280, 900), (800, 600))
                     for scale in (1, 1.25, 1.5, 2, 2.5, 3, 4)):
-                def work_area(_action, _param, rect, _flags):
-                    rect._obj.left, rect._obj.top = 0, 0
-                    rect._obj.right, rect._obj.bottom = screen_w, screen_h
-                    return True
                 with self.subTest(scale=scale, screen=(screen_w, screen_h)), patch.object(
-                        main.user32, "SystemParametersInfoW", side_effect=work_area), patch.object(
+                        main.SettingsWindow, "_work_area", return_value=main.wintypes.RECT(0, 0, screen_w, screen_h)), patch.object(
                         main, "DATA_FILE", "C:/" + "很长的用户目录/" * 20 + "notes.json"):
                     self.app.root.tk.call("tk", "scaling", scale * 96 / 72)
                     settings = main.SettingsWindow(self.app)
                     try:
                         self.app.root.update()
-                        self.assertGreaterEqual(settings.winfo_width(), 720)
+                        ui_scale = max(1, round(settings.winfo_fpixels("1i"))/96)
+                        self.assertGreaterEqual(settings.winfo_width(),
+                            min(round(480*ui_scale), screen_w-2*round(16*ui_scale)))
                         self.assertLessEqual(settings.winfo_width(), screen_w - 32)
                         self.assertLessEqual(settings.winfo_height(), screen_h - 32)
                         for entry in settings.hotkey_entries.values():
@@ -1530,7 +1529,9 @@ class NoteEditingTests(unittest.TestCase):
     def test_history_drag_ignores_controls_and_thumb_matches_view(self):
         win = main.HistoryWindow(self.app)
         self.app.root.update()
-        event = lambda widget: type("Event", (), {"widget":widget,"x_root":100,"y_root":100})()
+        event = lambda widget: type("Event", (), {"widget":widget,
+            "x_root":widget.winfo_rootx()+widget.winfo_width()//2,
+            "y_root":widget.winfo_rooty()+widget.winfo_height()//2})()
         main.SettingsWindow._drag_press(win, event(win.hint))
         self.assertIsNotNone(win._drag)
         for widget in (win._close_button,win._minimize_button,win.batch_button,win.left.bars["y"]):
@@ -1634,86 +1635,120 @@ class NoteEditingTests(unittest.TestCase):
                                    text.winfo_y() + text.winfo_height()/2, delta=2)
         win.destroy()
 
-    def test_dialog_corner_resize_hit_regions(self):
+    def test_dialogs_ignore_all_resize_edges_and_keep_fixed_size(self):
         for cls in (main.SettingsWindow, main.HistoryWindow):
             win = cls(self.app)
             self.app.root.update()
             w, h = win.winfo_width(), win.winfo_height()
-            cases = [
-                (12, 12, (True, False, True, False), "size_nw_se"),
-                (w-12, 12, (False, True, True, False), "size_ne_sw"),
-                (12, h-12, (True, False, False, True), "size_ne_sw"),
-                (w-12, h-12, (False, True, False, True), "size_nw_se"),
-                (main.CORNER-1, main.CORNER-1, (True, False, True, False), "size_nw_se"),
-                (main.CORNER, main.CORNER, (False, False, False, False), ""),
-                (w-main.CORNER, h-main.CORNER, (False, False, False, False), ""),
-                (2, h/2, (True, False, False, False), "size_we"),
-                (w-2, h/2, (False, True, False, False), "size_we"),
-                (w/2, 2, (False, False, True, False), "size_ns"),
-                (w/2, h-2, (False, False, False, True), "size_ns"),
-                (w/2, h/2, (False, False, False, False), ""),
-            ]
-            cases.extend((x, y, (False, False, False, False), "")
-                         for x, y in ((-1, 2), (w+1, 2), (2, -1), (2, h+1)))
-            for x, y, edges, cursor in cases:
-                with self.subTest(window=cls.__name__, x=x, y=y):
-                    event = type("Event", (), {"x_root": win.winfo_rootx()+x,
-                                               "y_root": win.winfo_rooty()+y})()
-                    self.assertEqual(main.SettingsWindow._resize_edges(win, event), (edges, cursor))
+            origin = win.winfo_x(), win.winfo_y()
+            self.assertEqual(win.minsize(), (w, h))
+            self.assertEqual(win.maxsize(), (w, h))
+            self.assertFalse(any(win.resizable()))
+            for px, py in ((2, h//2), (w-2, h//2), (w//2, 2), (w//2, h-2),
+                           (12, 12), (w-12, 12), (12, h-12), (w-12, h-12)):
+                with self.subTest(window=cls.__name__, point=(px, py)):
+                    event = type("Pointer", (), dict(widget=win, x_root=origin[0]+px, y_root=origin[1]+py))()
+                    main.SettingsWindow._drag_press(win, event)
+                    event.x_root += 60
+                    event.y_root += 40
+                    main.SettingsWindow._drag_move(win, event)
+                    self.app.root.update()
+                    self.assertEqual((win.winfo_x(), win.winfo_y()), origin)
+                    self.assertEqual((win.winfo_width(), win.winfo_height()), (w, h))
+                    self.assertIsNone(win._resize)
+                    self.assertNotIn(win.cget("cursor"), ("size_we", "size_ns", "size_nw_se", "size_ne_sw"))
+            win.geometry(f"{w+120}x{h+80}")
+            self.app.root.update()
+            self.assertEqual((win.winfo_width(), win.winfo_height()), (w, h))
             win.destroy()
 
-    def test_dialogs_drag_all_enlarged_corner_regions(self):
-        for cls in (main.SettingsWindow, main.HistoryWindow):
-            win = cls(self.app)
-            for left, top in ((True, True), (False, True), (True, False), (False, False)):
-                self.app.root.update()
-                w, h = win.winfo_width(), win.winfo_height()
-                x, y = win.winfo_x(), win.winfo_y()
-                event = type("Event", (), {"widget": win,
-                    "x_root": win.winfo_rootx() + (12 if left else w-12),
-                    "y_root": win.winfo_rooty() + (12 if top else h-12)})()
-                main.SettingsWindow._drag_press(win, event)
-                self.assertIsNotNone(win._resize)
-                event.x_root += -30 if left else 30
-                event.y_root += -20 if top else 20
-                main.SettingsWindow._drag_move(win, event)
-                self.app.root.update()
-                self.assertEqual((win.winfo_width(), win.winfo_height()), (w+30, h+20))
-                self.assertEqual((win.winfo_x(), win.winfo_y()),
-                                 (x-30 if left else x, y-20 if top else y))
-                win.event_generate("<ButtonRelease-1>")
-                self.assertIsNone(win._resize)
-            win.destroy()
-
-    def test_dialogs_resize_from_edges_and_reflow_content(self):
+    def test_fixed_dialogs_can_still_move_from_the_header(self):
         for cls in (main.SettingsWindow, main.HistoryWindow):
             win = cls(self.app)
             self.app.root.update()
-            old_w, old_h = win.winfo_width(), win.winfo_height()
-            event = type("Event", (), {"widget": win, "x_root": win.winfo_rootx()+old_w-2,
-                                       "y_root": win.winfo_rooty()+old_h-2})()
+            x, y, w, h = win.winfo_x(), win.winfo_y(), win.winfo_width(), win.winfo_height()
+            event = type("Pointer", (), dict(widget=win, x_root=x+w//2, y_root=y+35))()
             main.SettingsWindow._drag_press(win, event)
-            self.assertIsNotNone(win._resize)
-            event.x_root += 120
-            event.y_root += 80
+            event.x_root += 35
+            event.y_root += 25
             main.SettingsWindow._drag_move(win, event)
+            win.event_generate("<ButtonRelease-1>")
             self.app.root.update()
-            self.assertEqual((win.winfo_width(), win.winfo_height()), (old_w+120, old_h+80))
-            min_w, min_h = win.minsize()
-            win.geometry(f"{min_w}x{min_h}")
-            self.app.root.update()
-            if cls == main.HistoryWindow:
-                self.assertLessEqual(win.right.winfo_rootx()+win.right.winfo_width(),
-                                     win.winfo_rootx()+win.winfo_width())
-            else:
-                body = next(w for w in win.winfo_children() if isinstance(w, main.tk.Canvas)
-                            and w.find_all() and w.type(w.find_all()[0]) == "window")
-                self.assertEqual(body.winfo_width(), min_w-2*main.RADIUS-next(w for w in win.winfo_children() if isinstance(w, main.VerticalThumb)).winfo_reqwidth()-4)
-                self.assertLess(body.yview()[1], 1)
-                body.yview_moveto(1)
-                self.app.root.update()
-                self.assertAlmostEqual(body.yview()[1], 1)
+            self.assertEqual((win.winfo_x(), win.winfo_y()), (x+35, y+25))
+            self.assertEqual((win.winfo_width(), win.winfo_height()), (w, h))
+            self.assertIsNone(win._drag)
             win.destroy()
+
+    def test_fixed_dialogs_fit_work_area_across_font_dpi_and_screen_sizes(self):
+        original_scaling = self.app.root.tk.call("tk", "scaling")
+        widths = {main.SettingsWindow: [], main.HistoryWindow: []}
+        for dpi in (96, 120, 144, 192, 240):
+            with patch.object(main, "load_data", return_value={
+                    "settings": dict(main.DEFAULT_SETTINGS, uiDpi=dpi), "notes": []}), \
+                    patch.object(main.Tooltip, "_font", None):
+                scaled = main.App()
+            try:
+                for sw, sh in ((800, 600), (1366, 768), (1920, 1080)):
+                    work = main.wintypes.RECT(0, 0, sw, sh)
+                    for cls in (main.SettingsWindow, main.HistoryWindow):
+                        with self.subTest(dpi=dpi, screen=(sw, sh), window=cls.__name__), \
+                                patch.object(main.SettingsWindow, "_work_area", return_value=work):
+                            win = cls(scaled)
+                            scaled.root.update()
+                            x, y, w, h = win.winfo_x(), win.winfo_y(), win.winfo_width(), win.winfo_height()
+                            self.assertGreater(w, 0)
+                            self.assertGreater(h, 0)
+                            self.assertGreaterEqual(x, 0)
+                            self.assertGreaterEqual(y, 0)
+                            self.assertLessEqual(x+w, sw)
+                            self.assertLessEqual(y+h, sh)
+                            self.assertEqual(win.minsize(), win.maxsize())
+                            if sw == 1920:
+                                widths[cls].append(w)
+                            if cls is main.SettingsWindow:
+                                thumb = next(child for child in win.winfo_children() if isinstance(child, main.VerticalThumb))
+                                body = thumb.target
+                                for entry in win.hotkey_entries.values():
+                                    self.assertGreaterEqual(entry.winfo_rootx(), body.winfo_rootx())
+                                    self.assertLessEqual(entry.winfo_rootx()+entry.winfo_width(), body.winfo_rootx()+body.winfo_width())
+                                body.yview_moveto(1)
+                                scaled.root.update()
+                                self.assertAlmostEqual(body.yview()[1], 1)
+                            else:
+                                self.assertLessEqual(win.right.winfo_rootx()+win.right.winfo_width(), win.winfo_rootx()+w)
+                                self.assertLessEqual(win.batch_button.winfo_rootx()+win.batch_button.winfo_width(), win.winfo_rootx()+w)
+                            win.destroy()
+            finally:
+                for job in scaled.root.tk.call("after", "info"):
+                    scaled.root.tk.call("after", "cancel", job)
+                scaled.root.destroy()
+                self.app.root.tk.call("tk", "scaling", original_scaling)
+        for cls, values in widths.items():
+            self.assertEqual(values, sorted(values))
+            self.assertGreater(values[-1], values[0]*1.7, cls.__name__)
+
+    def test_dialog_work_area_uses_the_pointer_monitor_and_primary_fallback(self):
+        class MonitorInfo(main.ctypes.Structure):
+            _fields_ = [("size", main.wintypes.DWORD), ("monitor", main.wintypes.RECT),
+                        ("work", main.wintypes.RECT), ("flags", main.wintypes.DWORD)]
+        def monitor_info(handle, pointer):
+            info = main.ctypes.cast(pointer, main.ctypes.POINTER(MonitorInfo)).contents
+            info.work = main.wintypes.RECT(-1920, 40, 0, 1080)
+            return True
+        with patch.object(main, "cursor_pos", return_value=(-500, 200)), \
+                patch.object(main.user32, "MonitorFromPoint", return_value=123) as monitor, \
+                patch.object(main.user32, "GetMonitorInfoW", side_effect=monitor_info):
+            work = main.SettingsWindow._work_area(self.note)
+        self.assertEqual((work.left, work.top, work.right, work.bottom), (-1920, 40, 0, 1080))
+        self.assertEqual((monitor.call_args.args[0].x, monitor.call_args.args[0].y), (-500, 200))
+        def primary(action, unused, pointer, flags):
+            main.ctypes.cast(pointer, main.ctypes.POINTER(main.wintypes.RECT)).contents.right = 1200
+            return True
+        with patch.object(main.user32, "GetMonitorInfoW", return_value=False), \
+                patch.object(main.user32, "SystemParametersInfoW", side_effect=primary) as fallback:
+            work = main.SettingsWindow._work_area(self.note)
+        self.assertEqual(work.right, 1200)
+        self.assertEqual(fallback.call_args.args[0], 48)
 
     def test_history_duplicate_name_suffix_only_shows_seconds(self):
         from copy import deepcopy
@@ -1748,7 +1783,8 @@ class NoteEditingTests(unittest.TestCase):
                 self.assertLessEqual(bounds[3], thumb.winfo_height())
 
     def test_settings_scroll_thumb_tracks_drag_wheel_and_overflow(self):
-        win = main.SettingsWindow(self.app)
+        with patch.object(main.SettingsWindow, "_work_area", return_value=main.wintypes.RECT(0, 0, 1024, 600)):
+            win = main.SettingsWindow(self.app)
         self.app.root.update()
         thumb = next(w for w in win.winfo_children() if isinstance(w, main.VerticalThumb))
         body = thumb.target
@@ -1771,13 +1807,22 @@ class NoteEditingTests(unittest.TestCase):
         thumb.event_generate("<MouseWheel>", delta=-120)
         self.app.root.update()
         self.assertGreater(body.yview()[0], 0)
+        body.yview_moveto(0)
+        self.app.root.update()
         content = next(w for w in body.winfo_children() if isinstance(w, main.tk.Frame))
-        win.geometry(f"{min_w}x{content.winfo_reqheight()+2*main.RADIUS+40}")
+        packed = [(child, child.pack_info()) for child in content.winfo_children()]
+        for child, _ in packed:
+            child.pack_forget()
+        placeholder = main.tk.Label(content, text="短内容")
+        placeholder.pack()
         self.app.root.update()
         self.assertFalse(thumb.winfo_ismapped())
         self.assertEqual(body.yview(), (0.0, 1.0))
-        win.geometry(f"{min_w}x{min_h}")
+        placeholder.destroy()
+        for child, options in packed:
+            child.pack(**options)
         self.app.root.update()
+        self.assertEqual((win.winfo_width(), win.winfo_height()), (min_w, min_h))
         self.assertTrue(thumb.winfo_ismapped())
         self.assertTrue(thumb.find_withtag("thumb"))
         win.destroy()
