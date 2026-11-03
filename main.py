@@ -641,7 +641,7 @@ class NoteEditor:
     def lines(self):
         if self.col == 0:
             return self.d["lines"]
-        return self.d.setdefault("lines2", [{"type": "text", "text": "", "checked": False}])
+        return self.d.setdefault("lines2", [{"type": "todo", "text": "", "checked": False}])
 
     @lines.setter
     def lines(self, value):
@@ -678,6 +678,12 @@ class NoteEditor:
     def _body_configured(self, event):
         changed = event.width != getattr(self, "_body_width", None)
         self._body_width = event.width
+        previous_x = getattr(self, "_body_x", None)
+        self._body_x = event.x
+        if previous_x is not None and previous_x != event.x:
+            # 右栏随分隔线移动后，Tk 的透明图标可能沿用旧的裁剪区域。
+            for image in self._check_images.values():
+                image.paste(ImageTk.getimage(image))
         self._queue_strikes(measure=changed)
 
     def _text_scrolled(self, first, last):
@@ -1065,7 +1071,7 @@ class NoteEditor:
     # ---- 底部添加条 ----
     def add_todo(self):
         row = int(self.text.index("insert").split(".")[0])
-        self.lines.insert(row, {"type": "todo", "text": "", "checked": False})
+        self.lines.insert(row, dict(self.lines[row - 1], type="todo", text="", checked=False))
         self.render(keep_cursor=False)
         self.text.mark_set("insert", f"{row+1}.0+{self._prefix_len(self.lines[row])}c")
         self._see_text(f"{row+1}.0")
@@ -1082,6 +1088,7 @@ class NoteEditor:
         old_chunk = self._chunk_start
         top = self.text.dlineinfo(view)
         self.text.delete("1.0", "end")
+        self.text.tag_remove("merged_right", "1.0", "end")
         lines = self.lines or [{"type": "text", "text": "", "checked": False}]
         self.lines = lines
         for i, ln in enumerate(lines):
@@ -1096,6 +1103,9 @@ class NoteEditor:
                 self.text.tag_add("done", f"{row}.{self._prefix_len(ln)}", f"{row}.end")
             if i < len(lines) - 1:
                 self.text.insert("end", "\n")
+        for row, ln in enumerate(lines, 1):
+            if ln.get("mergedColumn") == 1:
+                self.text.tag_add("merged_right", f"{row}.0", f"{row+1}.0")
         if keep_cursor:
             end = self.text.index("end-1c")
             if self.text.compare(cur, ">", end):
@@ -1203,7 +1213,16 @@ class NoteEditor:
                 return "break"
         if command == "tk_textPaste" and self.text.tag_ranges("sel"):
             self.text.mark_set("insert", "sel.first")
+        if command == "tk_textPaste":
+            row, _ = self._row_col(t.index("insert"))
+            paste_right = self.lines[row].get("mergedColumn") == 1
+            t.mark_set("column_paste_start", "insert")
+            t.mark_gravity("column_paste_start", "left")
         self.text.tk.call(command, self.text)
+        if command == "tk_textPaste":
+            if paste_right:
+                t.tag_add("merged_right", "column_paste_start", "insert")
+            t.mark_unset("column_paste_start")
         self._on_keyrelease(None)
         return "break"
 
@@ -1214,6 +1233,9 @@ class NoteEditor:
         start_row, _ = self._row_col(first)
         end_row, _ = self._row_col(last)
         lines = self.lines
+        if lines[start_row].get("mergedColumn") == 1:
+            for line in incoming:
+                line["mergedColumn"] = 1
         body = f"{start_row + 1}.{self._prefix_len(lines[start_row])}"
         left = t.get(body, first) if t.compare(first, ">", body) else ""
         body = f"{end_row + 1}.{self._prefix_len(lines[end_row])}"
@@ -1278,6 +1300,9 @@ class NoteEditor:
                 t.tag_remove("done", f"{row}.0", f"{row}.end")
             lines.append({"type": "todo" if todo else "text", "text": content,
                           "checked": todo and image == str(self._check_slots[True])})
+            if ("merged_right" in t.tag_names(f"{row}.0") or
+                    t.tag_nextrange("merged_right", f"{row}.0", f"{row+1}.0")):
+                lines[-1]["mergedColumn"] = 1
         self.lines = lines
         if old != lines:
             self.d["editedAt"] = datetime.now().isoformat(timespec="microseconds")
@@ -1314,7 +1339,7 @@ class NoteEditor:
         rel = max(0, col - pre)
         left, right = ln["text"][:rel], ln["text"][rel:]
         ln["text"] = left
-        lines.insert(row + 1, {"type": ln["type"], "text": right, "checked": False})
+        lines.insert(row + 1, dict(ln, text=right, checked=False))
         self.render(keep_cursor=False)
         nrow = row + 2
         self.text.mark_set("insert", f"{nrow}.0+{self._prefix_len(lines[row+1])}c")
@@ -1467,7 +1492,7 @@ class NoteEditor:
         self.app.schedule_save()
 
     def insert_line(self, row):
-        self.lines.insert(row + 1, {"type": "text", "text": "", "checked": False})
+        self.lines.insert(row + 1, dict(self.lines[row], type="text", text="", checked=False))
         self.render(keep_cursor=False)
         self.text.mark_set("insert", f"{row+2}.0")
         self._see_text("insert")
@@ -1583,7 +1608,7 @@ class NoteWindow(tk.Toplevel):
         # 编辑器在状态栏之后创建：render 会立即更新底部状态文字。
         self.editors = [NoteEditor(self, 0)]
         if self.d.get("twoColumn"):
-            self.d.setdefault("lines2", [{"type": "text", "text": "", "checked": False}])
+            self.d.setdefault("lines2", [{"type": "todo", "text": "", "checked": False}])
             self.editors.append(NoteEditor(self, 1))
         self._draw_chip()
 
@@ -1752,14 +1777,15 @@ class NoteWindow(tk.Toplevel):
             height = max(20, bar_y - text_y)
             if len(self.editors) > 1:
                 gap = 14
-                col_w = (avail - gap) // 2
+                left_w = (avail - gap) // 2
                 for i, editor in enumerate(self.editors):
-                    x = ix + i * (col_w + gap)
+                    col_w = left_w if i == 0 else max(1, avail - gap - left_w)
+                    x = ix if i == 0 else ix + left_w + gap
                     editor.body.place(x=x, y=text_y, width=col_w, height=height)
-                    editor.scroll_thumb.place(x=x + col_w - 6, y=text_y + 4,
+                    editor.scroll_thumb.place(x=x + col_w - 10, y=text_y + 4,
                                               width=8, height=max(12, height - 8))
                     tk.Misc.lift(editor.scroll_thumb)
-                self._layout_divider(ix + col_w, text_y, height)
+                self._layout_divider(ix + left_w, text_y, height)
             else:
                 self.editors[0].body.place(x=ix, y=text_y, width=avail, height=height)
                 self.editors[0].scroll_thumb.place(x=w - RADIUS - 10, y=text_y + 4,
@@ -2173,11 +2199,8 @@ class NoteWindow(tk.Toplevel):
         if self.d.get("twoColumn"):
             for editor in self.editors:
                 editor._sync_lines_from_text()
-            keep = [ln for ln in self.d.get("lines2") or [] if ln["text"].strip()]
-            lines = self.d["lines"]
-            if keep and lines and lines[-1]["type"] == "text" and not lines[-1]["text"].strip():
-                lines.pop()  # 去掉左栏末尾的空行，合并后不留缝
-            self.d["lines"] = lines + keep
+            # 合并显示时保留每行归属，空行与空待办也参与往返还原。
+            self.d["lines"] += [dict(line, mergedColumn=1) for line in self.d["lines2"]]
             self.d["twoColumn"] = False
             self.d.pop("lines2", None)
             self.editors[1].teardown()
@@ -2186,18 +2209,27 @@ class NoteWindow(tk.Toplevel):
                 self.divider.destroy()
                 self.divider = None
             self.editors[0].render(keep_cursor=False)
+            # 旧双栏数据未记录原宽度，按旧版扩宽比例还原。
+            self.d["w"] = self.d.pop("singleColumnWidth", max(280, round(self.winfo_width() / 1.8)))
+            self.geometry(f"{self.d['w']}x{self.winfo_height()}+{self.winfo_x()}+{self.winfo_y()}")
         else:
             self.editors[0]._sync_lines_from_text()
+            self.d["singleColumnWidth"] = self.winfo_width()
+            right = [dict(line) for line in self.d["lines"] if line.get("mergedColumn") == 1]
+            self.d["lines"] = [line for line in self.d["lines"] if line.get("mergedColumn") != 1]
+            for line in right:
+                line.pop("mergedColumn")
             self.d["twoColumn"] = True
-            self.d["lines2"] = [{"type": "text", "text": "", "checked": False}]
+            self.d["lines2"] = right or [{"type": "todo", "text": "", "checked": False}]
+            self.editors[0].render(keep_cursor=False)
             self.editors.append(NoteEditor(self, 1))
-            # 自动加宽约 1.8 倍，加宽后整体保持在工作区内。
+            # 自动适度加宽，加宽后整体保持在工作区内。
             sw = self.winfo_screenwidth()
-            new_w = min(round(self.d["w"] * 1.8), sw - 24)
-            if new_w > self.d["w"]:
+            new_w = min(max(520, round(self.d["singleColumnWidth"] * 1.6)), sw - 24)
+            if new_w > self.winfo_width():
                 self.d["w"] = new_w
-                self.d["x"] = min(self.d["x"], max(0, sw - new_w))
-                self.geometry(f"{new_w}x{self.d['h']}+{self.d['x']}+{self.d['y']}")
+                self.d["x"] = min(self.winfo_x(), max(0, sw - new_w))
+                self.geometry(f"{new_w}x{self.winfo_height()}+{self.d['x']}+{self.winfo_y()}")
         self._last_sz = None
         self.update_idletasks()
         self._relayout()
@@ -2485,6 +2517,7 @@ class NoteWindow(tk.Toplevel):
         surface = self._resize_surface
         if not surface:
             return
+        previous_column_x = self.editors[1].body.winfo_x() if len(self.editors) > 1 else None
         x, y, width, height = self._resize_target
         if surface.ensure_capacity(width, height):
             sx, sy = self._resize_start[0][:2]
@@ -2495,6 +2528,17 @@ class NoteWindow(tk.Toplevel):
         self.update_idletasks()
         if not self.winfo_exists() or not self._resizing:
             return
+        if previous_column_x is not None and self.editors[1].body.winfo_x() != previous_column_x:
+            # 分隔线移动会使 Tk 子窗口复制旧像素；提交前只补绘正文区域。
+            widgets = [self.divider]
+            for editor in self.editors:
+                widgets.extend((editor.body, editor.text, editor.scroll_thumb))
+            for widget in widgets:
+                widget.event_generate("<Expose>", x=0, y=0,
+                                      width=widget.winfo_width(), height=widget.winfo_height())
+            self.update_idletasks()
+            if not self.winfo_exists() or not self._resizing:
+                return
         regions = []
         for editor in self.editors:
             body, fade = editor.body, editor._edge_fade
@@ -3511,7 +3555,7 @@ class App:
         if not self.data["notes"] and not self.data["archives"] and not self.data["deletedNotes"]:
             sw, sh = self.root.winfo_screenwidth(), self.root.winfo_screenheight()
             self.data["notes"].append({
-                "id": str(uuid.uuid4()), "x": sw - 360, "y": 90, "w": 320, "h": 340,
+                "id": str(uuid.uuid4()), "x": sw - 340, "y": 90, "w": 300, "h": 340,
                 "z": "top", "opacity": self.data["settings"]["opacity"],
                 "color": self.data["settings"]["color"], "visible": True,
                 "lines": [
@@ -3564,7 +3608,7 @@ class App:
         off = 24 * (self._cascade % 6); self._cascade += 1
         d = {"id": str(uuid.uuid4()),
              "x": min(cx + off, sw - 240), "y": min(cy + off, sh - 200),
-             "w": 543, "h": 477, "z": "normal",
+             "w": 440, "h": 477, "z": "normal",
              "opacity": self.data["settings"]["opacity"],
              "color": self.data["settings"]["color"], "visible": True,
              "editedAt": datetime.now().isoformat(timespec="microseconds"),

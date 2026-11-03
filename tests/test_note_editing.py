@@ -46,11 +46,11 @@ class NoteEditingTests(unittest.TestCase):
             if y < self.note.body.winfo_height() and y + box[3] > 0:
                 return box[0], y, box[2], box[3]
 
-    def test_new_note_uses_larger_default_size(self):
+    def test_new_note_uses_compact_default_width(self):
         note = self.app.new_note()
         self.app.root.update()
-        self.assertEqual((note.d["w"], note.d["h"]), (543, 477))
-        self.assertEqual((note.winfo_width(), note.winfo_height()), (543, 477))
+        self.assertEqual((note.d["w"], note.d["h"]), (440, 477))
+        self.assertEqual((note.winfo_width(), note.winfo_height()), (440, 477))
 
     def test_new_note_is_visible_without_pinning(self):
         note = self.app.new_note()
@@ -193,6 +193,7 @@ class NoteEditingTests(unittest.TestCase):
         self.assertTrue(self.note.d["visible"])
         self.assertEqual(self.note.state(), "normal")
         self.assertTrue(self.note.attributes("-topmost"))
+        self.assertEqual(self.note.winfo_width(), 300)
 
     def test_show_all_raises_notes_and_preserves_pinning(self):
         import subprocess
@@ -3542,6 +3543,7 @@ class NoteEditingTests(unittest.TestCase):
     # ---- 单双栏切换 ----
     def test_two_column_toggle_edits_and_merges_back(self):
         note = self.note
+        original_width = note.winfo_width()
         note.d["lines"] = [{"type": "text", "text": "左栏", "checked": False},
                            {"type": "todo", "text": "任务A", "checked": False}]
         note.render()
@@ -3549,8 +3551,10 @@ class NoteEditingTests(unittest.TestCase):
         self.app.root.update()
         self.assertTrue(note.d["twoColumn"])
         self.assertEqual(len(note.editors), 2)
-        self.assertEqual(note.d["lines2"], [{"type": "text", "text": "", "checked": False}])
-        self.assertGreater(note.winfo_width(), 320)  # 切换时自动加宽
+        self.assertEqual(note.d["lines2"], [{"type": "todo", "text": "", "checked": False}])
+        self.assertEqual(len(note.editors[1]._checkbox_widgets), 1)
+        self.assertGreater(note.winfo_width(), original_width)  # 切换时自动加宽
+        self.assertEqual(note.winfo_width(), max(520, round(original_width * 1.6)))
         self.assertEqual([l["text"] for l in note.d["lines"]], ["左栏", "任务A"])
         # 两栏布局：左右等宽、中间隔条的圆头线上下留边不顶满
         e0, e1 = note.editors
@@ -3565,15 +3569,214 @@ class NoteEditingTests(unittest.TestCase):
         e1._on_keyrelease(None)
         self.app.root.update()
         self.assertEqual(note.d["lines2"][0]["text"], "右栏内容")
-        # 切回单栏：右栏内容合并到左栏底部，宽度不缩
-        widened = note.winfo_width()
+        # 切回单栏：合并右栏内容，并恢复分栏前的宽度。
         note.toggle_columns()
         self.app.root.update()
         self.assertFalse(note.d["twoColumn"])
         self.assertNotIn("lines2", note.d)
         self.assertEqual(len(note.editors), 1)
-        self.assertEqual(note.winfo_width(), widened)
+        self.assertEqual(note.winfo_width(), original_width)
         self.assertEqual([l["text"] for l in note.d["lines"]], ["左栏", "任务A", "右栏内容"])
+        note.toggle_columns()
+        self.app.root.update()
+        self.assertEqual([l["text"] for l in note.d["lines"]], ["左栏", "任务A"])
+        self.assertEqual(note.d["lines2"], [{"type": "todo", "text": "右栏内容", "checked": False}])
+
+    def test_column_round_trip_preserves_duplicate_text_blank_lines_and_checks(self):
+        from copy import deepcopy
+        note = self.note
+        note.toggle_columns()
+        left = [{"type": "text", "text": "相同内容", "checked": False},
+                {"type": "text", "text": "", "checked": False}]
+        right = [{"type": "todo", "text": "相同内容", "checked": True},
+                 {"type": "text", "text": "", "checked": False},
+                 {"type": "todo", "text": "", "checked": False}]
+        note.d["lines"], note.d["lines2"] = deepcopy(left), deepcopy(right)
+        note.render()
+        for _ in range(3):
+            note.toggle_columns()
+            self.app.root.update()
+            self.assertEqual([l["text"] for l in note.d["lines"]],
+                             [l["text"] for l in left + right])
+            note.toggle_columns()
+            self.app.root.update()
+            self.assertEqual(note.d["lines"], left)
+            self.assertEqual(note.d["lines2"], right)
+
+    def test_collapsed_column_edits_survive_save_reopen_and_split(self):
+        import json
+        note = self.note
+        note.toggle_columns()
+        note.d["lines"] = [{"type": "text", "text": "左", "checked": False}]
+        note.d["lines2"] = [{"type": "todo", "text": "右", "checked": True}]
+        note.render()
+        note.toggle_columns()
+        text = note.text
+        text.mark_set("insert", "1.end")
+        note._on_enter(None)
+        text.insert("insert", "左侧新增")
+        note._on_keyrelease(None)
+        text.insert("3.end", "侧修改")
+        note._on_keyrelease(None)
+        text.mark_set("insert", "3.end")
+        note.add_todo()
+        text.insert("insert", "右侧新增")
+        note._on_keyrelease(None)
+        note._undo_edit()
+        note._undo_edit(redo=True)
+        saved = json.loads(json.dumps(note.d))
+        note.destroy()
+        note = main.NoteWindow(self.app, saved)
+        self.app.notes[saved["id"]] = note
+        self.app.root.update()
+        note.toggle_columns()
+        self.app.root.update()
+        self.assertEqual([l["text"] for l in note.d["lines"]], ["左", "左侧新增"])
+        self.assertEqual(note.d["lines2"], [
+            {"type": "todo", "text": "右侧修改", "checked": True},
+            {"type": "todo", "text": "右侧新增", "checked": False}])
+
+    def test_pasting_at_start_of_collapsed_right_text_keeps_its_column(self):
+        note = self.note
+        note.toggle_columns()
+        note.d["lines"] = [{"type": "text", "text": "左", "checked": False}]
+        note.d["lines2"] = [{"type": "text", "text": "右", "checked": False}]
+        note.render()
+        note.toggle_columns()
+        note.text.clipboard_clear()
+        note.text.clipboard_append("首行\n")
+        note.text.mark_set("insert", "2.0")
+        note.editors[0]._clipboard_edit("tk_textPaste")
+        note.toggle_columns()
+        self.app.root.update()
+        self.assertEqual([l["text"] for l in note.d["lines"]], ["左"])
+        self.assertEqual([l["text"] for l in note.d["lines2"]], ["首行", "右"])
+
+    def test_column_toggle_restores_width_after_resize_and_reopen(self):
+        from copy import deepcopy
+        note = self.note
+        note.geometry("440x477+100+100")
+        self.app.root.update()
+        for _ in range(3):
+            note.toggle_columns()
+            self.app.root.update()
+            note.geometry("900x477+100+100")
+            self.app.root.update()
+            saved = deepcopy(note.d)
+            note.destroy()
+            note = main.NoteWindow(self.app, saved)
+            self.app.notes[saved["id"]] = note
+            self.app.root.update()
+            note.toggle_columns()
+            self.app.root.update()
+            self.assertEqual(note.winfo_width(), 440)
+            self.assertEqual(note.d["w"], 440)
+
+    def test_both_columns_resize_equally_from_either_edge(self):
+        note = self.note
+        note.geometry("440x477+100+100")
+        self.app.root.update()
+        note.toggle_columns()
+        self.app.root.update()
+        width = note.winfo_width()
+        for edge in ("right", "left"):
+            start_x = width - 2 if edge == "right" else 2
+            self._begin_resize_session(x=start_x, width=width)
+            left, right = (editor.body for editor in note.editors)
+            box = note.editors[1]._checkbox_widgets[0]
+            local_anchor = box.winfo_rootx() - right.winfo_rootx()
+            for delta in (35, 80, 15, -20, -184, 0):
+                pointer_delta = delta if edge == "right" else -delta
+                self._resize_to_pointer(180 + start_x + pointer_delta, 400)
+                available = note._resize_target[2] - 2 * (main.RADIUS + 4) - 14
+                self.assertEqual(left.winfo_width(), available // 2)
+                self.assertEqual(right.winfo_width(), available - available // 2)
+                self.assertEqual(right.winfo_x(), left.winfo_x() + left.winfo_width() + 14)
+                self.assertEqual(note.divider.winfo_x(), left.winfo_x() + left.winfo_width())
+                self.assertEqual(box.winfo_rootx() - right.winfo_rootx(), local_anchor)
+            note._finish_resize(cancel=True)
+
+    def test_legacy_two_column_note_can_return_to_compact_single_column(self):
+        note = self.note
+        note.toggle_columns()
+        note.d.pop("singleColumnWidth")
+        note.geometry("792x477+100+100")
+        self.app.root.update()
+        note.toggle_columns()
+        self.app.root.update()
+        self.assertEqual(note.winfo_width(), 440)
+
+    def test_right_checkbox_stays_complete_while_both_columns_resize(self):
+        note = self.note
+        note.geometry("440x477+100+100")
+        self.app.root.update()
+        note.toggle_columns()
+        note.d["lines2"] = [
+            {"type": "todo", "text": "", "checked": False},
+            {"type": "todo", "text": "已完成", "checked": True}]
+        note.editors[1].render()
+        self.app.root.update()
+        width = note.winfo_width()
+        surface = self._begin_resize_session(x=width - 2, width=width)
+
+        def checkbox_pixels():
+            frame = main.Image.frombytes("RGB", surface.capacity,
+                main.ctypes.string_at(surface.bits, surface.capacity[0] * surface.capacity[1] * 4),
+                "raw", "BGRX")
+            crops = []
+            for box in note.editors[1]._checkbox_widgets:
+                x = box.winfo_rootx() - note.winfo_rootx()
+                y = box.winfo_rooty() - note.winfo_rooty()
+                crops.append(frame.crop((x, y, x + box.winfo_width(), y + box.winfo_height())))
+            return crops
+
+        note._render_resize_frame()
+        reference = checkbox_pixels()
+        self.assertEqual(len(reference), 2)
+        for target_width in (700, 650, *range(624, 519, -4), 560, 704):
+            self._resize_to_pointer(180 + target_width - 2, 400)
+            actual = checkbox_pixels()
+            self.assertEqual(len(actual), len(reference))
+            for before, after in zip(reference, actual):
+                self.assertIsNone(ImageChops.difference(before, after).getbbox(), target_width)
+        note._finish_resize(cancel=True)
+
+    def test_shrinking_columns_clears_old_divider_and_scrollbar_pixels(self):
+        note = self.note
+        note.geometry("440x400+100+100")
+        note.d["lines"] = [
+            {"type": "todo", "text": "测试 " * (i % 3 + 2), "checked": False}
+            for i in range(30)]
+        note.render()
+        self.app.root.update()
+        note.toggle_columns()
+        self.app.root.update()
+        width = note.winfo_width()
+        surface = self._begin_resize_session(x=width - 2, width=width, height=400)
+        for target_width in (650, 600, 560, 520, 560, 704):
+            self._resize_to_pointer(180 + target_width - 2, 400)
+            right = note.editors[1].body
+            frame = main.Image.frombytes("RGB", surface.capacity,
+                main.ctypes.string_at(surface.bits, surface.capacity[0] * surface.capacity[1] * 4),
+                "raw", "BGRX")
+            blank = frame.crop((right.winfo_x(), right.winfo_y(),
+                                right.winfo_x() + right.winfo_width() - 12,
+                                right.winfo_y() + right.winfo_height()))
+            for box in note.editors[1]._checkbox_widgets:
+                x = box.winfo_rootx() - right.winfo_rootx()
+                y = box.winfo_rooty() - right.winfo_rooty()
+                main.ImageDraw.Draw(blank).rectangle(
+                    (x, y, x + box.winfo_width() - 1, y + box.winfo_height() - 1), fill="white")
+            self.assertEqual(blank.getextrema(), ((255, 255),) * 3, target_width)
+            divider = note.divider
+            gap = frame.crop((divider.winfo_x(), divider.winfo_y(),
+                              divider.winfo_x() + divider.winfo_width(),
+                              divider.winfo_y() + divider.winfo_height()))
+            main.ImageDraw.Draw(gap).rectangle((4, 0, 10, gap.height - 1), fill="white")
+            self.assertEqual(gap.getextrema(), ((255, 255),) * 3, target_width)
+            thumb = note.editors[0].scroll_thumb
+            self.assertLessEqual(thumb.winfo_x() + thumb.winfo_width(), note.divider.winfo_x() - 2)
+        note._finish_resize(cancel=True)
 
     def test_two_column_clear_done_and_return_to_its_column(self):
         note = self.note
