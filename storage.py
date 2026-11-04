@@ -49,8 +49,13 @@ def backup_before_update():
     """Strict, independent backups are never pruned by startup rotation."""
     folder = os.path.join(DATA_DIR, "update-backups")
     os.makedirs(folder, exist_ok=True)
+    # Windows 时钟粒度可达 15.6ms，快速连续备份会出现相同时间戳，须避免互相覆盖。
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
     target = os.path.join(folder, f"notes-before-update-{stamp}.json")
+    serial = 1
+    while os.path.lexists(target):
+        serial += 1
+        target = os.path.join(folder, f"notes-before-update-{stamp}-{serial}.json")
     temporary = target + ".tmp"
     try:
         with open(DATA_FILE, "rb") as source, open(temporary, "xb") as output:
