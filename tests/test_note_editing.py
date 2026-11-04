@@ -1347,6 +1347,47 @@ class NoteEditingTests(unittest.TestCase):
             finally:
                 note._finish_resize(cancel=True)
 
+    def test_resize_footer_and_todos_match_clean_repaint_in_all_directions(self):
+        self._assert_resize_matches_clean_repaint()
+
+    def test_split_resize_footer_and_todos_match_clean_repaint_in_all_directions(self):
+        self.note.toggle_columns()
+        self._assert_resize_matches_clean_repaint()
+
+    def _assert_resize_matches_clean_repaint(self):
+        from PIL import Image
+        note = self.note
+        note.d["lines"] = [dict(type="todo", text=text, checked=i % 2 == 0)
+                           for i, text in enumerate(("欢迎语", "软件内更新", "便签收纳功能",
+                               "长待办换行后勾选框不能留下旧位置" * 2, "最后一项"))]
+        note.render()
+        if len(note.editors) > 1:
+            note.editors[1].lines = [dict(line) for line in note.d["lines"]]
+            note.editors[1].render()
+        width = 640 if len(note.editors) > 1 else 440
+        center, right = width // 2, width - 2
+        for edge in ((center, 2), (center, 438), (2, 220), (right, 220),
+                     (2, 2), (right, 2), (2, 438), (right, 438)):
+            surface = self._begin_resize_session(x=edge[0], y=edge[1], width=width)
+            try:
+                for amount in (40, -30, -260, 100, 0):
+                    with self.subTest(edge=edge, amount=amount):
+                        with patch.object(surface, "present", wraps=surface.present) as present:
+                            self._resize_to_pointer(180+edge[0]+(amount if edge[0] != center else 0),
+                                                    180+edge[1]+(amount if edge[1] != 220 else 0))
+                        fades = present.call_args.args[1]
+                        def frame():
+                            pixels = main.ctypes.string_at(surface.bits,
+                                surface.capacity[0]*surface.capacity[1]*4)
+                            return Image.frombytes("RGB", surface.capacity, pixels, "raw", "BGRX").crop(
+                                (8, 8, note._resize_target[2]-8, note._resize_target[3]-8))
+                        actual = frame()
+                        note._repair_resize_frame()
+                        surface.present(note._resize_target, fades)
+                        self.assertIsNone(ImageChops.difference(actual, frame()).getbbox())
+            finally:
+                note._finish_resize(cancel=True)
+
     def test_width_resize_reflows_todos_and_preserves_toolbar_and_title_editor(self):
         note = self.note
         note.d["lines"] = [{"type": "todo", "text": "长待办实时换行验证" * 8, "checked": True}]

@@ -3070,8 +3070,6 @@ class NoteWindow(tk.Toplevel):
         surface = self._resize_surface
         if not surface:
             return
-        previous_width = self._toolbar_size[0]
-        previous_column_x = self.editors[1].body.winfo_x() if len(self.editors) > 1 else None
         x, y, width, height = self._resize_target
         if surface.ensure_capacity(width, height):
             sx, sy = self._resize_start[0][:2]
@@ -3082,24 +3080,21 @@ class NoteWindow(tk.Toplevel):
         self.update_idletasks()
         if not self.winfo_exists() or not self._resizing:
             return
-        widgets = []
-        if previous_width != width:
-            # Tk 移动右侧按钮时会复制旧像素，提交前清掉工具栏及外侧留白。
-            self.cv.event_generate("<Expose>", x=0, y=0, width=width,
-                                   height=self.toolbar.winfo_y()+self.toolbar.winfo_height())
-            widgets.append(self.toolbar)
-        if previous_column_x is not None and self.editors[1].body.winfo_x() != previous_column_x:
-            # 分隔线移动会使 Tk 子窗口复制旧像素；提交前只补绘正文区域。
+        # Tk copies pixels when child windows move, including the footer and
+        # todo decorations after reflow. Repaint their final positions before
+        # capturing the client DC, in single-column as well as split notes.
+        widgets = [self, self.cv, self.toolbar, self.bar, self.status, self.add_pill, self.clear_btn]
+        if self.divider is not None:
             widgets.append(self.divider)
-            for editor in self.editors:
-                widgets.extend((editor.body, editor.text, editor.scroll_thumb))
-        if widgets:
-            for widget in widgets:
-                widget.event_generate("<Expose>", x=0, y=0,
-                                      width=widget.winfo_width(), height=widget.winfo_height())
-            self.update_idletasks()
-            if not self.winfo_exists() or not self._resizing:
-                return
+        for editor in self.editors:
+            widgets.extend((editor.body, editor.text, editor.scroll_thumb))
+            widgets.extend(editor._selection_masks + editor._checkbox_widgets + editor._strike_widgets)
+        for widget in widgets:
+            widget.event_generate("<Expose>", x=0, y=0,
+                                  width=widget.winfo_width(), height=widget.winfo_height())
+        self.update_idletasks()
+        if not self.winfo_exists() or not self._resizing:
+            return
         regions = []
         for editor in self.editors:
             body, fade = editor.body, editor._edge_fade
