@@ -55,6 +55,15 @@ user32.GetWindowRect.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.RECT)]
 user32.GetWindowRect.restype = wintypes.BOOL
 user32.ShowWindow.argtypes = [wintypes.HWND, ctypes.c_int]
 user32.ShowWindow.restype = wintypes.BOOL
+user32.IsIconic.argtypes = [wintypes.HWND]
+user32.IsIconic.restype = wintypes.BOOL
+user32.IsWindowVisible.argtypes = [wintypes.HWND]
+user32.IsWindowVisible.restype = wintypes.BOOL
+user32.GetTopWindow.argtypes = [wintypes.HWND]
+user32.GetTopWindow.restype = wintypes.HWND
+user32.GetWindow.argtypes = [wintypes.HWND, wintypes.UINT]
+user32.GetWindow.restype = wintypes.HWND
+user32.GetClassNameW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
 user32.GetWindowLongPtrW.argtypes = [wintypes.HWND, ctypes.c_int]
 user32.GetWindowLongPtrW.restype = ctypes.c_ssize_t
 user32.GetParent.argtypes = [wintypes.HWND]
@@ -247,6 +256,45 @@ user32.SetWindowLongPtrW.restype = ctypes.c_void_p
 user32.CallWindowProcW.argtypes = [ctypes.c_void_p, wintypes.HWND, wintypes.UINT,
                                  wintypes.WPARAM, wintypes.LPARAM]
 user32.CallWindowProcW.restype = ctypes.c_ssize_t
+
+_WINEVENTPROC = ctypes.WINFUNCTYPE(None, wintypes.HANDLE, wintypes.DWORD, wintypes.HWND,
+                                  wintypes.LONG, wintypes.LONG, wintypes.DWORD, wintypes.DWORD)
+user32.SetWinEventHook.argtypes = [wintypes.DWORD, wintypes.DWORD, wintypes.HMODULE,
+                                 _WINEVENTPROC, wintypes.DWORD, wintypes.DWORD, wintypes.DWORD]
+user32.SetWinEventHook.restype = wintypes.HANDLE
+user32.UnhookWinEvent.argtypes = [wintypes.HANDLE]
+user32.UnhookWinEvent.restype = wintypes.BOOL
+
+
+def _bottom_insert_after(note_hwnd, reference_hwnd=None):
+    # HWND_BOTTOM can put a note behind the desktop after Win+D. Insert just
+    # above the first visible desktop host, below the windows still above it.
+    # HWND_NOTOPMOST does not move an already non-topmost window. When the
+    # desktop is first in that band, HWND_TOP is needed to get above it.
+    previous = 0  # HWND_TOP; callers use SWP_NOACTIVATE.
+    topmost = None
+    reference_seen = reference_hwnd is None
+    hwnd = user32.GetTopWindow(None)
+    name = ctypes.create_unicode_buffer(256)
+    while hwnd:
+        if hwnd == reference_hwnd:
+            reference_seen = True
+        if hwnd != note_hwnd and user32.IsWindowVisible(hwnd) and not user32.IsIconic(hwnd):
+            user32.GetClassNameW(hwnd, name, len(name))
+            if name.value in ("Progman", "WorkerW"):
+                if not reference_seen:
+                    # Show Desktop raises the shell above the normal band.
+                    # Follow that band temporarily, below other topmost windows.
+                    return topmost or -1  # HWND_TOPMOST only when no anchor exists.
+                if previous == 0 and user32.GetWindowLongPtrW(note_hwnd, -20) & 0x8:
+                    return -2  # Leave the temporary band when the desktop drops back.
+                return previous
+            if user32.GetWindowLongPtrW(hwnd, -20) & 0x8:
+                topmost = hwnd
+            else:
+                previous = hwnd
+        hwnd = user32.GetWindow(hwnd, 2)  # GW_HWNDNEXT
+    return 1  # HWND_BOTTOM; Explorer may be restarting.
 
 def cursor_pos():
     pt = _POINT()
@@ -2673,12 +2721,26 @@ class NoteWindow(tk.Toplevel):
                 surface.close()
             self._resize_surface = None
             self._resize_busy = self._resize_ending = self._resize_release_pending = self._resize_cancel_requested = False
+        if not hidden and self.d["z"] == "bottom" and self.d.get("visible", True) and user32.IsIconic(self.hwnd):
+            self.app._request_bottom_refresh()
         return "break"
 
     # ---- 层级 / 透明度 / 颜色 ----
     def _install_z_order(self):
         @_WNDPROC
         def window_proc(hwnd, message, wparam, lparam):
+            protected = self.d["z"] == "bottom" and self.d.get("visible", True)
+            if protected and message == 0x0112 and wparam & 0xFFF0 == 0xF020:  # SC_MINIMIZE
+                return 0
+            if protected and not self._resizing and message == 0x0018 and not wparam:  # WM_SHOWWINDOW
+                self.app._request_bottom_refresh()
+                return 0  # Keep Tk's intended visibility when the Shell hides the native window.
+            if protected and ((message == 0x0005 and wparam == 1) or
+                              (message == 0x0047 and user32.IsIconic(hwnd))):
+                # Tk's wrapper may consume WM_SIZE itself, so also handle
+                # WM_WINDOWPOSCHANGED before Tk sees the iconic geometry.
+                self.app._request_bottom_refresh()
+                return 0  # Do not let Tk lay out the editor at its iconic size.
             if message == 0x0083 and wparam:  # full client area
                 return 0
             if message == 0x0085:
@@ -2695,7 +2757,7 @@ class NoteWindow(tk.Toplevel):
             if message == 0x0046:
                 position = ctypes.cast(lparam, ctypes.POINTER(_WINDOWPOS)).contents
                 if self.d["z"] == "bottom" and not position.flags & 0x0004:
-                    position.hwndInsertAfter = 1
+                    position.hwndInsertAfter = _bottom_insert_after(hwnd, self.app._bottom_reference_hwnd)
             return user32.CallWindowProcW(self._z_old_proc, hwnd, message, wparam, lparam)
 
         self._z_proc = window_proc
@@ -2718,6 +2780,10 @@ class NoteWindow(tk.Toplevel):
     def apply_z(self):
         top = self.d["z"] == "top"
         self.attributes("-topmost", top)
+        # The taskbar's Show Desktop button also invokes Peek while hovered;
+        # Peek can fade a window without minimizing or changing WS_VISIBLE.
+        excluded = wintypes.BOOL(self.d["z"] == "bottom")
+        dwmapi.DwmSetWindowAttribute(self.hwnd, 12, ctypes.byref(excluded), ctypes.sizeof(excluded))
         # 隐藏的所有者可隐藏任务栏；工具窗口会被最小化后的激活顺序跳过。
         user32.SetWindowLongPtrW(self.hwnd, -8, self._owner_hwnd)  # GWLP_HWNDPARENT
         style = user32.GetWindowLongPtrW(self.hwnd, -20)
@@ -2727,9 +2793,9 @@ class NoteWindow(tk.Toplevel):
                                 SWP_NOMOVE | SWP_NOSIZE | 0x0010)  # SWP_NOACTIVATE
 
     def hide(self):
+        self.d["visible"] = False
         if self._resizing:
             self._finish_resize(cancel=True, redraw=False, hidden=True)
-        self.d["visible"] = False
         self.withdraw()
         self.app.schedule_save()
 
@@ -3669,6 +3735,9 @@ class App:
                     note["z"] = "normal"
             self.data["schemaVersion"] = 3
         self.q = queue.Queue()
+        self._bottom_refresh_pending = False
+        self._bottom_hooks = []
+        self._quitting = False
         self.root = tk.Tk()
         self._system_font_family = tkfont.nametofont("TkDefaultFont", root=self.root).actual("family")
         # 钉死 tk scaling：首次运行记录系统 DPI，此后不再跟随系统缩放变化，画面始终一致。
@@ -3680,6 +3749,12 @@ class App:
             save_data(self.data)
         self.root.tk.call("tk", "scaling", dpi / 72.0)
         self.root.withdraw()
+        # An independent hidden window marks the ordinary window band. Unlike
+        # Tk's root wrapper, its handle and owner order never change.
+        self._bottom_reference_hwnd = user32.CreateWindowExW(
+            0, "STATIC", None, 0x88000000, 0, 0, 0, 0, None, None, None, None)
+        if not self._bottom_reference_hwnd:
+            raise ctypes.WinError()
         for name in ("TkDefaultFont", "TkMenuFont"):
             tkfont.nametofont(name, root=self.root).configure(family=UI_FONT)
         self.notes = {}
@@ -3692,6 +3767,7 @@ class App:
                                      size=self.data["settings"]["fontSize"])
 
         self._restore_notes()
+        self._start_bottom_guard()
         if migrate_opacity or migrate_z:
             self.save_now()
         self._start_tray()
@@ -3891,6 +3967,58 @@ class App:
             w.show()
         self.schedule_save()
 
+    def _request_bottom_refresh(self):
+        if not self._quitting and not self._bottom_refresh_pending:
+            self._bottom_refresh_pending = True
+            self.q.put("refresh_bottom")
+
+    def _start_bottom_guard(self):
+        @_WINEVENTPROC
+        def on_event(hook, event, hwnd, object_id, child_id, thread, timestamp):
+            # Out-of-context callbacks only enqueue work; all Tk/Win32 repairs
+            # run through the existing main-thread dispatcher.
+            if event < 0x8000 or (object_id in (0, -4) and child_id == 0):
+                self._request_bottom_refresh()
+
+        self._bottom_event_proc = on_event
+        for first, last in ((0x0003, 0x0003), (0x0016, 0x0017), (0x8002, 0x8004)):
+            hook = user32.SetWinEventHook(first, last, None, on_event, 0, 0, 2)  # SKIPOWNPROCESS
+            if not hook:
+                self._stop_bottom_guard()
+                raise ctypes.WinError()
+            self._bottom_hooks.append(hook)
+        self.root.bind("<Destroy>", lambda e: self._stop_bottom_guard() if e.widget == self.root else None,
+                       add="+")
+
+    def _stop_bottom_guard(self):
+        self._quitting = True
+        for hook in getattr(self, "_bottom_hooks", ()):
+            user32.UnhookWinEvent(hook)
+        self._bottom_hooks = []
+        reference = getattr(self, "_bottom_reference_hwnd", None)
+        if reference:
+            user32.DestroyWindow(reference)
+            self._bottom_reference_hwnd = None
+
+    def _refresh_bottom_notes(self):
+        self._bottom_refresh_pending = False
+        if self._quitting:
+            return
+        for note in self.notes.values():
+            if note.d["z"] != "bottom" or not note.d.get("visible", True) or note._resizing:
+                continue
+            if user32.IsIconic(note.hwnd) or not user32.IsWindowVisible(note.hwnd):
+                user32.ShowWindow(note.hwnd, 4)  # SW_SHOWNOACTIVATE restores without stealing focus.
+            anchor = _bottom_insert_after(note.hwnd, self._bottom_reference_hwnd)
+            temporary_top = anchor == -1 or (anchor not in (0, 1, -2) and
+                            bool(user32.GetWindowLongPtrW(anchor, -20) & 0x8))
+            flags = SWP_NOMOVE | SWP_NOSIZE | 0x0010 | 0x0200 | 0x0400
+            # Set the native band explicitly before inserting after its last
+            # window. This does not change the note's saved bottom state.
+            if temporary_top != bool(user32.GetWindowLongPtrW(note.hwnd, -20) & 0x8):
+                user32.SetWindowPos(note.hwnd, -1 if temporary_top else -2, 0, 0, 0, 0, flags)
+            user32.SetWindowPos(note.hwnd, anchor, 0, 0, 0, 0, flags)
+
     # 托盘
     def _start_tray(self):
         menu = pystray.Menu(
@@ -4045,6 +4173,8 @@ class App:
                     self.hide_all()
                 elif act == "show":
                     self.show_all()
+                elif act == "refresh_bottom":
+                    self._refresh_bottom_notes()
                 elif act == "history":
                     if self.history_win is None or not self.history_win.winfo_exists():
                         self.history_win = HistoryWindow(self)
@@ -4081,6 +4211,7 @@ class App:
             pass
 
     def quit(self):
+        self._stop_bottom_guard()
         for w in self.notes.values():
             if w._resizing:
                 w._finish_resize(cancel=w._resize_cancel_requested, redraw=False, hidden=True)

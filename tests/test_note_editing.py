@@ -117,6 +117,230 @@ class NoteEditingTests(unittest.TestCase):
         self.app.root.update()
         self.assertEqual(self.note.d["z"], "normal")
 
+    def _wait_for_bottom_guard(self):
+        self.app.root.after(450, self.app.root.quit)
+        self.app.root.mainloop()
+
+    def _external_show_window(self, note, state):
+        import subprocess
+        import sys
+        process = subprocess.Popen([sys.executable, "-c",
+            "import ctypes,sys; u=ctypes.windll.user32; "
+            "u.ShowWindow.argtypes=[ctypes.c_void_p,ctypes.c_int]; "
+            "u.ShowWindow(int(sys.argv[1]),int(sys.argv[2]))", str(note.hwnd), str(state)],
+            creationflags=subprocess.CREATE_NO_WINDOW)
+        self.addCleanup(process.wait, 5)
+
+    def test_bottom_note_rejects_minimize_command_and_restores_direct_minimize_without_focus(self):
+        self.note.set_z("bottom")
+        self.note.geometry("440x360+120+130")
+        other = main.tk.Toplevel(self.app.root)
+        other.focus_force()
+        self.app.root.update()
+        foreground = main.user32.GetForegroundWindow()
+        before = (self.note.winfo_x(), self.note.winfo_y(), self.note.winfo_width(), self.note.winfo_height())
+        saved = dict(self.note.d)
+        main.user32.PostMessageW(self.note.hwnd, 0x0112, 0xF020, 0)
+        self._wait_for_bottom_guard()
+        self.assertFalse(main.user32.IsIconic(self.note.hwnd))
+        self._external_show_window(self.note, 6)
+        self._wait_for_bottom_guard()
+        self.assertFalse(main.user32.IsIconic(self.note.hwnd))
+        self.assertTrue(main.user32.IsWindowVisible(self.note.hwnd))
+        self.assertEqual(main.user32.GetForegroundWindow(), foreground)
+        self.assertEqual((self.note.winfo_x(), self.note.winfo_y(), self.note.winfo_width(),
+                          self.note.winfo_height()), before)
+        self.assertEqual(self.note.d, saved)
+        self.assertFalse(self.note.attributes("-topmost"))
+        main.user32.ShowWindow(self.note.hwnd, 6)
+        self._wait_for_bottom_guard()
+        self.assertFalse(main.user32.IsIconic(self.note.hwnd))
+
+    def test_bottom_guard_does_not_undo_explicit_hide_or_show_hidden_startup_notes(self):
+        self.note.set_z("bottom")
+        for hide in (self.note.hide, self.app.hide_all):
+            self.note.show()
+            self.app.root.update()
+            self.app._request_bottom_refresh()
+            hide()
+            self._wait_for_bottom_guard()
+            self.assertFalse(self.note.d["visible"])
+            self.assertEqual(self.note.state(), "withdrawn")
+            self.assertFalse(main.user32.IsWindowVisible(self.note.hwnd))
+        self.app._request_bottom_refresh()
+        self._wait_for_bottom_guard()
+        self.assertFalse(main.user32.IsWindowVisible(self.note.hwnd))
+        self.app.show_all()
+        self.app.root.update()
+        self.assertTrue(main.user32.IsWindowVisible(self.note.hwnd))
+        self.assertEqual(self.note.d["z"], "bottom")
+
+    def test_bottom_guard_restores_native_hide_without_undoing_explicit_hide(self):
+        self.note.set_z("bottom")
+        self.app.root.update()
+        self._external_show_window(self.note, 0)  # Shell can hide without minimizing.
+        self._wait_for_bottom_guard()
+        self.assertTrue(main.user32.IsWindowVisible(self.note.hwnd))
+        self.assertTrue(self.note.d["visible"])
+        self.note.hide()
+        self.app._request_bottom_refresh()
+        self._wait_for_bottom_guard()
+        self.assertFalse(main.user32.IsWindowVisible(self.note.hwnd))
+
+    def test_only_bottom_note_is_excluded_from_desktop_peek(self):
+        values = []
+        original = main.dwmapi.DwmSetWindowAttribute
+        def set_attribute(hwnd, attribute, value, size):
+            if hwnd == self.note.hwnd and attribute == 12:
+                values.append(main.ctypes.cast(value, main.ctypes.POINTER(main.wintypes.BOOL)).contents.value)
+            return original(hwnd, attribute, value, size)
+        with patch.object(main.dwmapi, "DwmSetWindowAttribute", side_effect=set_attribute):
+            for state in ("bottom", "normal", "bottom", "top"):
+                self.note.set_z(state)
+        self.assertEqual(values, [1, 0, 1, 0])
+
+    def test_bottom_guard_moves_note_above_foreground_desktop_without_minimizing(self):
+        self.note.set_z("bottom")
+        desktop = main.tk.Toplevel(self.app.root)
+        desktop.geometry("500x400+100+100")
+        desktop.attributes("-topmost", True)
+        desktop.focus_force()
+        self.app.root.update()
+        desktop_hwnd = main.user32.GetParent(desktop.winfo_id()) or desktop.winfo_id()
+        original = main.user32.GetClassNameW
+        def class_name(hwnd, buffer, length):
+            if hwnd == desktop_hwnd:
+                buffer.value = "Progman"
+                return 7
+            return original(hwnd, buffer, length)
+        def order():
+            result = []
+            hwnd = main.user32.GetTopWindow(None)
+            while hwnd:
+                result.append(hwnd)
+                hwnd = main.user32.GetWindow(hwnd, 2)
+            return result
+        self.assertGreater(order().index(self.note.hwnd), order().index(desktop_hwnd))
+        foreground = main.user32.GetForegroundWindow()
+        with patch.object(main.user32, "GetClassNameW", side_effect=class_name):
+            self.app._refresh_bottom_notes()
+            self.assertTrue(main.user32.GetWindowLongPtrW(self.note.hwnd, -20) & 0x8)
+            self.note.set_z("normal")
+            self.assertFalse(main.user32.GetWindowLongPtrW(self.note.hwnd, -20) & 0x8)
+            self.note.set_z("bottom")
+            self.app._refresh_bottom_notes()
+        handles = order()
+        self.assertLess(handles.index(self.note.hwnd), handles.index(desktop_hwnd))
+        self.assertEqual(main.user32.GetForegroundWindow(), foreground)
+        self.assertFalse(self.note.attributes("-topmost"))
+        desktop.destroy()
+        self.app.root.update()
+        self.app._refresh_bottom_notes()
+        self.assertFalse(main.user32.GetWindowLongPtrW(self.note.hwnd, -20) & 0x8)
+
+    def test_bottom_guard_rechecks_layer_and_handles_multiple_notes_and_deletion(self):
+        second = self.app.new_note()
+        normal = self.app.new_note()
+        self.note.set_z("bottom")
+        second.set_z("bottom")
+        self.app.root.update()
+        for note in (self.note, second, normal):
+            self._external_show_window(note, 6)
+        self.note.set_z("normal")
+        self._wait_for_bottom_guard()
+        self.assertTrue(main.user32.IsIconic(self.note.hwnd))
+        self.assertTrue(main.user32.IsIconic(normal.hwnd))
+        self.assertFalse(main.user32.IsIconic(second.hwnd))
+        self.app._request_bottom_refresh()
+        self.app.notes.pop(second.d["id"])
+        second.destroy()
+        self._wait_for_bottom_guard()
+
+    @unittest.skipUnless(main.os.environ.get("ZNOTE_TEST_DESKTOP") == "1",
+                         "Set ZNOTE_TEST_DESKTOP=1 for interactive Windows shell checks")
+    def test_bottom_note_survives_shell_show_desktop_and_minimize_all(self):
+        import subprocess
+        self.note.set_z("bottom")
+        self.note.text.focus_force()
+        self.app.root.update()
+
+        def shell(command):
+            process = subprocess.Popen(["powershell", "-NoProfile", "-NonInteractive", "-Command",
+                f"(New-Object -ComObject Shell.Application).{command}()"],
+                stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+                creationflags=subprocess.CREATE_NO_WINDOW)
+            deadline = main.time.monotonic() + 10
+            def wait():
+                if process.poll() is None and main.time.monotonic() < deadline:
+                    self.app.root.after(30, wait)
+                else:
+                    self.app.root.after(450, self.app.root.quit)
+            wait()
+            self.app.root.mainloop()
+            if process.poll() is None:
+                process.kill()
+            _, errors = process.communicate(timeout=5)
+            self.assertEqual(process.returncode, 0, errors.decode(errors="replace"))
+
+        def assert_on_desktop():
+            self.assertTrue(self.note.d["visible"])
+            self.assertTrue(main.user32.IsWindowVisible(self.note.hwnd))
+            self.assertFalse(main.user32.IsIconic(self.note.hwnd))
+            cloaked = main.wintypes.DWORD()
+            get_cloaked = main.dwmapi.DwmGetWindowAttribute
+            get_cloaked.argtypes = [main.wintypes.HWND, main.wintypes.DWORD,
+                                   main.ctypes.c_void_p, main.wintypes.DWORD]
+            self.assertEqual(get_cloaked(self.note.hwnd, 14, main.ctypes.byref(cloaked),
+                                        main.ctypes.sizeof(cloaked)), 0)
+            self.assertEqual(cloaked.value, 0)
+            order = []
+            desktop = []
+            name = main.ctypes.create_unicode_buffer(256)
+            hwnd = main.user32.GetTopWindow(None)
+            while hwnd:
+                order.append(hwnd)
+                main.user32.GetClassNameW(hwnd, name, len(name))
+                if name.value in ("Progman", "WorkerW") and main.user32.IsWindowVisible(hwnd):
+                    desktop.append(hwnd)
+                hwnd = main.user32.GetWindow(hwnd, 2)
+            self.assertTrue(desktop, "An interactive Explorer desktop is required")
+            self.assertLess(order.index(self.note.hwnd), min(order.index(h) for h in desktop))
+
+        try:
+            shell("ToggleDesktop")
+            name = main.ctypes.create_unicode_buffer(256)
+            main.user32.GetClassNameW(main.user32.GetForegroundWindow(), name, len(name))
+            if name.value not in ("Progman", "WorkerW"):
+                self.skipTest("Shell ToggleDesktop did not enter Show Desktop; use the actual taskbar button")
+            assert_on_desktop()
+        finally:
+            shell("ToggleDesktop")
+        assert_on_desktop()
+        try:
+            shell("MinimizeAll")
+            assert_on_desktop()
+        finally:
+            shell("UndoMinimizeALL")
+        assert_on_desktop()
+
+    def test_bottom_guard_defers_restore_during_resize_and_respects_hide(self):
+        self.note.set_z("bottom")
+        self._begin_resize_session()
+        main.user32.ShowWindow(self.note.hwnd, 6)
+        self.app._refresh_bottom_notes()
+        self.assertTrue(main.user32.IsIconic(self.note.hwnd))
+        self.note._finish_resize(cancel=True)
+        self._wait_for_bottom_guard()
+        self.assertFalse(main.user32.IsIconic(self.note.hwnd))
+        surface = self._begin_resize_session()
+        self.app._request_bottom_refresh()
+        self.note.hide()
+        self._wait_for_bottom_guard()
+        self.assertFalse(self.note.d["visible"])
+        self.assertFalse(main.user32.IsWindowVisible(self.note.hwnd))
+        self.assertIsNone(surface.hwnd)
+        self.assertFalse(self.note._resizing)
+
     def test_cancel_bottom_raises_active_note_without_making_it_topmost(self):
         blocker = main.tk.Toplevel(self.app.root)
         blocker.geometry("300x240+30+30")
