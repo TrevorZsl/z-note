@@ -2274,7 +2274,7 @@ class NoteWindow(tk.Toplevel):
             self.editors.append(NoteEditor(self, 1))
             # 自动适度加宽，加宽后整体保持在工作区内。
             sw = self.winfo_screenwidth()
-            new_w = min(max(520, round(self.d["singleColumnWidth"] * 1.6)), sw - 24)
+            new_w = min(max(520, round(self.d["singleColumnWidth"] * 1.3)), sw - 24)
             if new_w > self.winfo_width():
                 self.d["w"] = new_w
                 self.d["x"] = min(self.winfo_x(), max(0, sw - new_w))

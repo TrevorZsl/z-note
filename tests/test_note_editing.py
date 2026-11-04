@@ -3841,7 +3841,7 @@ class NoteEditingTests(unittest.TestCase):
         self.assertEqual(note.d["lines2"], [{"type": "todo", "text": "", "checked": False}])
         self.assertEqual(len(note.editors[1]._checkbox_widgets), 1)
         self.assertGreater(note.winfo_width(), original_width)  # 切换时自动加宽
-        self.assertEqual(note.winfo_width(), max(520, round(original_width * 1.6)))
+        self.assertEqual(note.winfo_width(), max(520, round(original_width * 1.3)))
         self.assertEqual([l["text"] for l in note.d["lines"]], ["左栏", "任务A"])
         # 两栏布局：左右等宽、中间隔条的圆头线上下留边不顶满
         e0, e1 = note.editors
@@ -3868,6 +3868,22 @@ class NoteEditingTests(unittest.TestCase):
         self.app.root.update()
         self.assertEqual([l["text"] for l in note.d["lines"]], ["左栏", "任务A"])
         self.assertEqual(note.d["lines2"], [{"type": "todo", "text": "右栏内容", "checked": False}])
+
+    def test_column_toggle_width_respects_minimum_and_screen_limit(self):
+        note = self.note
+        for width, screen_width, expected_width in ((320, 1200, 520), (600, 1200, 780),
+                                                     (700, 800, 776)):
+            with self.subTest(width=width, screen_width=screen_width):
+                note.geometry(f"{width}x477+100+100")
+                self.app.root.update()
+                with patch.object(note, "winfo_screenwidth", return_value=screen_width):
+                    note.toggle_columns()
+                self.app.root.update()
+                self.assertEqual(note.winfo_width(), expected_width)
+                self.assertLessEqual(note.winfo_x() + note.winfo_width(), screen_width)
+                note.toggle_columns()
+                self.app.root.update()
+                self.assertEqual(note.winfo_width(), width)
 
     def test_column_round_trip_preserves_duplicate_text_blank_lines_and_checks(self):
         from copy import deepcopy
