@@ -846,8 +846,8 @@ class NoteEditor:
         self._drag_handle._row = row - 1
         viewport_top = -self.text.winfo_y()
         middle = (max(top, viewport_top) + min(top+height, viewport_top+self.body.winfo_height()))/2
-        self._drag_handle.place(x=self.text.winfo_width()-55, y=round(middle)-12,
-                                width=24, height=24)
+        self._drag_handle.place(x=self.text.winfo_width()-55+int(self.text.cget("padx")),
+                                y=round(middle)-12, width=24, height=24, bordermode="ignore")
         tk.Misc.lift(self._drag_handle)
 
     def _row_drag_press(self, event):

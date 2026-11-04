@@ -196,6 +196,26 @@ class NoteEditingTests(unittest.TestCase):
         self.assertEqual([line["text"] for line in editor.lines], ["待办", "普通文字"])
         self.assertIsNone(editor._row_drag)
 
+    def test_drag_handle_aligns_vertically_with_text_and_todo(self):
+        editor = self.note.editors[0]
+        editor.lines = [dict(type="text", text="普通文字", checked=False),
+                        dict(type="todo", text="待办内容", checked=False),
+                        dict(type="text", text="", checked=False)]
+        editor.render()
+        self.app.root.update()
+        for row, line in enumerate(editor.lines, 1):
+            with self.subTest(row=row):
+                box = editor.text.bbox(f"{row}.{editor._prefix_len(line)}")
+                center = box[1]+box[3]/2
+                editor.text.event_generate("<Motion>", x=80, y=round(center))
+                self.app.root.update()
+                handle = editor._drag_handle
+                self.assertAlmostEqual(handle.winfo_y()+handle.winfo_height()/2, center, delta=1)
+                if line["type"] == "todo":
+                    checkbox = next(w for w in editor._checkbox_widgets if w._todo_row == row)
+                    self.assertAlmostEqual(handle.winfo_y()+handle.winfo_height()/2,
+                                           checkbox.winfo_y()+checkbox.winfo_height()/2, delta=1)
+
     def test_drag_midpoints_stay_stable_and_keep_wrapped_todo_caret(self):
         editor = self.note.editors[0]
         content = "长待办内容，用来验证折行。" * 8
