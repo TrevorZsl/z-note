@@ -46,6 +46,178 @@ class NoteEditingTests(unittest.TestCase):
             if y < self.note.body.winfo_height() and y + box[3] > 0:
                 return box[0], y, box[2], box[3]
 
+    def _drag_event(self, x, y):
+        from types import SimpleNamespace
+        body = self.note.editors[0].body
+        return SimpleNamespace(x_root=round(body.winfo_rootx()+x), y_root=round(body.winfo_rooty()+y))
+
+    def _start_row_drag(self, source):
+        editor = self.note.editors[0]
+        self.app.root.update()
+        editor._drag_handle._row = source
+        y = int(editor.text.cget("pady")) + sum(
+            editor.text.count(f"{i}.0", f"{i+1}.0", "ypixels")[0]
+            for i in range(1, source+1)) + 15 - editor.body.canvasy(0)
+        event = self._drag_event(editor.body.winfo_width()-44, y)
+        editor._row_drag_press(event)
+        return event
+
+    def test_drag_mixed_rows_is_preview_only_then_one_undoable_move(self):
+        from copy import deepcopy
+        editor = self.note.editors[0]
+        original = [dict(type="text", text="说明", checked=False),
+                    dict(type="todo", text="完成的待办", checked=True),
+                    dict(type="text", text="", checked=False),
+                    dict(type="todo", text="最后一项", checked=False)]
+        editor.lines = deepcopy(original)
+        editor.render()
+        event = self._start_row_drag(1)
+        history = len(editor._edit_history)
+        with patch.object(self.app, "schedule_save") as save:
+            bottom = self._drag_event(100, editor.body.winfo_height()-2)
+            editor._row_drag_motion(bottom)
+            self.assertEqual(editor.lines, original)
+            self.assertEqual(len(editor._edit_history), history)
+            save.assert_not_called()
+            self.assertEqual(editor._row_drag["target"], 3)
+            editor._row_drag_release(bottom)
+            self.assertEqual(editor.lines, [original[i] for i in (0, 2, 3, 1)])
+            save.assert_called_once()
+        self.assertIsNone(editor._row_drag_job)
+        editor._undo_edit()
+        self.assertEqual(editor.lines, original)
+        editor._undo_edit(redo=True)
+        expected = [original[i] for i in (0, 2, 3, 1)]
+        self.assertEqual(editor.lines, expected)
+        self.app.save_now()
+        self.assertEqual(main.save_data.call_args.args[0]["notes"][0]["lines"], expected)
+        restored = main.NoteWindow(self.app, deepcopy(self.note.d))
+        self.app.root.update()
+        self.assertEqual(restored.editors[0].lines, expected)
+        restored.editors[0]._sync_lines_from_text()
+        self.assertEqual(restored.editors[0].lines, expected)
+        restored.destroy()
+
+    def test_drag_cancel_threshold_outside_and_unmap_preserve_rows(self):
+        from copy import deepcopy
+        editor = self.note.editors[0]
+        editor.lines = [dict(type="text", text="第一段", checked=False),
+                        dict(type="todo", text="下一项", checked=False)]
+        editor.render()
+        original = deepcopy(editor.lines)
+        for cancel in ("click", "escape", "outside", "unmap"):
+            event = self._start_row_drag(0)
+            if cancel == "click":
+                editor._row_drag_motion(event)
+                self.assertIsNone(editor._row_drag["canvas"])
+                editor._row_drag_release(event)
+            else:
+                editor._row_drag_motion(self._drag_event(100, 150))
+                if cancel == "escape":
+                    self.note.focus_force()
+                    self.app.root.update()
+                    self.note.event_generate("<Escape>")
+                elif cancel == "outside":
+                    editor._row_drag_release(self._drag_event(-10, 150))
+                else:
+                    editor.body.event_generate("<Unmap>")
+            self.app.root.update()
+            self.assertIsNone(editor._row_drag)
+            self.assertIsNone(editor._row_drag_job)
+            self.assertEqual(editor.lines, original)
+            self.assertIsNone(editor.body.grab_current())
+
+    def test_drag_wrapped_text_and_empty_row_to_top(self):
+        editor = self.note.editors[0]
+        content = "这是会自动折行的长文字。" * 24
+        editor.lines = [dict(type="text", text=content, checked=False),
+                        dict(type="text", text="", checked=False),
+                        dict(type="todo", text="保留", checked=False)]
+        editor.render()
+        self.app.root.update()
+        editor.text.event_generate("<Motion>", x=80, y=30)
+        self.app.root.update()
+        handle_y = editor._drag_handle.winfo_y()+editor.text.winfo_y()
+        self.assertGreaterEqual(handle_y, 0)
+        self.assertLess(handle_y+24, editor.body.winfo_height())
+        self._start_row_drag(0)
+        self.assertGreater(len(editor._row_drag["rows"][0][1]), 1)
+        self.assertEqual("".join(editor._row_drag["rows"][0][1]), content)
+        editor._cancel_row_drag()
+        editor._scroll_to(0)
+        self._start_row_drag(1)
+        top = self._drag_event(100, 1)
+        editor._row_drag_motion(top)
+        editor._row_drag_release(top)
+        self.assertEqual([line["text"] for line in editor.lines], ["", content, "保留"])
+
+    def test_drag_autoscroll_and_column_isolation(self):
+        from copy import deepcopy
+        self.note.toggle_columns()
+        editor = self.note.editors[0]
+        right = deepcopy(self.note.editors[1].lines)
+        editor.lines = [dict(type="text", text=f"段落{i}", checked=False) for i in range(50)]
+        editor.render()
+        self._start_row_drag(0)
+        bottom = self._drag_event(100, editor.body.winfo_height()-2)
+        editor._row_drag_motion(bottom)
+        before = editor.body.canvasy(0)
+        self.app.root.after(120, self.app.root.quit)
+        self.app.root.mainloop()
+        self.assertGreater(editor.body.canvasy(0), before)
+        editor._row_drag_release(bottom)
+        self.assertEqual(self.note.editors[1].lines, right)
+        self.assertIsNone(editor._row_drag_job)
+
+    def test_drag_handle_hover_and_fast_gutter_press_do_not_select_text(self):
+        editor = self.note.editors[0]
+        editor.lines = [dict(type="text", text="普通文字", checked=False),
+                        dict(type="todo", text="待办", checked=False)]
+        editor.render()
+        self.app.root.update()
+        editor.text.event_generate("<Motion>", x=80, y=30)
+        self.app.root.update()
+        self.assertEqual(editor._drag_handle.winfo_manager(), "place")
+        self.assertEqual(editor._drag_handle._row, 0)
+        self.assertGreaterEqual(editor.text.winfo_width() -
+                                editor._drag_handle.winfo_x()-editor._drag_handle.winfo_width(), 19)
+        self.assertEqual(editor._drag_handle.cget("cursor"), self.note.bar.cget("cursor"))
+        self.assertIn(editor._drag_handle.winfo_id(), main._DRAG_HWNS)
+        self.assertTrue(editor._drag_handle.bind("<Enter>"))
+        self.assertIn("_cursor_restore", editor._drag_handle.bind("<Leave>"))
+        editor._drag_handle.place_forget()
+        x = editor.text.winfo_width()-44
+        editor.text.event_generate("<Button-1>", x=x, y=30)
+        self.assertIsNotNone(editor._row_drag)
+        editor.text.event_generate("<B1-Motion>", x=x, y=120)
+        self.assertIsNotNone(editor._row_drag["canvas"])
+        self.assertFalse(editor.text.tag_ranges("sel"))
+        editor.text.event_generate("<ButtonRelease-1>", x=x, y=120)
+        self.assertEqual([line["text"] for line in editor.lines], ["待办", "普通文字"])
+        self.assertIsNone(editor._row_drag)
+
+    def test_drag_midpoints_stay_stable_and_keep_wrapped_todo_caret(self):
+        editor = self.note.editors[0]
+        content = "长待办内容，用来验证折行。" * 8
+        editor.lines = [dict(type="text", text="前面的文字", checked=False),
+                        dict(type="text", text="后面的文字", checked=False),
+                        dict(type="todo", text=content, checked=True)]
+        editor.render()
+        self.text.mark_set("insert", "3.40")
+        self._start_row_drag(2)
+        self.assertEqual("".join(editor._row_drag["rows"][2][1]), content)
+        top = self._drag_event(100, 20)
+        editor._row_drag_motion(top)
+        self.assertEqual(editor._row_drag["target"], 0)
+        editor._paint_row_drag()
+        self.assertEqual(editor._row_drag["target"], 0)
+        editor._row_drag_release(top)
+        self.assertEqual(editor.lines[0]["text"], content)
+        self.assertTrue(editor.lines[0]["checked"])
+        self.assertEqual(self.text.index("insert"), "1.40")
+        editor._undo_edit()
+        self.assertEqual(self.text.index("insert"), "3.40")
+
     def test_new_note_uses_compact_default_width(self):
         note = self.app.new_note()
         self.app.root.update()

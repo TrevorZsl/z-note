@@ -647,6 +647,26 @@ class NoteEditor:
         self._selection_scroll_job = None
         self._strike_job = None
         self._edge_fade = EdgeFade(self.body)
+        self._row_drag = None
+        self._row_drag_job = None
+        self._drag_handle = tk.Canvas(self.text, width=24, height=24, bg=self._bg,
+                                      bd=0, highlightthickness=0, cursor="fleur", takefocus=1)
+        _hook_move_cursor(self._drag_handle)
+        self._drag_handle.bind("<Enter>", _cursor_small)
+        self._drag_handle.bind("<Leave>", _cursor_restore)
+        for y in (8, 12, 16):
+            self._drag_handle.create_line(7, y, 17, y, fill="#9198A2")
+        self._drag_handle.bind("<Button-1>", self._row_drag_press)
+        self._drag_handle.bind("<B1-Motion>", self._row_drag_motion)
+        self._drag_handle.bind("<ButtonRelease-1>", self._row_drag_release)
+        self._drag_handle.bind("<Escape>", self._cancel_row_drag)
+        self._drag_escape = win.bind("<Escape>", self._cancel_row_drag, add="+")
+        self._drag_handle.bind("<Leave>", self._hide_drag_handle, add="+")
+        self.text.tag_configure("drag_margin", rmargin=54)
+        self.text.bind("<Motion>", self._hover_row)
+        self.text.bind("<Enter>", self._hover_row)
+        self.text.bind("<Leave>", lambda e: self.win.after_idle(self._hide_drag_handle))
+        self.body.bind("<Unmap>", self._cancel_row_drag)
         self.body.configure(yscrollcommand=self._text_scrolled)
         self.body.bind("<Configure>", self._body_configured)
         win._bind_ime(self.text)
@@ -679,8 +699,10 @@ class NoteEditor:
         t.bind("<KeyPress>", self._stop_wheel, add="+")
         t.bind("<Control-MouseWheel>", self.win._ctrl_wheel)
         self.body.bind("<Control-MouseWheel>", self.win._ctrl_wheel)
-        t.bind("<B1-Motion>", self._selection_scroll, add="+")
-        t.bind("<ButtonRelease-1>", self._stop_selection_scroll, add="+")
+        t.bind("<B1-Motion>", lambda e: self._row_drag_motion(e) if self._row_drag is not None
+               else self._selection_scroll(e), add="+")
+        t.bind("<ButtonRelease-1>", lambda e: self._row_drag_release(e) if self._row_drag is not None
+               else self._stop_selection_scroll(e), add="+")
         t.bind("<Unmap>", self._stop_selection_scroll)
         t.bind("<Unmap>", self._stop_wheel, add="+")
         self.render()
@@ -716,6 +738,9 @@ class NoteEditor:
         return self.win.focus_get()
 
     def teardown(self):
+        self._cancel_row_drag()
+        _DRAG_HWNS.discard(self._drag_handle.winfo_id())
+        self.win.unbind("<Escape>", self._drag_escape)
         self._stop_wheel()
         self._stop_selection_scroll()
         if self._strike_job is not None:
@@ -725,6 +750,7 @@ class NoteEditor:
         self.body.destroy()
 
     def _body_configured(self, event):
+        self._cancel_row_drag()
         changed = event.width != getattr(self, "_body_width", None)
         self._body_width = event.width
         previous_x = getattr(self, "_body_x", None)
@@ -736,6 +762,8 @@ class NoteEditor:
         self._queue_strikes(measure=changed)
 
     def _text_scrolled(self, first, last):
+        if self._row_drag is None:
+            self._drag_handle.place_forget()
         self.scroll_thumb.set(first, last)
         self._edge_fade.update(first, last)
         if self._layout_busy:
@@ -793,6 +821,211 @@ class NoteEditor:
 
     def _body_index(self, x=0, y=0):
         return self.text.index(f"@{x},{round(self.body.canvasy(y)) - self._chunk_start}")
+
+    # ---- 整条拖拽：预览独立于 Text，松手前不改正文或撤销栈 ----
+    def _hide_drag_handle(self, _event=None):
+        if self._row_drag is None and self._drag_handle.winfo_exists():
+            x, y = self._drag_handle.winfo_pointerxy()
+            if not (self.text.winfo_rootx() <= x < self.text.winfo_rootx()+self.text.winfo_width() and
+                    self.body.winfo_rooty() <= y < self.body.winfo_rooty()+self.body.winfo_height()):
+                self._drag_handle.place_forget()
+
+    def _hover_row(self, event):
+        if self._row_drag is not None:
+            return
+        x, y = event.x_root-self.text.winfo_rootx(), event.y_root-self.text.winfo_rooty()
+        row = int(self.text.index(f"@{x},{y}").split(".")[0])
+        if row > len(self.lines):
+            return
+        height = self.text.count(f"{row}.0", f"{row+1}.0", "ypixels")[0]
+        offset = self.text.count("1.0", f"{row}.0", "ypixels")
+        top = int(self.text.cget("pady")) + (offset[0] if offset else 0) - self._chunk_start
+        if not top <= y < top + height:
+            self._drag_handle.place_forget()
+            return
+        self._drag_handle._row = row - 1
+        viewport_top = -self.text.winfo_y()
+        middle = (max(top, viewport_top) + min(top+height, viewport_top+self.body.winfo_height()))/2
+        self._drag_handle.place(x=self.text.winfo_width()-55, y=round(middle)-12,
+                                width=24, height=24)
+        tk.Misc.lift(self._drag_handle)
+
+    def _row_drag_press(self, event):
+        if self.win._ime_composing(self.text):
+            return "break"
+        self._stop_wheel()
+        self._stop_selection_scroll()
+        self._sync_lines_from_text()
+        self._draw_strikes()
+        self._hover_row(event)
+        source = self._drag_handle._row
+        rows = []
+        for i, line in enumerate(self.lines, 1):
+            height = self.text.count(f"{i}.0", f"{i+1}.0", "ypixels")[0]
+            # 使用 Text 自己的软换行边界，浮框与正文的断行保持一致。
+            start, segments = f"{i}.0", []
+            while self.text.compare(start, "<", f"{i}.end"):
+                end = self.text.index(f"{start} display lineend +1c")
+                if self.text.compare(end, ">", f"{i}.end"):
+                    end = self.text.index(f"{i}.end")
+                content = self.text.get(start, end)
+                if not segments and line["type"] == "todo":
+                    content = content[len(PREFIX_PAD):]
+                segments.append(content)
+                if self.text.compare(end, "<=", start):
+                    break
+                start = end
+            rows.append((height, segments or [""]))
+        top = int(self.text.cget("pady")) + sum(h for h, _ in rows[:source])
+        self._row_drag = dict(source=source, target=source, rows=rows,
+                              press=(event.x_root, event.y_root), pointer=(event.x_root, event.y_root),
+                              offset=event.y_root-self.body.winfo_rooty()+self.body.canvasy(0)-top,
+                              canvas=None, cursor=self.text.index("insert"),
+                              scroll=self.body.canvasy(0))
+        self._drag_handle.focus_set()
+        self._drag_handle.grab_set()
+        return "break"
+
+    def _row_drag_motion(self, event):
+        drag = self._row_drag
+        if drag is None:
+            return "break"
+        drag["pointer"] = (event.x_root, event.y_root)
+        if drag["canvas"] is None:
+            if max(abs(a-b) for a, b in zip(drag["pointer"], drag["press"])) < 5:
+                return "break"
+            drag["canvas"] = tk.Canvas(self.body, bg=self._bg, bd=0, highlightthickness=0)
+            drag["canvas"].place(x=0, y=0, relwidth=1, relheight=1)
+            tk.Misc.lift(drag["canvas"])
+            self.body.update_idletasks()
+            self._row_drag_tick()
+        else:
+            self._paint_row_drag()
+        return "break"
+
+    def _row_drag_tick(self):
+        self._row_drag_job = None
+        drag = self._row_drag
+        if drag is None or drag["canvas"] is None:
+            return
+        x, y = drag["pointer"]
+        x -= self.body.winfo_rootx()
+        y -= self.body.winfo_rooty()
+        height = self.body.winfo_height()
+        if 0 <= x < self.body.winfo_width() and 0 <= y < height:
+            edge = min(36, height//4)
+            step = -8 if y < edge else (8 if y > height-edge else 0)
+            if step:
+                self.body.yview_scroll(step, "units")
+        self._paint_row_drag()
+        self._row_drag_job = self.win.after(30, self._row_drag_tick)
+
+    def _paint_row_drag(self):
+        drag = self._row_drag
+        cv = drag["canvas"]
+        if cv is None:
+            return
+        cv.delete("all")
+        width, viewport = self.body.winfo_width(), self.body.winfo_height()
+        pointer_y = drag["pointer"][1] - self.body.winfo_rooty()
+        scroll = self.body.canvasy(0)
+        pad = int(self.text.cget("pady"))
+        # 目标使用当前预览布局的中点，源占位保留在布局中以避免边界抖动。
+        order = [i for i in range(len(self.lines)) if i != drag["source"]]
+        order.insert(drag["target"], drag["source"])
+        y = pad - scroll
+        target = len(order)
+        for slot, i in enumerate(order):
+            height = drag["rows"][i][0]
+            if y <= pointer_y < y+height:
+                if i == drag["source"]:
+                    target = drag["target"]
+                else:
+                    boundary = slot + (pointer_y >= y+height/2)
+                    target = boundary - (drag["target"] < boundary)
+                break
+            if pointer_y < y:
+                target = slot
+                break
+            y += height
+        drag["target"] = max(0, min(len(order)-1, target))
+        order.remove(drag["source"])
+        order.insert(drag["target"], drag["source"])
+        y = pad - scroll
+        for i in order:
+            height = drag["rows"][i][0]
+            if y < viewport and y+height > 0:
+                if i == drag["source"]:
+                    round_rect(cv, 5, y+2, width-5, y+height-2, min(9, height/3),
+                               fill=mix(self._bg, "#B6C4D7", .22), outline="")
+                    self._draw_drag_row(cv, i, y, muted=True)
+                else:
+                    self._draw_drag_row(cv, i, y)
+            y += height
+        height = drag["rows"][drag["source"]][0]
+        y = pointer_y-drag["offset"]
+        round_rect(cv, 6, y+5, width-4, y+height, min(10, height/3),
+                   fill=mix(self._bg, "#677588", .18), outline="")
+        round_rect(cv, 3, y+1, width-7, y+height-4, min(10, height/3),
+                   fill=self._bg, outline="#AAB7C8")
+        self._draw_drag_row(cv, drag["source"], y)
+
+    def _draw_drag_row(self, cv, index, y, muted=False):
+        line = self.lines[index]
+        height, segments = self._row_drag["rows"][index]
+        x = int(self.text.cget("padx"))
+        if line["type"] == "todo":
+            cv.create_image(x+self._check_margin+self._check_margin//2, y+height/2,
+                            image=self._check_images[line["checked"]], anchor="w")
+            x += int(self.text.tag_cget("todo_indent", "lmargin2"))
+        font = self.done_font if line["type"] == "todo" and line["checked"] else self.app.base_font
+        color = mix(self._bg, "#2B2F36", .25) if muted else "#2B2F36"
+        for n, segment in enumerate(segments):
+            top = y+int(self.text.cget("spacing1"))+n*font.metrics("linespace")
+            cv.create_text(x, top, text=segment, font=font, fill=color, anchor="nw")
+            if line["type"] == "todo" and line["checked"] and segment:
+                middle = top + font.metrics("ascent") * .67
+                cv.create_line(x, middle, x+font.measure(segment), middle, fill=color, width=2)
+        for dy in (-4, 0, 4):
+            cv.create_line(cv.winfo_width()-48, y+height/2+dy,
+                           cv.winfo_width()-38, y+height/2+dy, fill="#9198A2")
+
+    def _row_drag_release(self, event):
+        drag = self._row_drag
+        if drag is None:
+            return "break"
+        inside = (0 <= event.x_root-self.body.winfo_rootx() < self.body.winfo_width() and
+                  0 <= event.y_root-self.body.winfo_rooty() < self.body.winfo_height())
+        commit = inside and drag["canvas"] is not None and drag["source"] != drag["target"]
+        self._cancel_row_drag(restore=not commit)
+        if commit:
+            source, target = drag["source"], drag["target"]
+            self.lines.insert(target, self.lines.pop(source))
+            row, col = self._row_col(drag["cursor"])
+            indices = list(range(len(self.lines)))
+            indices.insert(target, indices.pop(source))
+            self.render()
+            self.text.mark_set("insert", f"{indices.index(row)+1}.{col}")
+            self._clamp_todo_cursor()
+            self._remember_edit()
+            self.d["editedAt"] = datetime.now().isoformat(timespec="microseconds")
+            self.app.schedule_save()
+        return "break"
+
+    def _cancel_row_drag(self, _event=None, restore=True):
+        drag, self._row_drag = self._row_drag, None
+        if self._row_drag_job is not None:
+            self.win.after_cancel(self._row_drag_job)
+            self._row_drag_job = None
+        if drag is not None:
+            self._drag_handle.grab_release()
+            if drag["canvas"] is not None:
+                drag["canvas"].destroy()
+            if restore:
+                self._scroll_to(drag["scroll"])
+            self.text.focus_set()
+            self._drag_handle.place_forget()
+        return "break" if drag is not None else None
 
     def _scroll_to(self, y):
         self.body.yview_moveto(y / self._content_height)
@@ -906,6 +1139,7 @@ class NoteEditor:
             self._queue_strikes(measure=measure)
 
     def _layout_text(self):
+        self.text.tag_add("drag_margin", "1.0", "end")
         if getattr(self, "_strike_job", None):
             self.win.after_cancel(self._strike_job)
         self._strike_job = None
@@ -997,6 +1231,8 @@ class NoteEditor:
                             box.configure(image=image)
                     else:
                         box = tk.Label(self.text, image=image, bg=self._bg, bd=0, cursor="hand2")
+                        box.bind("<Motion>", self._hover_row)
+                        box.bind("<Leave>", lambda e: self.win.after_idle(self._hide_drag_handle))
                         box.bind("<MouseWheel>", self._text_wheel)
                         box.bind("<Control-MouseWheel>", self.win._ctrl_wheel)
                         self._checkbox_widgets.append(box)
@@ -1029,6 +1265,7 @@ class NoteEditor:
                         bar = self._strike_widgets[used_bars]
                     else:
                         bar = tk.Frame(self.text, bg="#505761", height=thickness, cursor="xterm")
+                        bar.bind("<Motion>", self._hover_row)
                         bar.bind("<MouseWheel>", self._text_wheel)
                         bar.bind("<Control-MouseWheel>", self.win._ctrl_wheel)
                         for event in ("<Button-1>", "<B1-Motion>", "<ButtonRelease-1>"):
@@ -1155,6 +1392,7 @@ class NoteEditor:
         for row, ln in enumerate(lines, 1):
             if ln.get("mergedColumn") == 1:
                 self.text.tag_add("merged_right", f"{row}.0", f"{row+1}.0")
+        self.text.tag_add("drag_margin", "1.0", "end")
         if keep_cursor:
             end = self.text.index("end-1c")
             if self.text.compare(cur, ">", end):
@@ -1439,6 +1677,11 @@ class NoteEditor:
         return None
 
     def _on_click(self, e):
+        if self.text.winfo_width()-55 <= e.x < self.text.winfo_width()-31:
+            # 快速移入并按下时，Motion 可能尚未显示手柄。
+            self._hover_row(e)
+            if self._drag_handle.winfo_manager():
+                return self._row_drag_press(e)
         self.win.focus_set(); self.text.focus_set()
 
     def _local_shortcut(self, event):
