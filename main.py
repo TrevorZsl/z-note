@@ -6,6 +6,10 @@ import atexit, ctypes, math, os, queue, struct, sys, time, uuid, winreg
 from copy import deepcopy
 from datetime import datetime
 import tkinter as tk
+import subprocess
+import threading
+import webbrowser
+from pathlib import Path
 from _tkinter import DONT_WAIT, WINDOW_EVENTS
 from tkinter import font as tkfont, messagebox
 from ctypes import wintypes
@@ -13,7 +17,9 @@ from ctypes import wintypes
 import pystray
 from PIL import Image, ImageDraw, ImageFont, ImageTk
 
-from storage import DATA_FILE, DEFAULT_SETTINGS, load_data, save_data
+from storage import DATA_FILE, DEFAULT_SETTINGS, load_data, save_data, backup_before_update
+from version import APP_VERSION
+import updater
 from resize_surface import ResizeSurface
 from bundled_fonts import CLASSIC_FAMILY, FONT_CHOICES, FONT_FAMILIES, FONT_DIR, load_fonts
 
@@ -3688,6 +3694,48 @@ class SettingsWindow(tk.Toplevel):
                         font=(UI_FONT, 9), wraplength=460, justify="left")
         path.pack(anchor="w", pady=(8, 0))
 
+        update_heading = section("关于与更新")
+        tk.Label(update_heading, text=f"z-note {APP_VERSION}", bg=NOTE_BG, fg=QUIET,
+                 font=(UI_FONT, 9)).pack(side="right")
+        self._update_cancel = None
+        self._update_busy = False
+        self._update_release = self._update_download = None
+        self._update_installing = False
+        self._update_state = "idle"
+        actions = tk.Frame(f, bg=NOTE_BG)
+        actions.pack(fill="x")
+
+        def update_button(text, command):
+            font = tkfont.Font(root=self, family=UI_FONT, size=9)
+            w, h = font.measure(text) + 24, font.metrics("linespace") + 14
+            image = Image.new("RGB", (w * 4, h * 4), NOTE_BG)
+            ImageDraw.Draw(image).rounded_rectangle((2, 2, w*4-3, h*4-3), radius=32,
+                                                     fill=NOTE_BG, outline=NOTE_BORDER, width=4)
+            image = ImageTk.PhotoImage(image.resize((w, h), Image.Resampling.LANCZOS), master=self)
+            button = tk.Button(actions, text=text, command=command, image=image, compound="center",
+                               bg=NOTE_BG, activebackground=NOTE_BG, fg="#475569", font=font,
+                               relief="flat", bd=0, highlightthickness=0, cursor="hand2")
+            button._image = image
+            button.pack(side="left", padx=(0, 8))
+            return button
+
+        # Reserve enough width for every state without changing the window width.
+        self._update_button = update_button("下载并安装", self._update_action)
+        self._update_button.configure(text="检查更新")
+        self._update_cancel_button = update_button("取消", self._cancel_update)
+        self._update_cancel_button.pack_forget()
+        self._update_status = tk.Label(f, text="点击检查正式版本更新。", bg=NOTE_BG, fg=QUIET,
+                                       font=(UI_FONT, 9), justify="left", anchor="w")
+        self._update_status.pack(fill="x", pady=(8, 0))
+        self._update_notes = tk.Label(f, text="", bg=NOTE_BG, fg="#475569",
+                                      font=(UI_FONT, 9), justify="left", anchor="w")
+        self._update_notes.pack(fill="x", pady=(4, 0))
+        release_link = tk.Label(f, text="查看发布页面 ↗", bg=NOTE_BG, fg=QUIET,
+                                font=(UI_FONT, 9), cursor="hand2")
+        release_link.pack(anchor="w", pady=(4, 0))
+        release_link.bind("<Button-1>", lambda _e: webbrowser.open(updater.RELEASES_URL))
+        self.bind("<Destroy>", self._destroy_update, add="+")
+
         def layout_hotkeys(content_width):
             for hotkey_row, label, entry in hotkey_rows:
                 label_width = int(self.tk.call("font", "measure", label.cget("font"), label.cget("text")))
@@ -3710,6 +3758,8 @@ class SettingsWindow(tk.Toplevel):
         startup.configure(wraplength=max(1, content_width - self._check_images[False].width() - 16))
         hotkey_hint.configure(wraplength=max(1, content_width - 16))
         path.configure(wraplength=max(1, content_width - 16))
+        for label in (self._update_status, self._update_notes):
+            label.configure(wraplength=max(1, content_width - 16))
         layout_hotkeys(content_width)
         body.itemconfigure(content, width=content_width)
         for appearance_row in (font_row, row, row3):
@@ -3739,6 +3789,8 @@ class SettingsWindow(tk.Toplevel):
             startup.configure(wraplength=max(1, content_width - self._check_images[False].width() - 16))
             hotkey_hint.configure(wraplength=max(1, content_width - 16))
             path.configure(wraplength=max(1, content_width - 16))
+            for label in (self._update_status, self._update_notes):
+                label.configure(wraplength=max(1, content_width - 16))
             layout_hotkeys(content_width)
             for appearance_row in (row, row3):
                 label = appearance_row.winfo_children()[0]
@@ -3772,6 +3824,96 @@ class SettingsWindow(tk.Toplevel):
         user32.SetWindowLongPtrW(hwnd, -20, style & ~0x80 | 0x40000)  # WS_EX_TOOLWINDOW / WS_EX_APPWINDOW
         user32.SetWindowPos(hwnd, None, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | 0x04 | 0x20)
         self.deiconify()
+
+    def _update_action(self):
+        if self._update_busy or self._update_installing:
+            return
+        if self._update_state == "ready":
+            path, checksum = self._update_download
+            try:
+                self.app.install_update(path, self._update_release, checksum)
+            except Exception as exc:
+                self._update_status.configure(text=f"无法安装更新：{exc}")
+            return
+        if self._update_state == "found" and not self._is_installed():
+            webbrowser.open(updater.RELEASES_URL)
+            return
+        downloading = self._update_state == "found"
+        cancel = self._update_cancel = threading.Event()
+        self._update_busy = True
+        self._update_button.configure(state="disabled")
+        self._update_cancel_button.pack(side="left")
+        self._update_cancel_button.configure(state="normal")
+        self._update_status.configure(text="正在下载更新…" if downloading else "正在检查更新…")
+        messages, release = self.app.q, self._update_release
+
+        def work():
+            try:
+                if downloading:
+                    value = updater.download_update(release, cancel, lambda done, total:
+                        messages.put(("update", self, cancel, "progress", (done, total))))
+                    kind = "downloaded"
+                else:
+                    value, kind = updater.check_update(cancel), "checked"
+                if cancel.is_set():
+                    if kind == "downloaded":
+                        updater.remove_download(value[0])
+                    raise updater.Cancelled("已取消更新。")
+                messages.put(("update", self, cancel, kind, value))
+            except updater.Cancelled:
+                messages.put(("update", self, cancel, "cancelled", "已取消更新。"))
+            except Exception as exc:
+                messages.put(("update", self, cancel, "error", str(exc)))
+
+        threading.Thread(target=work, daemon=True).start()
+
+    @staticmethod
+    def _is_installed():
+        return bool(getattr(sys, "frozen", False) and
+                    Path(sys.executable).with_name("unins000.exe").is_file())
+
+    def _cancel_update(self):
+        if self._update_cancel is not None:
+            self._update_cancel.set()
+            self._update_status.configure(text="正在取消…")
+            self._update_cancel_button.configure(state="disabled")
+
+    def _destroy_update(self, event):
+        if event.widget != self or self._update_installing:
+            return
+        if self._update_cancel is not None:
+            self._update_cancel.set()
+        if self._update_download is not None:
+            updater.remove_download(self._update_download[0])
+
+    def _receive_update(self, cancel, kind, value):
+        if cancel is not self._update_cancel or cancel.is_set():
+            if kind == "downloaded":
+                updater.remove_download(value[0])
+            if cancel is not self._update_cancel or kind == "progress":
+                return
+            kind, value = "cancelled", "已取消更新。"
+        if kind == "progress":
+            done, total = value
+            self._update_status.configure(text=f"正在下载：{done / total:.0%}（{done / 1048576:.1f} / {total / 1048576:.1f} MB）")
+            return
+        self._update_busy = False
+        self._update_cancel_button.pack_forget()
+        self._update_button.configure(state="normal")
+        if kind == "checked":
+            self._update_release = value
+            self._update_state = "found" if value else "idle"
+            self._update_status.configure(text=f"发现新版本 {value.version}" if value else "已是最新版本。")
+            self._update_notes.configure(text=value.notes[:4000] if value else "")
+        elif kind == "downloaded":
+            self._update_download = value
+            self._update_state = "ready"
+            self._update_status.configure(text="下载并校验完成。安装将保存数据并退出 z-note，无需卸载。")
+        else:
+            self._update_status.configure(text=value)
+        text = {"idle": "检查更新", "found": "下载并安装" if self._is_installed() else "前往下载",
+                "ready": "立即安装"}[self._update_state]
+        self._update_button.configure(text=text)
 
     def _lock_size(self, width, height):
         self.minsize(width, height)
@@ -4697,7 +4839,13 @@ class App:
         try:
             while True:
                 act = self.q.get_nowait()
-                if isinstance(act, tuple) and act[0] == "capture_hotkey":
+                if isinstance(act, tuple) and act[0] == "update":
+                    _, window, cancel, kind, value = act
+                    if window.winfo_exists():
+                        window._receive_update(cancel, kind, value)
+                    elif kind == "downloaded":
+                        updater.remove_download(value[0])
+                elif isinstance(act, tuple) and act[0] == "capture_hotkey":
                     _, window, action, value = act
                     if window.winfo_exists():
                         window._apply_hotkey(action, value)
@@ -4744,14 +4892,38 @@ class App:
         except Exception:
             pass
 
-    def quit(self):
-        self._stop_bottom_guard()
+    def install_update(self, path, release, checksum):
+        if not SettingsWindow._is_installed():
+            raise updater.UpdateError("请先使用安装版；源码或便携版请从发布页面下载安装。")
+        updater.verify_installer(path, release, checksum)
+        for w in self.notes.values():
+            if w._ime_active:
+                raise updater.UpdateError("请先完成便签中的输入法组词，再安装更新。")
+            w._sync_lines_from_text()
+            title = getattr(w, "_title_editor", None)
+            if title is not None and title.winfo_exists():
+                w.d["title"] = title.get().strip()
+        self._save_positions()
+        save_data(self.data)
+        backup_before_update()
+        # AppMutex keeps Setup from replacing files until this process exits.
+        subprocess.Popen([str(path)], cwd=str(path.parent))
+        if self.settings_win is not None:
+            self.settings_win._update_installing = True
+        self.quit(saved=True)
+
+    def _save_positions(self):
         for w in self.notes.values():
             if w._resizing:
                 w._finish_resize(cancel=w._resize_cancel_requested, redraw=False, hidden=True)
             else:
                 w.d["x"], w.d["y"] = w.winfo_x(), w.winfo_y()
-        self.save_now()
+
+    def quit(self, saved=False):
+        self._stop_bottom_guard()
+        if not saved:
+            self._save_positions()
+            self.save_now()
         try:
             self.icon.stop()
         except Exception:

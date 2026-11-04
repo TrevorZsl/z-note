@@ -42,8 +42,20 @@ python main.py
 字体来源与构建说明见 `assets/fonts/README.md`。
 
 使用 `powershell -ExecutionPolicy Bypass -File scripts/package.ps1` 构建包含字体的
-`dist/z-note.exe`，可直接运行；需要安装包时再编译 `installer/z-note.iss`。
+`dist/z-note.exe`，可直接运行；需要安装包时追加 `-Installer`（需 Inno Setup 6）。
 构建环境需要安装 `pyinstaller`、`requirements.txt` 中的依赖。
+
+## 检查更新与发布版本
+
+安装版在设置底部提供“关于与更新”：检查正式版本、下载安装包并校验，
+点击“立即安装”后先保存数据、创建独立升级备份，再退出并打开覆盖安装界面。
+无需卸载，原便签、设置、已完成记录和回收站继续保留。
+只有主动点击时才联网；源码或便携版可检查版本并打开发布页面。
+
+版本号统一维护在 `version.py`。推送对应的 `v2.1.0` 等版本标签后，
+GitHub Actions 自动构建并上传到独立公开仓库的草稿 Release，验证后再正式发布。
+首次配置、令牌权限、日常发布命令和安装验收见 [版本发布与更新](docs/版本发布与更新.md)。
+本地生成安装包使用 `scripts/package.ps1 -Installer`，需要 Inno Setup 6。
 
 ## 置底与隐藏
 
@@ -69,6 +81,8 @@ Win+M 和外部最小化不会让可见的置底便签持续消失，恢复时�
 ```text
 main.py                     应用入口、便签编辑器、窗口、托盘与 Windows 交互
 storage.py                  JSON 读写、默认设置与启动备份
+updater.py                  正式版本查询、后台下载与安装包校验
+version.py                  应用与安装包共用的版本号
 启动.bat                    日常启动入口
 requirements.txt            运行依赖
 assets/icons/               现用图标、源文件及授权说明
@@ -90,6 +104,9 @@ python -m unittest discover -s tests -p test_storage.py -v
 
 # 单实例、消息分发和退出逻辑测试，使用模拟对象
 python -m unittest discover -s tests -p test_app_lifecycle.py -v
+
+# 更新协议、下载校验、取消和设置界面测试，不连接 GitHub 或执行安装包
+python -m unittest discover -s tests -p "test_updat*.py" -v
 
 # 完整回归：包含会创建窗口的 Windows 界面测试
 python -m unittest discover -s tests -v

@@ -67,3 +67,22 @@ class StorageTests(unittest.TestCase):
             with self.assertRaises(OSError):
                 storage.save_data({"notes": ["new"]})
         self.assertEqual(self.file.read_bytes(), before)
+
+    def test_update_backup_preserves_all_data_and_is_not_rotated(self):
+        data = {"notes": ["便签"], "settings": {"autostart": True},
+                "archives": ["完成"], "deletedNotes": ["回收站"]}
+        storage.save_data(data)
+        first = Path(storage.backup_before_update())
+        second = Path(storage.backup_before_update())
+        self.assertNotEqual(first, second)
+        storage._rotate_backups()
+        self.assertEqual(first.read_bytes(), self.file.read_bytes())
+        self.assertEqual(json.loads(second.read_text(encoding="utf-8")), data)
+
+    def test_update_backup_failure_is_not_swallowed(self):
+        storage.save_data({"notes": ["keep"]})
+        with patch.object(storage.shutil, "copyfileobj", side_effect=OSError("disk full")):
+            with self.assertRaises(OSError):
+                storage.backup_before_update()
+        self.assertEqual(json.loads(self.file.read_text()), {"notes": ["keep"]})
+        self.assertEqual(list((self.folder / "update-backups").iterdir()), [])

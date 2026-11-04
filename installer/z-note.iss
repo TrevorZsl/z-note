@@ -1,17 +1,24 @@
 ; z-note 安装包脚本，编译前先生成包含内置字体的 dist\z-note.exe：
-;   powershell -ExecutionPolicy Bypass -File scripts\package.ps1
-; 然后编译本脚本：ISCC.exe installer\z-note.iss
+;   powershell -ExecutionPolicy Bypass -File scripts\package.ps1 -Installer
+; AppVersion 由打包脚本从 version.py 读取并传入，禁止手工维护第二份版本号。
+#ifndef AppVersion
+  #error "Build with scripts/package.ps1 -Installer"
+#endif
 
 [Setup]
 AppId={{A7DD33A3-341C-4C50-8E9D-6CFC1FB330FC}
 AppName=z-note
-AppVersion=2.0.0
+AppVersion={#AppVersion}
+AppMutex=z-note-singleton-mutex
 UninstallDisplayName=z-note 便签
 DefaultDirName={localappdata}\Programs\z-note
 PrivilegesRequired=lowest
+UsePreviousAppDir=yes
+CloseApplications=no
+RestartApplications=no
 DisableProgramGroupPage=yes
 OutputDir=..\dist
-OutputBaseFilename=z-note-setup
+OutputBaseFilename=z-note-setup-{#AppVersion}
 SetupIconFile=..\assets\icons\app.ico
 UninstallDisplayIcon={app}\z-note.exe
 

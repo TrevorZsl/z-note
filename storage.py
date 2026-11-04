@@ -1,6 +1,8 @@
 """Local JSON storage and startup backup rotation for z-note."""
 import json
 import os
+from datetime import datetime
+import shutil
 
 
 DATA_DIR = os.path.join(os.environ.get("APPDATA", "."), "z-note")
@@ -41,4 +43,23 @@ def save_data(data):
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=1)
     os.replace(tmp, DATA_FILE)
+
+
+def backup_before_update():
+    """Strict, independent backups are never pruned by startup rotation."""
+    folder = os.path.join(DATA_DIR, "update-backups")
+    os.makedirs(folder, exist_ok=True)
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
+    target = os.path.join(folder, f"notes-before-update-{stamp}.json")
+    temporary = target + ".tmp"
+    try:
+        with open(DATA_FILE, "rb") as source, open(temporary, "xb") as output:
+            shutil.copyfileobj(source, output)
+            output.flush()
+            os.fsync(output.fileno())
+        os.replace(temporary, target)
+    finally:
+        if os.path.exists(temporary):
+            os.remove(temporary)
+    return target
 

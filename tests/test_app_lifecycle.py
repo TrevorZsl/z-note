@@ -1,11 +1,76 @@
 """Normal startup, tray dispatch and graceful exit regressions."""
 import unittest
+from pathlib import Path
 from unittest.mock import Mock, call, patch
 
 import main
 
 
 class AppLifecycleTests(unittest.TestCase):
+    def update_app(self):
+        app = object.__new__(main.App)
+        app.notes = {"note": Mock(d={}, _ime_active=False, _resizing=False, _title_editor=None,
+                                  winfo_x=Mock(return_value=12), winfo_y=Mock(return_value=34))}
+        app.data = {"notes": [app.notes["note"].d]}
+        app.settings_win = Mock(_update_installing=False)
+        self.enterContext(patch.object(main.SettingsWindow, "_is_installed", return_value=True))
+        return app
+
+    def test_update_saves_and_backs_up_before_starting_installer_and_quitting(self):
+        app = self.update_app()
+        order = Mock()
+        with patch.object(main.updater, "verify_installer") as verify, \
+             patch.object(main, "save_data") as save, \
+             patch.object(main, "backup_before_update") as backup, \
+             patch.object(main.subprocess, "Popen") as start, \
+             patch.object(app, "quit") as quit:
+            for name, action in (("verify", verify), ("sync", app.notes["note"]._sync_lines_from_text),
+                                 ("save", save), ("backup", backup), ("start", start), ("quit", quit)):
+                order.attach_mock(action, name)
+            app.install_update(Path("setup.exe"), "release", "hash")
+        self.assertEqual(order.mock_calls, [call.verify(Path("setup.exe"), "release", "hash"), call.sync(),
+                                          call.save(app.data), call.backup(),
+                                          call.start(["setup.exe"], cwd="."), call.quit(saved=True)])
+        self.assertEqual(app.notes["note"].d, {"x": 12, "y": 34})
+        self.assertTrue(app.settings_win._update_installing)
+
+    def test_update_failures_leave_application_running(self):
+        for failure in ("verify", "save", "backup", "start"):
+            with self.subTest(failure=failure):
+                app = self.update_app()
+                with patch.object(main.updater, "verify_installer") as verify, \
+                     patch.object(main, "save_data") as save, \
+                     patch.object(main, "backup_before_update") as backup, \
+                     patch.object(main.subprocess, "Popen") as start, patch.object(app, "quit") as quit:
+                    actions = {"verify": verify, "save": save, "backup": backup, "start": start}
+                    actions[failure].side_effect = OSError("failure")
+                    with self.assertRaises(OSError):
+                        app.install_update(Path("setup.exe"), "release", "hash")
+                    quit.assert_not_called()
+                    if failure != "start":
+                        start.assert_not_called()
+                    self.assertFalse(app.settings_win._update_installing)
+
+    def test_update_during_ime_composition_does_not_save_or_install(self):
+        app = self.update_app()
+        app.notes["note"]._ime_active = True
+        with patch.object(main.updater, "verify_installer"), patch.object(main, "save_data") as save, \
+             patch.object(main.subprocess, "Popen") as start:
+            with self.assertRaisesRegex(main.updater.UpdateError, "输入法"):
+                app.install_update(Path("setup.exe"), "release", "hash")
+        save.assert_not_called()
+        start.assert_not_called()
+
+    def test_saved_update_shutdown_does_not_resave_hidden_resize_source(self):
+        app = self.update_app()
+        app.icon, app.root = Mock(), Mock()
+        with patch.object(app, "_save_positions") as positions, patch.object(app, "save_now") as save, \
+             patch.object(main.os, "_exit", side_effect=SystemExit(0)):
+            with self.assertRaises(SystemExit):
+                app.quit(saved=True)
+        positions.assert_not_called()
+        save.assert_not_called()
+
     def test_bottom_events_are_coalesced_and_stopped_after_shutdown(self):
         app = object.__new__(main.App)
         app.q = main.queue.Queue()
