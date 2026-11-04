@@ -43,6 +43,9 @@ user32.GetCapture.restype = wintypes.HWND
 user32.IsChild.argtypes = [wintypes.HWND, wintypes.HWND]
 user32.IsChild.restype = wintypes.BOOL
 user32.SetForegroundWindow.argtypes = [wintypes.HWND]
+user32.GetForegroundWindow.restype = wintypes.HWND
+user32.GetWindowThreadProcessId.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.DWORD)]
+user32.GetWindowThreadProcessId.restype = wintypes.DWORD
 user32.ClientToScreen.argtypes = [wintypes.HWND, ctypes.c_void_p]
 user32.PeekMessageW.argtypes = [ctypes.POINTER(wintypes.MSG), wintypes.HWND,
                                wintypes.UINT, wintypes.UINT, wintypes.UINT]
@@ -206,6 +209,8 @@ atexit.register(_cursor_restore)   # 退出时若指针仍悬停在拖动区，L
 dwmapi = ctypes.WinDLL("dwmapi")
 dwmapi.DwmSetWindowAttribute.argtypes = [wintypes.HWND, wintypes.DWORD, ctypes.c_void_p, wintypes.DWORD]
 dwmapi.DwmSetWindowAttribute.restype = ctypes.c_long
+dwmapi.DwmGetWindowAttribute.argtypes = [wintypes.HWND, wintypes.DWORD, ctypes.c_void_p, wintypes.DWORD]
+dwmapi.DwmGetWindowAttribute.restype = ctypes.c_long
 
 SWP_NOSIZE, SWP_NOMOVE = 0x0001, 0x0002
 WM_HOTKEY = 0x0312
@@ -280,6 +285,11 @@ def _bottom_insert_after(note_hwnd, reference_hwnd=None):
         if hwnd == reference_hwnd:
             reference_seen = True
         if hwnd != note_hwnd and user32.IsWindowVisible(hwnd) and not user32.IsIconic(hwnd):
+            cloaked = wintypes.DWORD()
+            dwmapi.DwmGetWindowAttribute(hwnd, 14, ctypes.byref(cloaked), ctypes.sizeof(cloaked))
+            if cloaked.value:
+                hwnd = user32.GetWindow(hwnd, 2)
+                continue
             user32.GetClassNameW(hwnd, name, len(name))
             if name.value in ("Progman", "WorkerW"):
                 if not reference_seen:
@@ -1808,6 +1818,7 @@ class NoteWindow(tk.Toplevel):
     def __init__(self, app, data):
         super().__init__(app.root)
         self.app, self.d = app, data
+        self._temporarily_raised = False
         self._bg, self._border = NOTE_BG, NOTE_BORDER
         self.d["color"] = "白"
         self.configure(bg=self._bg)
@@ -2097,6 +2108,7 @@ class NoteWindow(tk.Toplevel):
             self._draw_pill(pill_width, pill_height)
 
     def destroy(self):
+        self._temporarily_raised = False
         for editor in getattr(self, "editors", ()):
             editor.teardown()
         self._finish_resize(cancel=True, redraw=False, hidden=True)
@@ -3007,7 +3019,7 @@ class NoteWindow(tk.Toplevel):
                 self._resize_cancel_requested = True
             if message == 0x0046:
                 position = ctypes.cast(lparam, ctypes.POINTER(_WINDOWPOS)).contents
-                if self.d["z"] == "bottom" and not position.flags & 0x0004:
+                if self.d["z"] == "bottom" and not self._temporarily_raised and not position.flags & 0x0004:
                     position.hwndInsertAfter = _bottom_insert_after(hwnd, self.app._bottom_reference_hwnd)
             return user32.CallWindowProcW(self._z_old_proc, hwnd, message, wparam, lparam)
 
@@ -3019,6 +3031,7 @@ class NoteWindow(tk.Toplevel):
         if self.d["z"] == state:
             return
         previous = self.d["z"]
+        self._temporarily_raised = False
         self.d["z"] = state
         self.apply_z()
         if previous == "bottom" and state == "normal":
@@ -3039,28 +3052,30 @@ class NoteWindow(tk.Toplevel):
         user32.SetWindowLongPtrW(self.hwnd, -8, self._owner_hwnd)  # GWLP_HWNDPARENT
         style = user32.GetWindowLongPtrW(self.hwnd, -20)
         user32.SetWindowLongPtrW(self.hwnd, -20, style & ~0x80)  # WS_EX_TOOLWINDOW
-        if self.d["z"] == "bottom":
+        if self.d["z"] == "bottom" and not self._temporarily_raised:
             user32.SetWindowPos(self.hwnd, 1, 0, 0, 0, 0,
                                 SWP_NOMOVE | SWP_NOSIZE | 0x0010)  # SWP_NOACTIVATE
 
     def hide(self):
+        self._temporarily_raised = False
         self.d["visible"] = False
         if self._resizing:
             self._finish_resize(cancel=True, redraw=False, hidden=True)
         self.withdraw()
         self.app.schedule_save()
 
-    def show(self):
+    def show(self, temporary_raise=False):
+        self._temporarily_raised = temporary_raise and self.d["z"] == "bottom"
         self.d["visible"] = True
         self.deiconify()
         self.overrideredirect(True)
         self._round_window()
         self._configure_frameless()
         # 先前移到置顶层，再恢复原状态，确保被其他进程覆盖后也能显示到前面。
-        if self.d["z"] != "bottom":
+        if self.d["z"] != "bottom" or self._temporarily_raised:
             self.attributes("-topmost", True)
         self.apply_z()
-        if self.d["z"] != "bottom":
+        if self.d["z"] != "bottom" or self._temporarily_raised:
             self.lift()
 
     def delete_self(self):
@@ -4053,7 +4068,7 @@ class App:
             w = NoteWindow(self, d)
             self.notes[d["id"]] = w
         if self.show_notes:
-            self.show_all()
+            self.show_all(temporary_raise=False)
 
     def note_font_family(self):
         choice = self.data["settings"]["fontFamily"]
@@ -4213,9 +4228,11 @@ class App:
             w.hide()
         self.schedule_save()
 
-    def show_all(self):
+    def show_all(self, temporary_raise=True):
         for w in self.notes.values():
-            w.show()
+            w.show(temporary_raise=temporary_raise)
+        if temporary_raise and self.notes:
+            user32.SetForegroundWindow(w.hwnd)
         self.schedule_save()
 
     def _request_bottom_refresh(self):
@@ -4233,7 +4250,8 @@ class App:
 
         self._bottom_event_proc = on_event
         for first, last in ((0x0003, 0x0003), (0x0016, 0x0017), (0x8002, 0x8004)):
-            hook = user32.SetWinEventHook(first, last, None, on_event, 0, 0, 2)  # SKIPOWNPROCESS
+            flags = 0 if first == 0x0003 else 2  # Observe our own foreground changes too.
+            hook = user32.SetWinEventHook(first, last, None, on_event, 0, 0, flags)
             if not hook:
                 self._stop_bottom_guard()
                 raise ctypes.WinError()
@@ -4255,11 +4273,26 @@ class App:
         self._bottom_refresh_pending = False
         if self._quitting:
             return
+        if any(note._temporarily_raised for note in self.notes.values()):
+            hwnd = user32.GetForegroundWindow()
+            in_app = not hwnd  # Keep the recall through transient activation gaps.
+            while hwnd:
+                process = wintypes.DWORD()
+                user32.GetWindowThreadProcessId(hwnd, ctypes.byref(process))
+                if process.value == os.getpid():
+                    in_app = True
+                    break
+                hwnd = user32.GetWindow(hwnd, 4)  # GW_OWNER includes associated IME windows.
+            if not in_app:
+                for note in self.notes.values():
+                    note._temporarily_raised = False
         for note in self.notes.values():
             if note.d["z"] != "bottom" or not note.d.get("visible", True) or note._resizing:
                 continue
             if user32.IsIconic(note.hwnd) or not user32.IsWindowVisible(note.hwnd):
                 user32.ShowWindow(note.hwnd, 4)  # SW_SHOWNOACTIVATE restores without stealing focus.
+            if note._temporarily_raised:
+                continue
             anchor = _bottom_insert_after(note.hwnd, self._bottom_reference_hwnd)
             temporary_top = anchor == -1 or (anchor not in (0, 1, -2) and
                             bool(user32.GetWindowLongPtrW(anchor, -20) & 0x8))
@@ -4268,7 +4301,17 @@ class App:
             # window. This does not change the note's saved bottom state.
             if temporary_top != bool(user32.GetWindowLongPtrW(note.hwnd, -20) & 0x8):
                 user32.SetWindowPos(note.hwnd, -1 if temporary_top else -2, 0, 0, 0, 0, flags)
-            user32.SetWindowPos(note.hwnd, anchor, 0, 0, 0, 0, flags)
+            # Some system windows reject insertion; use the next usable window above them.
+            while not user32.SetWindowPos(note.hwnd, anchor, 0, 0, 0, 0, flags):
+                if anchor in (0, 1, -1, -2):
+                    break
+                anchor = user32.GetWindow(anchor, 3)  # GW_HWNDPREV
+                if anchor == note.hwnd:
+                    anchor = user32.GetWindow(anchor, 3)
+                if not anchor:
+                    break
+                if not temporary_top and user32.GetWindowLongPtrW(anchor, -20) & 0x8:
+                    anchor = -2  # Stay below the topmost band.
 
     # 托盘
     def _start_tray(self):

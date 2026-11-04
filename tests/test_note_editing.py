@@ -268,6 +268,7 @@ class NoteEditingTests(unittest.TestCase):
             self.app.root.update()
             self.assertEqual(self.app.data["schemaVersion"], 3)
             self.assertEqual(self.note.d["z"], expected)
+            self.assertFalse(self.note._temporarily_raised)
             self.assertEqual(self.app.data["deletedNotes"][0]["z"], expected)
             self.assertEqual(self.note.b_bottom._active, expected == "bottom")
 
@@ -312,6 +313,199 @@ class NoteEditingTests(unittest.TestCase):
     def _wait_for_bottom_guard(self):
         self.app.root.after(450, self.app.root.quit)
         self.app.root.mainloop()
+
+    def _external_test_window(self):
+        import subprocess
+        import sys
+        process = subprocess.Popen([sys.executable, "-c",
+            "import tkinter as tk; r=tk.Tk(); r.geometry('300x240+30+30'); "
+            "r.update(); print(r.winfo_id(), flush=True); r.mainloop()"],
+            stdout=subprocess.PIPE, text=True, creationflags=subprocess.CREATE_NO_WINDOW)
+        def close():
+            process.terminate()
+            process.wait(timeout=5)
+            process.stdout.close()
+        self.addCleanup(close)
+        client = int(process.stdout.readline())
+        return main.user32.GetParent(client) or client
+
+    def test_bottom_recall_tracks_foreground_events_and_native_window_order(self):
+        external = self._external_test_window()
+        second = self.app.new_note()
+        normal = self.app.new_note()
+        pinned = self.app.new_note()
+        pinned.set_z("top")
+        foreground = self.enterContext(patch.object(main.user32, "GetForegroundWindow", return_value=pinned.hwnd))
+        activate = self.enterContext(patch.object(main.user32, "SetForegroundWindow",
+                                                wraps=main.user32.SetForegroundWindow))
+        for note in (self.note, second):
+            note.set_z("bottom")
+        self.text.mark_set("insert", "2.3")
+        cursor = self.text.index("insert")
+
+        def order():
+            handles = []
+            hwnd = main.user32.GetTopWindow(None)
+            while hwnd:
+                handles.append(hwnd)
+                hwnd = main.user32.GetWindow(hwnd, 2)
+            return handles
+
+        for _ in range(2):
+            self.app.q.put("show")
+            self._wait_for_bottom_guard()
+            activate.assert_called_with(pinned.hwnd)
+            for note in (self.note, second):
+                self.assertTrue(note._temporarily_raised)
+                self.assertEqual(note.d["z"], "bottom")
+                self.assertTrue(note.b_bottom._active)
+                self.assertFalse(main.user32.GetWindowLongPtrW(note.hwnd, -20) & 0x8)
+                self.assertLess(order().index(note.hwnd), order().index(external))
+                self.assertLess(order().index(pinned.hwnd), order().index(note.hwnd))
+        for window in (self.note, normal, second, pinned):
+            foreground.return_value = window.hwnd
+            self.app._bottom_event_proc(None, 0x0003, window.hwnd, 0, 0, 0, 0)
+            self._wait_for_bottom_guard()
+            self.assertTrue(self.note._temporarily_raised)
+            self.assertTrue(second._temporarily_raised)
+        self.assertEqual(self.text.index("insert"), cursor)
+        settings = main.SettingsWindow(self.app)
+        foreground.return_value = main.user32.GetParent(settings.winfo_id()) or settings.winfo_id()
+        self.app._bottom_event_proc(None, 0x0003, foreground.return_value, 0, 0, 0, 0)
+        self._wait_for_bottom_guard()
+        self.assertTrue(self.note._temporarily_raised)
+        settings.destroy()
+        main.user32.SetWindowPos(external, 0, 0, 0, 0, 0,
+                                main.SWP_NOMOVE | main.SWP_NOSIZE | 0x0010)
+        activate.reset_mock()
+        foreground.return_value = external
+        self.app._bottom_event_proc(None, 0x0003, external, 0, 0, 0, 0)
+        self._wait_for_bottom_guard()
+        activate.assert_not_called()
+        for note in (self.note, second):
+            self.assertFalse(note._temporarily_raised)
+            self.assertGreater(order().index(note.hwnd), order().index(external))
+            self.assertTrue(main.user32.IsWindowVisible(note.hwnd))
+            self.assertFalse(main.user32.IsIconic(note.hwnd))
+            self.assertEqual(note.d["z"], "bottom")
+
+    def test_bottom_recall_first_show_raises_bottom_notes_from_an_external_app(self):
+        external = self._external_test_window()
+        normal = self.app.new_note()
+        self.note.set_z("bottom")
+        foreground = self.enterContext(patch.object(main.user32, "GetForegroundWindow", return_value=external))
+        def activate(hwnd):
+            foreground.return_value = hwnd
+            return True
+        self.enterContext(patch.object(main.user32, "SetForegroundWindow", side_effect=activate))
+        for hidden in (False, True):
+            with self.subTest(hidden=hidden):
+                if hidden:
+                    self.app.hide_all()
+                else:
+                    self.note.set_z("normal")
+                    self.note.set_z("bottom")
+                foreground.return_value = external
+                for layer in (-1, -2):
+                    main.user32.SetWindowPos(external, layer, 0, 0, 0, 0,
+                                            main.SWP_NOMOVE | main.SWP_NOSIZE | 0x0010)
+                self.app.root.update_idletasks()
+                self.app.show_all()
+                self.app.root.update()
+                self.app._refresh_bottom_notes()
+                order = []
+                hwnd = main.user32.GetTopWindow(None)
+                while hwnd:
+                    order.append(hwnd)
+                    hwnd = main.user32.GetWindow(hwnd, 2)
+                for note in (self.note, normal):
+                    self.assertLess(order.index(note.hwnd), order.index(external))
+                self.assertTrue(self.note._temporarily_raised)
+                self.assertFalse(main.user32.GetWindowLongPtrW(self.note.hwnd, -20) & 0x8)
+
+    def test_bottom_recall_clears_on_layer_change_hide_and_delete(self):
+        second = self.app.new_note()
+        self.enterContext(patch.object(main.user32, "GetForegroundWindow", return_value=second.hwnd))
+        self.note.set_z("bottom")
+        second.set_z("bottom")
+        self.app.show_all()
+        self.app.root.update()
+        self.note.toggle_bottom()
+        self.assertEqual(self.note.d["z"], "normal")
+        self.assertFalse(self.note._temporarily_raised)
+        self.note.toggle_bottom()
+        self.assertEqual(self.note.d["z"], "bottom")
+        self.assertFalse(self.note._temporarily_raised)
+        self.assertTrue(second._temporarily_raised)
+        self.app.show_all()
+        self.note.set_z("top")
+        self.assertFalse(self.note._temporarily_raised)
+        self.assertTrue(self.note.attributes("-topmost"))
+        self.app.hide_all()
+        self.assertFalse(second._temporarily_raised)
+        self.app.show_all()
+        second.destroy()
+        self.app.notes.pop(second.d["id"])
+        self.assertFalse(second._temporarily_raised)
+        self.app._refresh_bottom_notes()
+
+    def test_bottom_startup_display_does_not_enable_recall(self):
+        self.note.set_z("bottom")
+        self.app.show_all(temporary_raise=False)
+        self.app.root.update()
+        self.assertFalse(self.note._temporarily_raised)
+        self.app.show_all()
+        self.assertTrue(self.note._temporarily_raised)
+        self.assertNotIn("_temporarily_raised", self.note.d)
+        self.note.hide()
+        self.note.show()
+        self.assertFalse(self.note._temporarily_raised)
+
+    def test_bottom_recall_keeps_owned_input_windows_and_activation_gaps(self):
+        self.note.set_z("bottom")
+        self.app.show_all()
+        def process_id(hwnd, pointer):
+            main.ctypes.cast(pointer, main.ctypes.POINTER(main.wintypes.DWORD)).contents.value = (
+                main.os.getpid() if hwnd == self.note.hwnd else 0)
+            return 1
+        with patch.object(main.user32, "GetForegroundWindow", return_value=123) as foreground, \
+                patch.object(main.user32, "GetWindowThreadProcessId", side_effect=process_id), \
+                patch.object(main.user32, "GetWindow", return_value=self.note.hwnd) as owner:
+            self.app._refresh_bottom_notes()
+            owner.assert_called_once_with(123, 4)
+            self.assertTrue(self.note._temporarily_raised)
+            foreground.return_value = None
+            self.app._refresh_bottom_notes()
+            self.assertTrue(self.note._temporarily_raised)
+
+    def test_bottom_anchor_skips_cloaked_system_windows(self):
+        def attribute(hwnd, key, pointer, size):
+            main.ctypes.cast(pointer, main.ctypes.POINTER(main.wintypes.DWORD)).contents.value = int(hwnd == 20)
+            return 0
+        def name(hwnd, buffer, size):
+            buffer.value = "Progman" if hwnd == 30 else "STATIC"
+            return len(buffer.value)
+        with patch.object(main.user32, "GetTopWindow", return_value=10), \
+                patch.object(main.user32, "GetWindow", side_effect=lambda hwnd, _: {10: 20, 20: 30}[hwnd]), \
+                patch.object(main.user32, "IsWindowVisible", return_value=True), \
+                patch.object(main.user32, "IsIconic", return_value=False), \
+                patch.object(main.user32, "GetClassNameW", side_effect=name), \
+                patch.object(main.user32, "GetWindowLongPtrW", return_value=0), \
+                patch.object(main.dwmapi, "DwmGetWindowAttribute", side_effect=attribute):
+            self.assertEqual(main._bottom_insert_after(self.note.hwnd), 10)
+
+    def test_bottom_guard_uses_the_next_anchor_when_windows_rejects_insertion(self):
+        self.note.set_z("bottom")
+        calls = []
+        def position(hwnd, anchor, *args):
+            calls.append(anchor)
+            return anchor != 123
+        with patch.object(main, "_bottom_insert_after", return_value=123), \
+                patch.object(main.user32, "GetWindow", return_value=456), \
+                patch.object(main.user32, "GetWindowLongPtrW", return_value=0), \
+                patch.object(main.user32, "SetWindowPos", side_effect=position):
+            self.app._refresh_bottom_notes()
+        self.assertEqual(calls, [123, 456])
 
     def _external_show_window(self, note, state):
         import subprocess
