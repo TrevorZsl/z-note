@@ -1018,13 +1018,13 @@ class NoteEditingTests(unittest.TestCase):
         with patch.object(main.pystray, "Icon") as icon:
             self._start_tray_impl(self.app)
         menu = icon.call_args.args[3]
-        hide, show = menu.items[1:3]
-        self.assertEqual(hide.text, "隐藏所有便签  Ctrl+Alt+H")
+        show, hide = menu.items[1:3]
         self.assertEqual(show.text, "显示所有便签  Ctrl+Alt+S")
-        hide(None)
+        self.assertEqual(hide.text, "隐藏所有便签  Ctrl+Alt+H")
         show(None)
-        self.assertEqual(self.app.q.get_nowait(), "hide")
+        hide(None)
         self.assertEqual(self.app.q.get_nowait(), "show")
+        self.assertEqual(self.app.q.get_nowait(), "hide")
 
     def test_legacy_toggle_hotkey_migrates_to_hide_without_overwriting_new_setting(self):
         for configured in ({"toggleHotkey": "Ctrl+Shift+H"},
@@ -1907,6 +1907,56 @@ class NoteEditingTests(unittest.TestCase):
         self.app.root.update()
         self.assertEqual((settings.winfo_x(), settings.winfo_y()), (x, y))
         settings.destroy()
+
+    def test_settings_lists_show_before_hide_and_reports_editor_hotkey_conflicts(self):
+        settings = main.SettingsWindow(self.app)
+        self.app.root.update()
+        self.assertLess(settings.hotkey_entries["show"].winfo_rooty(),
+                        settings.hotkey_entries["hide"].winfo_rooty())
+        before = settings.hotkey_entries["show"].get()
+        with patch.object(main.user32, "RegisterHotKey") as register:
+            settings._capture_hotkey(type("Key", (), dict(keysym="c", keycode=67, state=4))(), "show")
+            self.assertIn("复制", settings._hotkey_hint.cget("text"))
+            self.assertIn("冲突", settings._hotkey_hint.cget("text"))
+            self.assertEqual(settings.hotkey_entries["show"].get(), before)
+            settings._capture_hotkey(type("Key", (), dict(keysym="Insert", keycode=45, state=1))(), "show")
+            self.assertIn("粘贴", settings._hotkey_hint.cget("text"))
+            self.assertIn("冲突", settings._hotkey_hint.cget("text"))
+            self.assertEqual(settings.hotkey_entries["show"].get(), before)
+            register.assert_not_called()
+        settings.destroy()
+
+    def test_all_hotkey_actions_protect_editor_shortcuts_without_changing_bindings(self):
+        with patch.object(main.user32, "RegisterHotKey", return_value=True), \
+                patch.object(main.user32, "UnregisterHotKey"):
+            self._start_hotkeys_impl(self.app)
+        before = self.app.data["settings"].copy()
+        active, identities = self.app._active_hotkeys.copy(), self.app._hotkey_ids.copy()
+        with patch.object(main.user32, "RegisterHotKey") as register, \
+                patch.object(main.user32, "UnregisterHotKey") as unregister, \
+                patch.object(self.app, "save_now") as save:
+            for action in main.HOTKEY_LABELS:
+                for value in ("Ctrl+A", "Ctrl+C", "Ctrl+X", "Ctrl+V", "Ctrl+Z", "Ctrl+Y",
+                              "Ctrl+Shift+Z", "Ctrl+Insert", "Shift+Insert", "Shift+Delete",
+                              "Ctrl+Left", "Ctrl+Shift+Home", "Ctrl+Backspace", "Ctrl+Tab"):
+                    with self.subTest(action=action, hotkey=value):
+                        self.assertIn("冲突", self.app.update_hotkey(action, value))
+            register.assert_not_called()
+            unregister.assert_not_called()
+            save.assert_not_called()
+        self.assertEqual(self.app.data["settings"], before)
+        self.assertEqual(self.app._active_hotkeys, active)
+        self.assertEqual(self.app._hotkey_ids, identities)
+
+    def test_hotkey_modifier_rules_keep_ctrl_alt_and_function_key_combinations(self):
+        for value in ("Ctrl+Shift+K", "Alt+F9", "Shift+F9", "F8"):
+            with self.subTest(hotkey=value):
+                self.assertIsNone(self.app.update_hotkey("convert", value))
+                self.assertEqual(self.app.hotkey_text("convert"), value)
+        for value in ("Shift+A", "A"):
+            with self.subTest(hotkey=value):
+                self.assertIn("Ctrl / Alt", self.app.update_hotkey("convert", value))
+                self.assertEqual(self.app.hotkey_text("convert"), "F8")
 
     def test_hotkey_replacement_preserves_old_binding_on_conflict_and_saves_success(self):
         with patch.object(main.user32, "RegisterHotKey", return_value=True), patch.object(

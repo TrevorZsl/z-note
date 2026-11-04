@@ -218,7 +218,7 @@ HOTKEY_ACTIONS = {"new": (1, "newHotkey", "Ctrl+Alt+N"),
                   "hide": (2, "hideHotkey", "Ctrl+Alt+H"),
                   "show": (3, "showHotkey", "Ctrl+Alt+S")}
 LOCAL_HOTKEY_ACTIONS = {"convert": ("convertHotkey", "Ctrl+Shift+L")}
-HOTKEY_LABELS = {"new": "新建便签", "hide": "隐藏所有便签", "show": "显示所有便签",
+HOTKEY_LABELS = {"new": "新建便签", "show": "显示所有便签", "hide": "隐藏所有便签",
                  "convert": "文字／待办切换"}
 HOTKEY_KEYS = {**{chr(k): k for k in range(65, 91)},
                **{str(k): 48 + k for k in range(10)},
@@ -3591,9 +3591,6 @@ class SettingsWindow(tk.Toplevel):
             return "break"
         parts = [name for mask, name in ((4, "Ctrl"), (0x20000, "Alt"), (1, "Shift"))
                  if event.state & mask]
-        if not (event.state & (4 | 0x20000)) and not 112 <= event.keycode <= 135:
-            self._hotkey_hint.configure(text="请使用 Ctrl / Alt 组合键，或 F1–F24 功能键。", fg="#A44A42")
-            return "break"
         self._apply_hotkey(action, "+".join(parts + [key]))
         return "break"
 
@@ -4327,8 +4324,8 @@ class App:
     def _start_tray(self):
         menu = pystray.Menu(
             pystray.MenuItem(lambda _item: f"新建便签  {self.hotkey_text('new')}", lambda: self.q.put("new")),
-            pystray.MenuItem(lambda _item: f"隐藏所有便签  {self.hotkey_text('hide')}", lambda: self.q.put("hide")),
             pystray.MenuItem(lambda _item: f"显示所有便签  {self.hotkey_text('show')}", lambda: self.q.put("show")),
+            pystray.MenuItem(lambda _item: f"隐藏所有便签  {self.hotkey_text('hide')}", lambda: self.q.put("hide")),
             pystray.Menu.SEPARATOR,
             pystray.MenuItem("清除记录与回收站…", lambda: self.q.put("history")),
             pystray.MenuItem("设置…", lambda: self.q.put("settings")),
@@ -4380,27 +4377,27 @@ class App:
         for other, label in HOTKEY_LABELS.items():
             if other != action and parse_hotkey(self.hotkey_text(other)) == parsed:
                 return f"此快捷键已用于另一项功能“{label}”，请换一个组合键。"
+        reserved = {"Ctrl+A": "全选", "Ctrl+C": "复制", "Ctrl+X": "剪切", "Ctrl+V": "粘贴",
+                    "Ctrl+Z": "撤销", "Ctrl+Y": "重做", "Ctrl+Shift+Z": "重做",
+                    "Ctrl+Insert": "复制", "Shift+Insert": "粘贴", "Shift+Delete": "剪切",
+                    "Ctrl+Left": "光标移动", "Ctrl+Right": "光标移动",
+                    "Ctrl+Up": "光标移动", "Ctrl+Down": "光标移动",
+                    "Ctrl+Home": "光标移动", "Ctrl+End": "光标移动",
+                    "Ctrl+Shift+Left": "选区移动", "Ctrl+Shift+Right": "选区移动",
+                    "Ctrl+Shift+Up": "选区移动", "Ctrl+Shift+Down": "选区移动",
+                    "Ctrl+Shift+Home": "选区移动", "Ctrl+Shift+End": "选区移动",
+                    "Ctrl+Backspace": "删除文字", "Ctrl+Delete": "删除文字",
+                    "Ctrl+D": "删除文字", "Ctrl+H": "删除文字", "Ctrl+K": "删除至行尾",
+                    "Ctrl+O": "插入换行", "Ctrl+T": "交换字符", "Ctrl+I": "插入制表符",
+                    "Ctrl+Tab": "切换焦点", "Ctrl+Shift+Tab": "切换焦点",
+                    "Ctrl+Space": "设置选区起点", "Ctrl+Shift+Space": "扩展选区",
+                    "Ctrl+PgUp": "水平翻页", "Ctrl+PgDn": "水平翻页"}
+        for shortcut, label in reserved.items():
+            if parse_hotkey(shortcut) == parsed:
+                return f"此快捷键与正文已有的“{label}”快捷键冲突，请换一个组合键。"
+        if not (parsed[0] & 3) and not 112 <= parsed[1] <= 135:
+            return "请使用 Ctrl / Alt 组合键，或 F1–F24 功能键。"
         if action in LOCAL_HOTKEY_ACTIONS:
-            if not (parsed[0] & 3) and not 112 <= parsed[1] <= 135:
-                return "请使用 Ctrl / Alt 组合键，或 F1–F24 功能键。"
-            reserved = {"Ctrl+A": "全选", "Ctrl+C": "复制", "Ctrl+X": "剪切", "Ctrl+V": "粘贴",
-                        "Ctrl+Z": "撤销", "Ctrl+Y": "重做", "Ctrl+Shift+Z": "重做",
-                        "Ctrl+Insert": "复制", "Shift+Insert": "粘贴", "Shift+Delete": "剪切",
-                        "Ctrl+Left": "光标移动", "Ctrl+Right": "光标移动",
-                        "Ctrl+Up": "光标移动", "Ctrl+Down": "光标移动",
-                        "Ctrl+Home": "光标移动", "Ctrl+End": "光标移动",
-                        "Ctrl+Shift+Left": "选区移动", "Ctrl+Shift+Right": "选区移动",
-                        "Ctrl+Shift+Up": "选区移动", "Ctrl+Shift+Down": "选区移动",
-                        "Ctrl+Shift+Home": "选区移动", "Ctrl+Shift+End": "选区移动",
-                        "Ctrl+Backspace": "删除文字", "Ctrl+Delete": "删除文字",
-                        "Ctrl+D": "删除文字", "Ctrl+H": "删除文字", "Ctrl+K": "删除至行尾",
-                        "Ctrl+O": "插入换行", "Ctrl+T": "交换字符", "Ctrl+I": "插入制表符",
-                        "Ctrl+Tab": "切换焦点", "Ctrl+Shift+Tab": "切换焦点",
-                        "Ctrl+Space": "设置选区起点", "Ctrl+Shift+Space": "扩展选区",
-                        "Ctrl+PgUp": "水平翻页", "Ctrl+PgDn": "水平翻页"}
-            for shortcut, label in reserved.items():
-                if parse_hotkey(shortcut) == parsed:
-                    return f"此快捷键已用于正文的“{label}”，请换一个组合键。"
             if self.hotkey_text(action) != value:
                 self.data["settings"][LOCAL_HOTKEY_ACTIONS[action][0]] = value
                 self.save_now()
