@@ -687,8 +687,14 @@ class NoteEditor:
         _hook_move_cursor(self._drag_handle)
         self._drag_handle.bind("<Enter>", _cursor_small)
         self._drag_handle.bind("<Leave>", _cursor_restore)
+        handle_image = Image.new("RGBA", (96, 96))
+        handle_draw = ImageDraw.Draw(handle_image)
         for y in (8, 12, 16):
-            self._drag_handle.create_line(7, y, 17, y, fill="#9198A2")
+            handle_draw.rounded_rectangle((28, y * 4 - 2, 67, y * 4 + 2),
+                                          radius=2, fill="#9198A2")
+        self._drag_handle_image = ImageTk.PhotoImage(
+            handle_image.resize((24, 24), Image.Resampling.LANCZOS), master=self._drag_handle)
+        self._drag_handle.create_image(12, 12, image=self._drag_handle_image)
         self._drag_handle.bind("<Button-1>", self._row_drag_press)
         self._drag_handle.bind("<B1-Motion>", self._row_drag_motion)
         self._drag_handle.bind("<ButtonRelease-1>", self._row_drag_release)
