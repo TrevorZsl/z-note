@@ -2138,6 +2138,27 @@ class NoteEditingTests(unittest.TestCase):
                                    text.winfo_y() + text.winfo_height()/2, delta=2)
         win.destroy()
 
+    def test_dialogs_keep_native_rounded_corners_and_app_window_style(self):
+        get_attribute = main.dwmapi.DwmGetWindowAttribute
+        get_attribute.argtypes = [main.wintypes.HWND, main.wintypes.DWORD,
+                                  main.ctypes.c_void_p, main.wintypes.DWORD]
+        get_attribute.restype = main.ctypes.c_long
+        for cls in (main.SettingsWindow, main.HistoryWindow):
+            with self.subTest(window=cls.__name__):
+                win = cls(self.app)
+                try:
+                    self.app.root.update()
+                    hwnd = main.user32.GetParent(win.winfo_id()) or win.winfo_id()
+                    preference = main.ctypes.c_int()
+                    self.assertEqual(get_attribute(hwnd, 33, main.ctypes.byref(preference),
+                                                   main.ctypes.sizeof(preference)), 0)
+                    self.assertEqual(preference.value, 2)
+                    style = main.user32.GetWindowLongPtrW(hwnd, -20)
+                    self.assertTrue(style & 0x40000)  # WS_EX_APPWINDOW
+                    self.assertFalse(style & 0x80)  # WS_EX_TOOLWINDOW
+                finally:
+                    win.destroy()
+
     def test_dialogs_ignore_all_resize_edges_and_keep_fixed_size(self):
         for cls in (main.SettingsWindow, main.HistoryWindow):
             win = cls(self.app)
