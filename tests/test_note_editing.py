@@ -944,6 +944,31 @@ class NoteEditingTests(unittest.TestCase):
             count.assert_not_called()
         note._finish_resize(cancel=True)
 
+    def test_horizontal_resize_toolbar_matches_clean_repaint_without_old_icon_pixels(self):
+        from PIL import Image
+        note = self.note
+        for edge, points in ((438, (578, 648, 500, 618, 578)),
+                             (2, (222, 152, 300, 182, 222))):
+            surface = self._begin_resize_session(x=edge, y=220)
+            try:
+                for x in points:
+                    with self.subTest(edge=edge, x=x):
+                        self._resize_to_pointer(x, 400)
+                        width = note._resize_target[2]
+                        height = note.toolbar.winfo_y()+note.toolbar.winfo_height()
+                        def toolbar_frame():
+                            pixels = main.ctypes.string_at(surface.bits,
+                                surface.capacity[0]*surface.capacity[1]*4)
+                            return Image.frombytes("RGB", surface.capacity, pixels, "raw", "BGRX").crop(
+                                (0, 0, width, height))
+                        frame = toolbar_frame()
+                        # 与清除 Tk 裁剪缓存并完整重绘后的同尺寸画面对照。
+                        note._repair_resize_frame()
+                        surface.present(note._resize_target)
+                        self.assertIsNone(ImageChops.difference(frame, toolbar_frame()).getbbox())
+            finally:
+                note._finish_resize(cancel=True)
+
     def test_width_resize_reflows_todos_and_preserves_toolbar_and_title_editor(self):
         note = self.note
         note.d["lines"] = [{"type": "todo", "text": "长待办实时换行验证" * 8, "checked": True}]
