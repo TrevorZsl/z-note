@@ -340,6 +340,30 @@ class NoteEditingTests(unittest.TestCase):
         self.assertEqual([line["text"] for line in editor.lines], ["待办", "普通文字"])
         self.assertIsNone(editor._row_drag)
 
+    def test_drag_handle_hides_after_pointer_leaves_note_horizontally(self):
+        editor = self.note.editors[0]
+        editor.lines = [dict(type="text", text="拖动图标", checked=False)]
+        editor.render()
+        self.note.geometry("400x300+100+100")
+        self.app.root.update()
+        y = editor.text.winfo_rooty() + 30
+        left = editor.text.winfo_rootx()
+        right = left + editor.text.winfo_width()
+        for inside, outside in ((right-1, self.note.winfo_rootx()+self.note.winfo_width()+20),
+                                (left, self.note.winfo_rootx()-20)):
+            with self.subTest(outside=outside):
+                editor.text.event_generate("<Motion>", x=80, y=30)
+                self.app.root.update()
+                with patch.object(editor._drag_handle, "winfo_pointerxy", return_value=(inside, y)):
+                    editor._drag_gutter.event_generate("<Leave>")
+                    self.app.root.update()
+                    self.assertEqual(editor._drag_handle.winfo_manager(), "place")
+                # 离开子控件时仍在正文内，随后从窗口边缘离开，不再经过正文控件。
+                with patch.object(editor._drag_handle, "winfo_pointerxy", return_value=(outside, y)):
+                    self.note.event_generate("<Leave>")
+                    self.app.root.update()
+                    self.assertFalse(editor._drag_handle.winfo_manager())
+
     def test_select_all_keeps_wrapped_rows_drag_gutter_unpainted(self):
         editor = self.note.editors[0]
         self.note.geometry("300x380+100+100")

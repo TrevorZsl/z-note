@@ -694,6 +694,8 @@ class NoteEditor:
         self._drag_handle.bind("<ButtonRelease-1>", self._row_drag_release)
         self._drag_handle.bind("<Escape>", self._cancel_row_drag)
         self._drag_escape = win.bind("<Escape>", self._cancel_row_drag, add="+")
+        self._drag_leave = win.bind("<Leave>",
+            lambda e: self.win.after_idle(self._hide_drag_handle), add="+")
         self._drag_handle.bind("<Leave>", self._hide_drag_handle, add="+")
         self.text.tag_configure("drag_margin", rmargin=54)
         self.text.bind("<Motion>", self._hover_row)
@@ -774,6 +776,7 @@ class NoteEditor:
         self._cancel_row_drag()
         _DRAG_HWNS.discard(self._drag_handle.winfo_id())
         self.win.unbind("<Escape>", self._drag_escape)
+        self.win.unbind("<Leave>", self._drag_leave)
         self._stop_wheel()
         self._stop_selection_scroll()
         if self._strike_job is not None:
