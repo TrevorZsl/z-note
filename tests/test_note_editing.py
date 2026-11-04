@@ -17,7 +17,14 @@ class NoteEditingTests(unittest.TestCase):
             patch.object(main.tk.Tk, "report_callback_exception", side_effect=lambda kind, value, trace:
                          self._callback_errors.append(f"{kind.__name__}: {value}")),
             patch.object(main, "load_data", return_value={
-                "settings": dict(main.DEFAULT_SETTINGS), "notes": []}),
+                "settings": dict(main.DEFAULT_SETTINGS), "welcomeVersion": main.APP_VERSION,
+                "notes": [{"id": "test-note", "x": 100, "y": 90, "w": 300, "h": 340,
+                           "z": "top", "opacity": 1.0, "color": "白", "visible": True,
+                           "lines": [
+                               {"type": "text", "text": "欢迎使用 z-note", "checked": False},
+                               {"type": "todo", "text": "点前面的圆框勾选我", "checked": False},
+                               {"type": "todo", "text": "右键这行：转换/插入/删除", "checked": False},
+                               {"type": "todo", "text": "Ctrl+滚轮 调透明度", "checked": False}]}]}),
             patch.object(main, "save_data"),
             patch.object(main.Tooltip, "_font", None),
             patch.object(main.Tooltip, "_cur", None),
@@ -1017,12 +1024,35 @@ class NoteEditingTests(unittest.TestCase):
                     self.assertEqual(bool(note.attributes("-topmost")), z == "top")
 
     def test_first_startup_shows_welcome_note_by_default(self):
+        self.note.destroy()
+        self.app.notes.clear()
+        self.app.data["notes"].clear()
+        self.app.data.pop("welcomeVersion")
+        self.app._restore_notes()
+        self.note = next(iter(self.app.notes.values()))
+        self.app.root.update()
         self.assertTrue(main.DEFAULT_SETTINGS["showOnStartup"])
         self.assertTrue(self.app.show_notes)
         self.assertTrue(self.note.d["visible"])
         self.assertEqual(self.note.state(), "normal")
         self.assertTrue(self.note.attributes("-topmost"))
-        self.assertEqual(self.note.winfo_width(), 300)
+        self.assertEqual(self.note.winfo_width(), 440)
+        self.assertEqual(self.note.d["title"], "使用指南")
+        self.assertEqual(self.app.data["welcomeVersion"], main.APP_VERSION)
+
+    def test_upgrade_guide_is_visible_when_startup_notes_are_hidden(self):
+        old_id = self.note.d["id"]
+        self.note.d["visible"] = False
+        self.note.destroy()
+        self.app.notes.clear()
+        self.app.show_notes = False
+        self.app.data["welcomeVersion"] = "1.0.0"
+        self.app._restore_notes()
+        self.app.root.update()
+        self.assertEqual(self.app.notes[old_id].state(), "withdrawn")
+        guide = self.app.notes[self.app.data["notes"][-1]["id"]]
+        self.assertEqual(guide.state(), "normal")
+        self.assertTrue(guide.d["visible"])
 
     def test_show_all_raises_notes_and_preserves_pinning(self):
         import subprocess

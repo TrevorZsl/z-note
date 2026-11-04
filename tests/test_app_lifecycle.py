@@ -1,9 +1,80 @@
 """Normal startup, tray dispatch and graceful exit regressions."""
 import unittest
+from copy import deepcopy
 from pathlib import Path
 from unittest.mock import Mock, call, patch
 
 import main
+
+
+class WelcomeNoteTests(unittest.TestCase):
+    def restore_app(self, data):
+        app = object.__new__(main.App)
+        app.data = data
+        app.root = Mock(winfo_screenwidth=Mock(return_value=1920),
+                        winfo_screenheight=Mock(return_value=1080))
+        app.notes = {}
+        app.show_notes = False
+        self.enterContext(patch.object(main, "NoteWindow"))
+        self.saved = self.enterContext(patch.object(main, "save_data"))
+        app._restore_notes()
+        return app
+
+    def empty_data(self):
+        return {"settings": dict(main.DEFAULT_SETTINGS), "notes": [],
+                "archives": [], "deletedNotes": []}
+
+    def test_fresh_install_persists_current_version_and_visible_guide(self):
+        app = self.restore_app(self.empty_data())
+        self.assertEqual(len(app.data["notes"]), 1)
+        guide = app.data["notes"][0]
+        self.assertTrue(guide["visible"])
+        self.assertEqual(guide["title"], "使用指南")
+        self.assertEqual(guide["lines"][0]["text"], f"欢迎使用 z-note {main.APP_VERSION}")
+        self.assertEqual(app.data["welcomeVersion"], main.APP_VERSION)
+        self.assertIn("Ctrl+Shift+L", "\n".join(line["text"] for line in guide["lines"]))
+        self.saved.assert_called_once_with(app.data)
+
+    def test_upgrade_preserves_notes_history_and_custom_shortcut(self):
+        data = self.empty_data()
+        data["settings"]["convertHotkey"] = "Ctrl+Alt+L"
+        data["settings"]["showOnStartup"] = False
+        data["notes"] = [{"id": "old", "x": 100, "y": 90, "w": 440, "h": 477,
+                          "z": "normal", "visible": False, "editedAt": "2026-01-01",
+                          "lines": [{"type": "text", "text": "我的内容", "checked": False}]}]
+        data["archives"] = [{"id": "archive"}]
+        data["deletedNotes"] = [{"id": "deleted"}]
+        original = deepcopy(data)
+        app = self.restore_app(data)
+        self.assertEqual(data["notes"][:-1], original["notes"])
+        self.assertEqual(data["archives"], original["archives"])
+        self.assertEqual(data["deletedNotes"], original["deletedNotes"])
+        self.assertTrue(data["notes"][-1]["visible"])
+        self.assertIn("Ctrl+Alt+L", "\n".join(line["text"] for line in data["notes"][-1]["lines"]))
+        saved = deepcopy(app.data)
+        self.restore_app(saved)
+        self.assertEqual(saved, data)
+        self.saved.assert_not_called()
+
+    def test_deleted_guide_is_not_recreated_in_same_version(self):
+        data = self.empty_data()
+        data["welcomeVersion"] = main.APP_VERSION
+        self.restore_app(data)
+        self.assertFalse(data["notes"])
+        self.saved.assert_not_called()
+
+    def test_next_release_adds_only_one_new_guide(self):
+        data = self.empty_data()
+        self.restore_app(data)
+        old_guide = deepcopy(data["notes"][0])
+        with patch.object(main, "APP_VERSION", "9.9.9"):
+            self.restore_app(data)
+            self.assertEqual(len(data["notes"]), 2)
+            self.assertEqual(data["notes"][0], old_guide)
+            self.assertEqual(data["welcomeVersion"], "9.9.9")
+            self.restore_app(data)
+            self.assertEqual(len(data["notes"]), 2)
+            self.saved.assert_not_called()
 
 
 class AppLifecycleTests(unittest.TestCase):

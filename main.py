@@ -4436,18 +4436,26 @@ class App:
 
     # 便签管理
     def _restore_notes(self):
-        if not self.data["notes"] and not self.data["archives"] and not self.data["deletedNotes"]:
+        if self.data.get("welcomeVersion") != APP_VERSION:
             sw, sh = self.root.winfo_screenwidth(), self.root.winfo_screenheight()
             self.data["notes"].append({
-                "id": str(uuid.uuid4()), "x": sw - 340, "y": 90, "w": 300, "h": 340,
+                "id": str(uuid.uuid4()), "x": sw - 480, "y": 90, "w": 440, "h": 560,
+                "title": "使用指南",
                 "z": "top", "opacity": self.data["settings"]["opacity"],
                 "color": self.data["settings"]["color"], "visible": True,
                 "lines": [
-                    {"type": "text", "text": "欢迎使用 z-note", "checked": False},
-                    {"type": "todo", "text": "点前面的圆框勾选我", "checked": False},
-                    {"type": "todo", "text": "右键这行：转换/插入/删除", "checked": False},
-                    {"type": "todo", "text": "Ctrl+滚轮 调透明度", "checked": False},
-                ]})
+                    {"type": "text", "text": f"欢迎使用 z-note {APP_VERSION}", "checked": False},
+                ] + [{"type": "todo", "text": text, "checked": False} for text in (
+                    "点方框勾选，右键编辑行",
+                    f"文字 / 待办：{self.hotkey_text('convert')}",
+                    "拖三横线排序，可跨栏拖动",
+                    "顶部切双栏，点标题改名",
+                    "图钉置顶，向下箭头置底",
+                    "减号隐藏，底部清除已完成",
+                    "托盘：新建、记录、回收站",
+                    "设置：字体、透明度与更新",
+                )]})
+            self.data["welcomeVersion"] = APP_VERSION
             self.save_now()
         for d in self.data["notes"]:
             d.setdefault("editedAt", datetime.now().isoformat(timespec="microseconds"))
