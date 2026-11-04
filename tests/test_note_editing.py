@@ -340,6 +340,37 @@ class NoteEditingTests(unittest.TestCase):
         self.assertEqual([line["text"] for line in editor.lines], ["待办", "普通文字"])
         self.assertIsNone(editor._row_drag)
 
+    def test_select_all_keeps_wrapped_rows_drag_gutter_unpainted(self):
+        editor = self.note.editors[0]
+        self.note.geometry("300x380+100+100")
+        for kind in ("text", "todo"):
+            with self.subTest(kind=kind):
+                content = "快捷转待办文字多行选中文字" * 3
+                editor.lines = [dict(type=kind, text=content, checked=False)]
+                editor.render()
+                self.app.root.update()
+                x = editor.text.winfo_width() - 44
+                editor.text.event_generate("<Motion>", x=x, y=30)
+                self.app.root.update()
+                handle = editor._drag_handle
+                bounds = (editor.text.winfo_rootx() + editor.text.winfo_width() - 60,
+                          handle.winfo_rooty(), handle.winfo_rootx() + handle.winfo_width() + 2,
+                          handle.winfo_rooty() + handle.winfo_height())
+                before = ImageGrab.grab(bounds)
+                editor._select_all(None)
+                self.app.root.update()
+                self.assertTrue(editor.text.tag_ranges("sel"))
+                self.assertIsNone(ImageChops.difference(before, ImageGrab.grab(bounds)).getbbox())
+                editor.text.event_generate("<<Copy>>")
+                self.assertEqual(editor.text.clipboard_get(), content)
+                self.assertEqual(self.app.root.winfo_containing(
+                    handle.winfo_rootx() + 12, handle.winfo_rooty() + 12), handle)
+                handle.place_forget()
+                editor._drag_gutter.event_generate("<Button-1>",
+                    x=x-editor._drag_gutter.winfo_x(), y=30)
+                self.assertIsNotNone(editor._row_drag)
+                editor._cancel_row_drag()
+
     def test_drag_handle_aligns_vertically_with_text_and_todo(self):
         editor = self.note.editors[0]
         editor.lines = [dict(type="text", text="普通文字", checked=False),

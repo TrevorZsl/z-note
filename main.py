@@ -669,6 +669,19 @@ class NoteEditor:
         self._edge_fade = EdgeFade(self.body)
         self._row_drag = None
         self._row_drag_job = None
+        # Tk 会把软换行选区画进右边距；独立覆盖层让拖拽区始终保持便签底色。
+        self._drag_gutter = tk.Frame(self.text, bg=self._bg)
+        self._drag_gutter.place(relx=1, x=-int(self.text.cget("padx"))-54,
+                                y=0, width=54, relheight=1, bordermode="ignore")
+        self._drag_gutter.bind("<Motion>", self._hover_row)
+        self._drag_gutter.bind("<Enter>", self._hover_row)
+        self._drag_gutter.bind("<Leave>", lambda e: self.win.after_idle(self._hide_drag_handle))
+        for event in ("<Button-1>", "<B1-Motion>", "<ButtonRelease-1>",
+                      "<Button-3>", "<MouseWheel>", "<Control-MouseWheel>"):
+            self._drag_gutter.bind(event, lambda e, sequence=event: self.text.event_generate(
+                sequence, x=e.x_root - self.text.winfo_rootx(),
+                y=e.y_root - self.text.winfo_rooty(), time=e.time, state=e.state,
+                **({"delta": e.delta} if "MouseWheel" in sequence else {})))
         self._drag_handle = tk.Canvas(self.text, width=24, height=24, bg=self._bg,
                                       bd=0, highlightthickness=0, cursor="fleur", takefocus=1)
         _hook_move_cursor(self._drag_handle)
@@ -3087,7 +3100,7 @@ class NoteWindow(tk.Toplevel):
         if self.divider is not None:
             widgets.append(self.divider)
         for editor in self.editors:
-            widgets.extend((editor.body, editor.text, editor.scroll_thumb))
+            widgets.extend((editor.body, editor.text, editor._drag_gutter, editor.scroll_thumb))
             widgets.extend(editor._selection_masks + editor._checkbox_widgets + editor._strike_widgets)
         for widget in widgets:
             widget.event_generate("<Expose>", x=0, y=0,
