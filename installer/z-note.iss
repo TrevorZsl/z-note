@@ -36,9 +36,20 @@ Name: "{autoprograms}\z-note"; Filename: "{app}\z-note.exe"
 Name: "{autodesktop}\z-note"; Filename: "{app}\z-note.exe"; Tasks: desktopicon
 
 [Run]
-Filename: "{app}\z-note.exe"; Description: "{cm:LaunchProgram,z-note}"; Flags: nowait postinstall skipifsilent
+Filename: "{app}\z-note.exe"; Description: "{cm:LaunchProgram,z-note}"; Flags: nowait postinstall skipifsilent runascurrentuser; BeforeInstall: PrepareAppLaunch
 
 [Code]
+function SetEnvironmentVariable(lpName, lpValue: String): BOOL;
+  external 'SetEnvironmentVariableW@kernel32.dll stdcall';
+
+procedure PrepareAppLaunch;
+begin
+  // Older clients pass their PyInstaller environment through Setup as well.
+  // Force a fresh extraction after the old process has removed its _MEI folder.
+  if not SetEnvironmentVariable('PYINSTALLER_RESET_ENVIRONMENT', '1') then
+    RaiseException('Unable to reset the application launch environment.');
+end;
+
 procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
 begin
   // 卸载时清掉开机自启项，避免残留指向已删除 exe 的注册表值

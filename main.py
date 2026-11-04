@@ -4932,7 +4932,9 @@ class App:
         command = [str(path)]
         if getattr(sys, "frozen", False):
             command.append(f"/DIR={Path(sys.executable).parent}")
-        subprocess.Popen(command, cwd=str(path.parent))
+        # Setup's post-install launch must not reuse this process's _MEI directory.
+        install_env = dict(os.environ, PYINSTALLER_RESET_ENVIRONMENT="1")
+        subprocess.Popen(command, cwd=str(path.parent), env=install_env)
         if self.settings_win is not None:
             self.settings_win._update_installing = True
         self.quit(saved=True)
