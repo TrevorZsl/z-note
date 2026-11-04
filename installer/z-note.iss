@@ -5,7 +5,7 @@
 [Setup]
 AppId={{A7DD33A3-341C-4C50-8E9D-6CFC1FB330FC}
 AppName=z-note
-AppVersion=1.0.0
+AppVersion=2.0.0
 UninstallDisplayName=z-note 便签
 DefaultDirName={localappdata}\Programs\z-note
 PrivilegesRequired=lowest
