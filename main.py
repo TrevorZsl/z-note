@@ -3840,14 +3840,16 @@ class SettingsWindow(tk.Toplevel):
         if self._update_busy or self._update_installing:
             return
         if self._update_state == "ready":
+            if not messagebox.askyesno("安装更新",
+                    f"新版 {self._update_release.version} 已下载并校验完成。\n\n"
+                    "现在安装吗？将保存并备份便签，退出 z-note 后打开覆盖安装程序，无需卸载。",
+                    parent=self):
+                return
             path, checksum = self._update_download
             try:
                 self.app.install_update(path, self._update_release, checksum)
             except Exception as exc:
                 self._update_status.configure(text=f"无法安装更新：{exc}")
-            return
-        if self._update_state == "found" and not self._is_installed():
-            webbrowser.open(updater.RELEASES_URL)
             return
         downloading = self._update_state == "found"
         cancel = self._update_cancel = threading.Event()
@@ -3877,11 +3879,6 @@ class SettingsWindow(tk.Toplevel):
                 messages.put(("update", self, cancel, "error", str(exc)))
 
         threading.Thread(target=work, daemon=True).start()
-
-    @staticmethod
-    def _is_installed():
-        return bool(getattr(sys, "frozen", False) and
-                    Path(sys.executable).with_name("unins000.exe").is_file())
 
     def _cancel_update(self):
         if self._update_cancel is not None:
@@ -3922,9 +3919,11 @@ class SettingsWindow(tk.Toplevel):
             self._update_status.configure(text="下载并校验完成。安装将保存数据并退出 z-note，无需卸载。")
         else:
             self._update_status.configure(text=value)
-        text = {"idle": "检查更新", "found": "下载并安装" if self._is_installed() else "前往下载",
+        text = {"idle": "检查更新", "found": "下载并安装",
                 "ready": "立即安装"}[self._update_state]
         self._update_button.configure(text=text)
+        if kind == "downloaded":
+            self._update_action()
 
     def _lock_size(self, width, height):
         self.minsize(width, height)
@@ -4912,8 +4911,6 @@ class App:
             pass
 
     def install_update(self, path, release, checksum):
-        if not SettingsWindow._is_installed():
-            raise updater.UpdateError("请先使用安装版；源码或便携版请从发布页面下载安装。")
         updater.verify_installer(path, release, checksum)
         for w in self.notes.values():
             if w._ime_active:
@@ -4926,7 +4923,10 @@ class App:
         save_data(self.data)
         backup_before_update()
         # AppMutex keeps Setup from replacing files until this process exits.
-        subprocess.Popen([str(path)], cwd=str(path.parent))
+        command = [str(path)]
+        if getattr(sys, "frozen", False):
+            command.append(f"/DIR={Path(sys.executable).parent}")
+        subprocess.Popen(command, cwd=str(path.parent))
         if self.settings_win is not None:
             self.settings_win._update_installing = True
         self.quit(saved=True)

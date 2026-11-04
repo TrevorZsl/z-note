@@ -84,8 +84,18 @@ class AppLifecycleTests(unittest.TestCase):
                                   winfo_x=Mock(return_value=12), winfo_y=Mock(return_value=34))}
         app.data = {"notes": [app.notes["note"].d]}
         app.settings_win = Mock(_update_installing=False)
-        self.enterContext(patch.object(main.SettingsWindow, "_is_installed", return_value=True))
+        self.enterContext(patch.object(main.sys, "frozen", False, create=True))
         return app
+
+    def test_packaged_update_targets_current_program_directory_without_uninstaller(self):
+        app = self.update_app()
+        with patch.object(main.sys, "frozen", True), \
+             patch.object(main.sys, "executable", "D:/便签工具/z-note.exe"), \
+             patch.object(main.updater, "verify_installer"), patch.object(main, "save_data"), \
+             patch.object(main, "backup_before_update"), \
+             patch.object(main.subprocess, "Popen") as start, patch.object(app, "quit"):
+            app.install_update(Path("setup.exe"), "release", "hash")
+        start.assert_called_once_with(["setup.exe", f"/DIR={Path('D:/便签工具')}"], cwd=".")
 
     def test_update_saves_and_backs_up_before_starting_installer_and_quitting(self):
         app = self.update_app()

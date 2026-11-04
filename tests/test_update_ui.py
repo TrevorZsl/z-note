@@ -23,7 +23,7 @@ class UpdateStateTests(unittest.TestCase):
         self.window._update_status = Mock()
         self.window._update_notes = Mock()
         self.release = updater.Release("2.2.0", "更新说明", "setup.exe", "url", 100, "sums")
-        self.enterContext(patch.object(main.SettingsWindow, "_is_installed", return_value=True))
+        self.confirm = self.enterContext(patch.object(main.messagebox, "askyesno", return_value=False))
 
     def receive(self, kind, value):
         self.window._receive_update(self.window._update_cancel, kind, value)
@@ -38,8 +38,25 @@ class UpdateStateTests(unittest.TestCase):
         self.receive("downloaded", (Path("setup.exe"), "hash"))
         self.assertEqual(self.window._update_state, "ready")
         self.window._update_button.configure.assert_called_with(text="立即安装")
+        self.confirm.assert_called_once()
+        self.window.app.install_update.assert_not_called()
+        self.confirm.return_value = True
         self.window._update_action()
         self.window.app.install_update.assert_called_once_with(Path("setup.exe"), self.release, "hash")
+
+    def test_download_completion_prompts_and_installs_when_confirmed(self):
+        self.receive("checked", self.release)
+        self.confirm.return_value = True
+        self.receive("downloaded", (Path("setup.exe"), "hash"))
+        self.window.app.install_update.assert_called_once_with(Path("setup.exe"), self.release, "hash")
+
+    def test_install_launch_failure_keeps_download_for_retry(self):
+        self.receive("checked", self.release)
+        self.confirm.return_value = True
+        self.window.app.install_update.side_effect = OSError("启动失败")
+        self.receive("downloaded", (Path("setup.exe"), "hash"))
+        self.assertEqual(self.window._update_state, "ready")
+        self.window._update_status.configure.assert_called_with(text="无法安装更新：启动失败")
 
     def test_no_update_and_error_allow_retry(self):
         self.receive("checked", None)
@@ -59,13 +76,16 @@ class UpdateStateTests(unittest.TestCase):
         event = self.window.app.q.get_nowait()
         self.assertEqual(event, ("update", self.window, self.window._update_cancel, "checked", self.release))
 
-    def test_source_mode_opens_release_page_instead_of_downloading(self):
-        self.window._update_state = "found"
-        with patch.object(main.SettingsWindow, "_is_installed", return_value=False), \
+    def test_source_and_portable_modes_download_without_opening_browser(self):
+        self.receive("checked", self.release)
+        with patch.object(main.sys, "frozen", False, create=True), \
              patch.object(main.webbrowser, "open") as browser, patch.object(main.threading, "Thread") as thread:
-            self.window._update_action()
-        browser.assert_called_once_with(updater.RELEASES_URL)
-        thread.assert_not_called()
+            with patch.object(updater, "download_update", return_value=(Path("setup.exe"), "hash")) as download:
+                self.window._update_action()
+                thread.call_args.kwargs["target"]()
+        browser.assert_not_called()
+        download.assert_called_once()
+        self.assertEqual(self.window.app.q.get_nowait()[3], "downloaded")
 
     def test_cancellation_wins_over_queued_completion(self):
         self.window._update_cancel.set()
@@ -128,7 +148,7 @@ class UpdateLayoutTests(unittest.TestCase):
         release = updater.Release("2.2.0", "改进更新体验。" * 100, "setup.exe", "url", 100, "sums")
         window._receive_update(cancel, "checked", release)
         self.app.root.update()
-        self.assertEqual(window._update_button.cget("text"), "前往下载")
+        self.assertEqual(window._update_button.cget("text"), "下载并安装")
         self.assertGreater(window._update_notes.winfo_height(), window._update_status.winfo_height())
         self.assertGreater(int(window._update_notes.cget("wraplength")), 0)
         self.assertLessEqual(window._update_notes.winfo_width(), window.winfo_width())
