@@ -471,10 +471,10 @@ class NoteEditingTests(unittest.TestCase):
             with patch.object(main, "load_data", return_value=data):
                 self.app = main.App()
             self.note = next(iter(self.app.notes.values()))
+            self.assertEqual(self.note._temporarily_raised, expected == "bottom")
             self.app.root.update()
             self.assertEqual(self.app.data["schemaVersion"], 3)
             self.assertEqual(self.note.d["z"], expected)
-            self.assertFalse(self.note._temporarily_raised)
             self.assertEqual(self.app.data["deletedNotes"][0]["z"], expected)
             self.assertEqual(self.note.b_bottom._active, expected == "bottom")
 
@@ -675,13 +675,38 @@ class NoteEditingTests(unittest.TestCase):
         self.assertFalse(second._temporarily_raised)
         self.app._refresh_bottom_notes()
 
-    def test_bottom_startup_display_does_not_enable_recall(self):
+    def test_bottom_startup_display_recalls_until_an_external_app_is_activated(self):
+        external = self._external_test_window()
         self.note.set_z("bottom")
-        self.app.show_all(temporary_raise=False)
-        self.app.root.update()
-        self.assertFalse(self.note._temporarily_raised)
-        self.app.show_all()
-        self.assertTrue(self.note._temporarily_raised)
+        self.note.hide()
+        self.note.destroy()
+        self.app.notes.clear()
+
+        def order():
+            handles = []
+            hwnd = main.user32.GetTopWindow(None)
+            while hwnd:
+                handles.append(hwnd)
+                hwnd = main.user32.GetWindow(hwnd, 2)
+            return handles
+
+        with patch.object(main.user32, "GetForegroundWindow", return_value=self.app.root.winfo_id()) as foreground:
+            self.app._restore_notes()
+            self.note = self.app.notes["test-note"]
+            foreground.return_value = self.note.hwnd
+            self.app.root.update()
+            self.app._refresh_bottom_notes()
+            self.assertTrue(self.note._temporarily_raised)
+            self.assertLess(order().index(self.note.hwnd), order().index(external))
+            self.assertEqual(self.note.d["z"], "bottom")
+            self.assertTrue(self.note.b_bottom._active)
+            self.assertFalse(main.user32.GetWindowLongPtrW(self.note.hwnd, -20) & 0x8)
+            foreground.return_value = external
+            self.app._refresh_bottom_notes()
+            self.assertFalse(self.note._temporarily_raised)
+            self.assertGreater(order().index(self.note.hwnd), order().index(external))
+            self.assertEqual(self.note.d["z"], "bottom")
+            self.assertTrue(main.user32.IsWindowVisible(self.note.hwnd))
         self.assertNotIn("_temporarily_raised", self.note.d)
         self.note.hide()
         self.note.show()
@@ -1008,13 +1033,15 @@ class NoteEditingTests(unittest.TestCase):
                 self.app.notes.clear()
                 self.app.data["notes"] = [
                     dict(deepcopy(original), id=f"{z}-{visible}", z=z, visible=visible)
-                    for z in ("top", "normal") for visible in (True, False)]
+                    for z in ("top", "normal", "bottom") for visible in (True, False)]
                 self.app.show_notes = show_on_startup
                 with patch.object(main.NoteWindow, "show", autospec=True,
-                                  side_effect=main.NoteWindow.show) as show:
+                                  side_effect=main.NoteWindow.show) as show, \
+                        patch.object(main.user32, "GetForegroundWindow",
+                                     return_value=self.app.root.winfo_id()):
                     self.app._restore_notes()
-                self.app.root.update()
-                self.assertEqual(show.call_count, 4 if show_on_startup else 0)
+                    self.app.root.update()
+                self.assertEqual(show.call_count, 6 if show_on_startup else 0)
                 for note_id, note in self.app.notes.items():
                     z, was_visible = note_id.split("-")
                     visible = show_on_startup or was_visible == "True"
@@ -1022,6 +1049,7 @@ class NoteEditingTests(unittest.TestCase):
                     self.assertEqual(note.state(), "normal" if visible else "withdrawn")
                     self.assertEqual(note.d["z"], z)
                     self.assertEqual(bool(note.attributes("-topmost")), z == "top")
+                    self.assertEqual(note._temporarily_raised, show_on_startup and z == "bottom")
 
     def test_first_startup_shows_welcome_note_by_default(self):
         self.note.destroy()

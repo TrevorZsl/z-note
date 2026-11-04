@@ -4474,7 +4474,7 @@ class App:
             w = NoteWindow(self, d)
             self.notes[d["id"]] = w
         if self.show_notes:
-            self.show_all(temporary_raise=False)
+            self.show_all()
 
     def note_font_family(self):
         choice = self.data["settings"]["fontFamily"]
