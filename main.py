@@ -440,7 +440,7 @@ def load_icon(master, name, size=22, active=False):
 
 
 class ToolButton(tk.Canvas):
-    """圆形悬浮底 + Lucide 图标的扁平按钮；active 态仅加深图标。"""
+    """圆形悬浮底 + Lucide 图标；置顶、置底激活时保留浅灰圆角底。"""
 
     def __init__(self, master, icon, get_tip, cmd, bg, size=30):
         super().__init__(master, width=size, height=size, bg=bg,
@@ -451,6 +451,8 @@ class ToolButton(tk.Canvas):
         r = 13
         self._pill = self.create_oval(size/2 - r, size/2 - r, size/2 + r, size/2 + r,
                                       state="hidden", outline="")
+        self._active_pill = (round_rect(self, 0, 0, size, size, 7, fill="#E5E9EF", outline="", state="hidden")
+                             if icon in ("pin", "arrow-down-to-line") else None)
         self._icon = self.create_image(size/2, size/2 + 1, image=self._image)
         self.bind("<Enter>", self._on_enter)
         self.bind("<Leave>", self._on_leave)
@@ -472,6 +474,8 @@ class ToolButton(tk.Canvas):
     def set_active(self, on):
         self._active = on
         self.itemconfig(self._pill, state="hidden")
+        if self._active_pill is not None:
+            self.itemconfig(self._active_pill, state="normal" if on else "hidden")
         if on:
             self.itemconfig(self._icon, image=self._active_image)
         else:

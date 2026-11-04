@@ -288,6 +288,26 @@ class NoteEditingTests(unittest.TestCase):
                 expected = item._active_image if item._active else item._image
                 self.assertEqual(item.itemcget(item._icon, "image"), str(expected))
 
+    def test_layer_buttons_keep_selected_background_after_pointer_leaves(self):
+        for state in ("top", "bottom", "normal"):
+            self.note.set_z(state)
+            for button, selected in ((self.note.b_pin, state == "top"),
+                                     (self.note.b_bottom, state == "bottom")):
+                with self.subTest(state=state, button=button):
+                    button._on_enter(None)
+                    button._on_leave(None)
+                    self.assertEqual(button.itemcget(button._active_pill, "state"),
+                                     "normal" if selected else "hidden")
+                    self.assertEqual(button.itemcget(button._pill, "state"), "hidden")
+                    self.assertEqual(button.itemcget(button._active_pill, "fill"), "#E5E9EF")
+                    if not selected:
+                        button._on_enter(None)
+                        self.assertEqual(button.itemcget(button._pill, "state"), "normal")
+                        button._on_leave(None)
+        self.note.toggle_columns()
+        self.assertTrue(self.note.b_columns._active)
+        self.assertIsNone(self.note.b_columns._active_pill)
+
     def test_bottom_note_stays_below_other_windows_when_shown_or_activated(self):
         blocker = main.tk.Toplevel(self.app.root)
         blocker.geometry("300x240+30+30")
