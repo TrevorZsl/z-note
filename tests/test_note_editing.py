@@ -46,19 +46,19 @@ class NoteEditingTests(unittest.TestCase):
             if y < self.note.body.winfo_height() and y + box[3] > 0:
                 return box[0], y, box[2], box[3]
 
-    def _drag_event(self, x, y):
+    def _drag_event(self, x, y, editor=None):
         from types import SimpleNamespace
-        body = self.note.editors[0].body
+        body = (editor or self.note.editors[0]).body
         return SimpleNamespace(x_root=round(body.winfo_rootx()+x), y_root=round(body.winfo_rooty()+y))
 
-    def _start_row_drag(self, source):
-        editor = self.note.editors[0]
+    def _start_row_drag(self, source, editor=None):
+        editor = editor or self.note.editors[0]
         self.app.root.update()
         editor._drag_handle._row = source
         y = int(editor.text.cget("pady")) + sum(
             editor.text.count(f"{i}.0", f"{i+1}.0", "ypixels")[0]
             for i in range(1, source+1)) + 15 - editor.body.canvasy(0)
-        event = self._drag_event(editor.body.winfo_width()-44, y)
+        event = self._drag_event(editor.body.winfo_width()-44, y, editor)
         editor._row_drag_press(event)
         return event
 
@@ -168,6 +168,150 @@ class NoteEditingTests(unittest.TestCase):
         editor._row_drag_release(bottom)
         self.assertEqual(self.note.editors[1].lines, right)
         self.assertIsNone(editor._row_drag_job)
+
+    def test_cross_column_drag_moves_both_directions_and_is_one_undoable_edit(self):
+        self.note.toggle_columns()
+        for column in (0, 1):
+            for slot in (0, 1, 3):
+                with self.subTest(column=column, slot=slot):
+                    source, destination = self.note.editors[column], self.note.editors[1-column]
+                    original = [{"type": "todo", "text": "完成事项", "checked": True},
+                                {"type": "text", "text": "保留文字", "checked": False},
+                                {"type": "text", "text": "", "checked": False}]
+                    other = [{"type": "text", "text": str(i), "checked": False} for i in range(3)]
+                    source.lines, destination.lines = main.deepcopy(original), main.deepcopy(other)
+                    source.render(); destination.render()
+                    self._start_row_drag(0, source)
+                    history = len(self.note._columns_history)
+                    row_height = source._row_drag["floating_rows"][source][0]
+                    y = 1 if slot == 0 else (destination.body.winfo_height()-2 if slot == 3 else
+                        int(destination.text.cget("pady"))+row_height+
+                        destination.text.count("1.0", "2.0", "ypixels")[0]+1)
+                    event = self._drag_event(80, y, destination)
+                    with patch.object(self.app, "schedule_save") as save:
+                        source._row_drag_motion(event)
+                        self.assertEqual(source._row_drag["target"], slot)
+                        self.assertEqual(source.lines, original)
+                        self.assertEqual(destination.lines, other)
+                        self.assertEqual(len(self.note._columns_history), history)
+                        self.assertIs(source._row_drag["destination"], destination)
+                        self.assertEqual(source._row_drag["float"].master, self.note)
+                        save.assert_not_called()
+                        source._row_drag_release(event)
+                        save.assert_called_once()
+                    expected = main.deepcopy(other)
+                    expected.insert(slot, original[0])
+                    self.assertEqual(source.lines, original[1:])
+                    self.assertEqual(destination.lines, expected)
+                    self.assertEqual(destination.text.index("insert"), f"{slot+1}.3")
+                    self.assertEqual(len(self.note._columns_history), history+1)
+                    source._undo_edit()
+                    self.assertEqual(source.lines, original)
+                    self.assertEqual(destination.lines, other)
+                    destination._undo_edit(redo=True)
+                    self.assertEqual(source.lines, original[1:])
+                    self.assertEqual(destination.lines, expected)
+        self.app.save_now()
+        restored = main.NoteWindow(self.app, main.deepcopy(self.note.d))
+        self.assertEqual([e.lines for e in restored.editors], [e.lines for e in self.note.editors])
+        restored.destroy()
+        before = main.deepcopy([e.lines for e in self.note.editors])
+        self.note.toggle_columns(); self.note.toggle_columns()
+        self.assertEqual([e.lines for e in self.note.editors], before)
+
+    def test_cross_column_drag_replaces_empty_target_and_keeps_source_editable(self):
+        self.note.toggle_columns()
+        for kind, content in (("todo", "已完成"), ("text", "文字"), ("text", "")):
+            left, right = self.note.editors
+            line = {"type": kind, "text": content, "checked": kind == "todo"}
+            left.lines = [main.deepcopy(line)]
+            right.lines = [{"type": "todo", "text": "", "checked": False}]
+            left.render(); right.render()
+            self._start_row_drag(0, left)
+            event = self._drag_event(80, 30, right)
+            left._row_drag_motion(event); left._row_drag_release(event)
+            self.assertEqual(left.lines, [{"type": "todo", "text": "", "checked": False}])
+            self.assertEqual(right.lines, [line])
+            self._start_row_drag(0, right)
+            event = self._drag_event(80, 30, left)
+            right._row_drag_motion(event); right._row_drag_release(event)
+            self.assertEqual(left.lines, [line])
+            self.assertEqual(right.lines, [{"type": "todo", "text": "", "checked": False}])
+
+    def test_cross_column_undo_orders_later_input_before_the_move(self):
+        self.note.toggle_columns()
+        left, right = self.note.editors
+        left.lines = [{"type": "text", "text": "左", "checked": False}]
+        right.lines = [{"type": "text", "text": "右", "checked": False}]
+        left.render(); right.render()
+        original = main.deepcopy([e.lines for e in self.note.editors])
+        left.text.insert("1.end", "先编辑"); left._on_keyrelease(None)
+        edited = main.deepcopy([e.lines for e in self.note.editors])
+        self._start_row_drag(0, left)
+        event = self._drag_event(80, 1, right)
+        left._row_drag_motion(event); left._row_drag_release(event)
+        moved = main.deepcopy([e.lines for e in self.note.editors])
+        right.text.insert("1.end", "后编辑"); right._on_keyrelease(None)
+        final = main.deepcopy([e.lines for e in self.note.editors])
+        for expected in (moved, edited, original):
+            left._undo_edit()
+            self.assertEqual([e.lines for e in self.note.editors], expected)
+        for expected in (edited, moved, final):
+            right._undo_edit(redo=True)
+            self.assertEqual([e.lines for e in self.note.editors], expected)
+        left._undo_edit()
+        left.text.insert("1.end", "新输入"); left._on_keyrelease(None)
+        self.assertFalse(self.note._columns_redo)
+
+    def test_cross_column_drag_cancellation_cleans_both_previews_and_capture(self):
+        self.note.toggle_columns()
+        left, right = self.note.editors
+        left.lines = [{"type": "todo", "text": "保留", "checked": True}]
+        left.render()
+        original = main.deepcopy([e.lines for e in self.note.editors])
+        for cancel in ("escape", "divider", "outside", "hide", "columns"):
+            left, right = self.note.editors
+            self._start_row_drag(0, left)
+            left._row_drag_motion(self._drag_event(80, 30, right))
+            widgets = [*left._row_drag["canvases"].values(), left._row_drag["float"], left._row_drag["measure"]]
+            if cancel == "escape":
+                left._cancel_row_drag()
+            elif cancel == "divider":
+                event = self._drag_event(left.body.winfo_width()+7, 30, left)
+                left._row_drag_motion(event)
+                self.assertIsNone(left._row_drag["destination"])
+                left._row_drag_release(event)
+            elif cancel == "outside":
+                left._row_drag_release(self._drag_event(-20, 30, left))
+            elif cancel == "hide":
+                self.note.hide(); self.app.root.update(); self.note.show()
+            else:
+                self.note.toggle_columns(); self.note.toggle_columns()
+            self.app.root.update()
+            self.assertEqual([e.lines for e in self.note.editors], original)
+            self.assertIsNone(left._row_drag)
+            self.assertIsNone(left._row_drag_job)
+            self.assertIsNone(self.note.grab_current())
+            self.assertTrue(all(not widget.winfo_exists() for widget in widgets))
+
+    def test_cross_column_drag_wraps_using_target_text_metrics_and_scrolls_only_target(self):
+        self.note.toggle_columns()
+        left, right = self.note.editors
+        content = "很长的已完成待办，拖动时保留软换行。" * 30
+        left.lines = [{"type": "todo", "text": content, "checked": True}]
+        right.lines = [{"type": "text", "text": str(i), "checked": False} for i in range(40)]
+        left.render(); right.render()
+        self._start_row_drag(0, left)
+        event = self._drag_event(80, right.body.winfo_height()-2, right)
+        left._row_drag_motion(event)
+        self.assertEqual("".join(left._row_drag["floating_rows"][right][1]), content)
+        self.assertGreater(len(left._row_drag["floating_rows"][right][1]), 1)
+        source_scroll, target_scroll = left.body.canvasy(0), right.body.canvasy(0)
+        self.app.root.after(120, self.app.root.quit); self.app.root.mainloop()
+        self.assertEqual(left.body.canvasy(0), source_scroll)
+        self.assertGreater(right.body.canvasy(0), target_scroll)
+        left._cancel_row_drag()
+        self.assertEqual(right.body.canvasy(0), 0)
 
     def test_drag_handle_hover_and_fast_gutter_press_do_not_select_text(self):
         editor = self.note.editors[0]
@@ -4523,6 +4667,36 @@ class NoteEditingTests(unittest.TestCase):
                 note.toggle_columns()
                 self.app.root.update()
                 self.assertEqual(note.winfo_width(), width)
+
+    def test_column_toggle_does_not_append_empty_right_placeholder(self):
+        original = [{"type": "todo", "text": "月报", "checked": False},
+                    {"type": "todo", "text": "生息", "checked": True}]
+        self.note.d["lines"] = main.deepcopy(original)
+        self.note.render()
+        for _ in range(3):
+            self.note.toggle_columns()
+            self.assertTrue(self.note.editors[1]._is_empty_todo_column())
+            self.note.toggle_columns()
+            self.assertEqual(self.note.d["lines"], original)
+            self.assertEqual(self.note.status.cget("text"), "待办 1/2")
+            self.assertNotIn("lines2", self.note.d)
+
+    def test_column_toggle_preserves_nonplaceholder_empty_right_rows(self):
+        left = [{"type": "text", "text": "左栏", "checked": False}]
+        for right in ([{"type": "text", "text": "", "checked": False}],
+                      [{"type": "todo", "text": "", "checked": True}],
+                      [{"type": "todo", "text": "", "checked": False}] * 2):
+            with self.subTest(right=right):
+                self.note.d["lines"] = main.deepcopy(left)
+                self.note.render()
+                self.note.toggle_columns()
+                self.note.editors[1].lines = main.deepcopy(right)
+                self.note.editors[1].render()
+                self.note.toggle_columns()
+                self.assertEqual(self.note.d["lines"], left + [dict(line, mergedColumn=1) for line in right])
+                self.note.toggle_columns()
+                self.assertEqual(self.note.d["lines2"], right)
+                self.note.toggle_columns()
 
     def test_column_round_trip_preserves_duplicate_text_blank_lines_and_checks(self):
         from copy import deepcopy

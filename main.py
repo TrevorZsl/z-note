@@ -864,38 +864,49 @@ class NoteEditor:
                                 y=round(middle)-12, width=24, height=24, bordermode="ignore")
         tk.Misc.lift(self._drag_handle)
 
-    def _row_drag_press(self, event):
-        if self.win._ime_composing(self.text):
-            return "break"
-        self._stop_wheel()
-        self._stop_selection_scroll()
-        self._sync_lines_from_text()
-        self._draw_strikes()
-        self._hover_row(event)
-        source = self._drag_handle._row
+    def _measure_drag_rows(self, text=None):
+        text = self.text if text is None else text
         rows = []
-        for i, line in enumerate(self.lines, 1):
-            height = self.text.count(f"{i}.0", f"{i+1}.0", "ypixels")[0]
+        for i in range(1, int(text.index("end-1c").split(".")[0]) + 1):
+            height = text.count(f"{i}.0", f"{i+1}.0", "ypixels")[0]
             # 使用 Text 自己的软换行边界，浮框与正文的断行保持一致。
             start, segments = f"{i}.0", []
-            while self.text.compare(start, "<", f"{i}.end"):
-                end = self.text.index(f"{start} display lineend +1c")
-                if self.text.compare(end, ">", f"{i}.end"):
-                    end = self.text.index(f"{i}.end")
-                content = self.text.get(start, end)
-                if not segments and line["type"] == "todo":
+            while text.compare(start, "<", f"{i}.end"):
+                end = text.index(f"{start} display lineend +1c")
+                if text.compare(end, ">", f"{i}.end"):
+                    end = text.index(f"{i}.end")
+                content = text.get(start, end)
+                if not segments and text.dump(f"{i}.0", f"{i}.1", image=True):
                     content = content[len(PREFIX_PAD):]
                 segments.append(content)
-                if self.text.compare(end, "<=", start):
+                if text.compare(end, "<=", start):
                     break
                 start = end
             rows.append((height, segments or [""]))
+        return rows
+
+    def _row_drag_press(self, event):
+        if any(self.win._ime_composing(editor.text) for editor in self.win.editors):
+            return "break"
+        for editor in self.win.editors:
+            editor._stop_wheel()
+            editor._stop_selection_scroll()
+            editor._sync_lines_from_text()
+            editor._draw_strikes()
+        self._remember_edit()
+        self._hover_row(event)
+        source = self._drag_handle._row
+        rows = self._measure_drag_rows()
         top = int(self.text.cget("pady")) + sum(h for h, _ in rows[:source])
         self._row_drag = dict(source=source, target=source, rows=rows,
                               press=(event.x_root, event.y_root), pointer=(event.x_root, event.y_root),
                               offset=event.y_root-self.body.winfo_rooty()+self.body.canvasy(0)-top,
                               canvas=None, cursor=self.text.index("insert"),
                               scroll=self.body.canvasy(0))
+        if self.d.get("twoColumn"):
+            self._row_drag.update(destination=self, layouts={editor: editor._measure_drag_rows()
+                                  for editor in self.win.editors}, floating_rows={self: rows[source]},
+                                  scrolls={editor: editor.body.canvasy(0) for editor in self.win.editors})
         self._drag_handle.focus_set()
         self._drag_handle.grab_set()
         return "break"
@@ -911,6 +922,32 @@ class NoteEditor:
             drag["canvas"] = tk.Canvas(self.body, bg=self._bg, bd=0, highlightthickness=0)
             drag["canvas"].place(x=0, y=0, relwidth=1, relheight=1)
             tk.Misc.lift(drag["canvas"])
+            if self.d.get("twoColumn"):
+                drag["canvases"] = {self: drag["canvas"]}
+                for editor in self.win.editors:
+                    if editor is self:
+                        continue
+                    canvas = tk.Canvas(editor.body, bg=self._bg, bd=0, highlightthickness=0)
+                    canvas.place(x=0, y=0, relwidth=1, relheight=1)
+                    drag["canvases"][editor] = canvas
+                    measure = tk.Text(self.win, **{key: editor.text.cget(key) for key in
+                        ("font", "padx", "pady", "spacing1", "spacing2", "spacing3", "wrap", "bd", "highlightthickness")})
+                    drag["measure"] = measure
+                    measure.place(x=-10000, y=0, width=editor.body.winfo_width(), height=editor.body.winfo_height())
+                    for tag in ("todo_indent", "drag_margin"):
+                        measure.tag_configure(tag, **{key: editor.text.tag_cget(tag, key)
+                                              for key in ("lmargin1", "lmargin2", "rmargin")})
+                    line = self.lines[drag["source"]]
+                    if line["type"] == "todo":
+                        measure.image_create("1.0", image=editor._check_slots[line["checked"]])
+                        measure.insert("end", PREFIX_PAD)
+                    measure.insert("end", line["text"])
+                    measure.tag_add("drag_margin", "1.0", "end")
+                    if line["type"] == "todo":
+                        measure.tag_add("todo_indent", "1.0", "end")
+                    measure.update_idletasks()
+                    drag["floating_rows"][editor] = editor._measure_drag_rows(measure)[0]
+                drag["float"] = tk.Canvas(self.win, bg=self._bg, bd=0, highlightthickness=0)
             self.body.update_idletasks()
             self._row_drag_tick()
         else:
@@ -922,15 +959,15 @@ class NoteEditor:
         drag = self._row_drag
         if drag is None or drag["canvas"] is None:
             return
-        x, y = drag["pointer"]
-        x -= self.body.winfo_rootx()
-        y -= self.body.winfo_rooty()
-        height = self.body.winfo_height()
-        if 0 <= x < self.body.winfo_width() and 0 <= y < height:
+        editor = self._drag_destination(drag["pointer"])
+        if editor is not None:
+            x, y = drag["pointer"]
+            y -= editor.body.winfo_rooty()
+            height = editor.body.winfo_height()
             edge = min(36, height//4)
             step = -8 if y < edge else (8 if y > height-edge else 0)
             if step:
-                self.body.yview_scroll(step, "units")
+                editor.body.yview_scroll(step, "units")
         self._paint_row_drag()
         self._row_drag_job = self.win.after(30, self._row_drag_tick)
 
@@ -939,6 +976,8 @@ class NoteEditor:
         cv = drag["canvas"]
         if cv is None:
             return
+        if "canvases" in drag:
+            return self._paint_columns_drag()
         cv.delete("all")
         width, viewport = self.body.winfo_width(), self.body.winfo_height()
         pointer_y = drag["pointer"][1] - self.body.winfo_rooty()
@@ -984,9 +1023,90 @@ class NoteEditor:
                    fill=self._bg, outline="#AAB7C8")
         self._draw_drag_row(cv, drag["source"], y)
 
-    def _draw_drag_row(self, cv, index, y, muted=False):
-        line = self.lines[index]
-        height, segments = self._row_drag["rows"][index]
+    def _drag_destination(self, pointer):
+        x, y = pointer
+        return next((editor for editor in self.win.editors
+                     if 0 <= x-editor.body.winfo_rootx() < editor.body.winfo_width()
+                     and 0 <= y-editor.body.winfo_rooty() < editor.body.winfo_height()), None)
+
+    def _is_empty_todo_column(self):
+        return (len(self.lines) == 1 and self.lines[0]["type"] == "todo"
+                and not self.lines[0]["text"] and not self.lines[0]["checked"])
+
+    def _paint_columns_drag(self):
+        drag = self._row_drag
+        destination = self._drag_destination(drag["pointer"])
+        line = self.lines[drag["source"]]
+        order = []
+        if destination is not None:
+            order = ([] if destination is not self and destination._is_empty_todo_column() else
+                     [i for i in range(len(destination.lines)) if destination is not self or i != drag["source"]])
+            previous = min(len(order), drag["target"]) if destination is drag["destination"] else 0
+            content_height = sum(drag["layouts"][destination][i][0] for i in order)
+            order.insert(previous, None)
+            y = int(destination.text.cget("pady")) - destination.body.canvasy(0)
+            pointer_y = drag["pointer"][1] - destination.body.winfo_rooty()
+            target = len(order)-1
+            for slot, index in enumerate(order):
+                height = (drag["floating_rows"][destination][0] if index is None else
+                          drag["layouts"][destination][index][0])
+                if y <= pointer_y < y+height:
+                    boundary = slot + (pointer_y >= y+height/2)
+                    target = previous if index is None else boundary - (previous < boundary)
+                    break
+                if pointer_y < y:
+                    target = slot
+                    break
+                y += height
+            if destination is not self and pointer_y >= int(destination.text.cget("pady")) - destination.body.canvasy(0) + content_height:
+                target = len(order)-1
+            drag["target"] = max(0, min(len(order)-1, target))
+            order.remove(None)
+            order.insert(drag["target"], None)
+        drag["destination"] = destination
+        for editor, canvas in drag["canvases"].items():
+            canvas.delete("all")
+            tk.Misc.lift(canvas)
+            indices = order if editor is destination else list(range(len(editor.lines)))
+            width, viewport = editor.body.winfo_width(), editor.body.winfo_height()
+            y = int(editor.text.cget("pady")) - editor.body.canvasy(0)
+            for index in indices:
+                placeholder = index is None or (editor is self and index == drag["source"])
+                row_line = line if index is None else editor.lines[index]
+                layout = drag["floating_rows"][editor] if index is None else drag["layouts"][editor][index]
+                height = layout[0]
+                if y < viewport and y+height > 0:
+                    if placeholder:
+                        round_rect(canvas, 5, y+2, width-5, y+height-2, min(9, height/3),
+                                   fill=mix(self._bg, "#B6C4D7", .22), outline="")
+                    editor._draw_drag_row(canvas, index, y, muted=placeholder, line=row_line, layout=layout)
+                y += height
+        editor = destination or self
+        width = editor.body.winfo_width()
+        height, segments = drag["floating_rows"][editor]
+        top = editor.body.winfo_rooty() - self.win.winfo_rooty()
+        raw_y = drag["pointer"][1] - self.win.winfo_rooty() - drag["offset"] * height/drag["rows"][drag["source"]][0]
+        y = max(top, raw_y)
+        bottom = min(top+editor.body.winfo_height(), raw_y+height)
+        canvas = drag["float"]
+        canvas.delete("all")
+        if bottom <= y:
+            canvas.place_forget()
+            return
+        offset_x = (drag["press"][0]-self.body.winfo_rootx()) * width/self.body.winfo_width()
+        canvas.place(x=drag["pointer"][0]-self.win.winfo_rootx()-offset_x,
+                     y=y, width=width, height=bottom-y)
+        tk.Misc.lift(canvas)
+        y = raw_y-y
+        round_rect(canvas, 6, y+5, width-4, y+height, min(10, height/3),
+                   fill=mix(self._bg, "#677588", .18), outline="")
+        round_rect(canvas, 3, y+1, width-7, y+height-4, min(10, height/3),
+                   fill=self._bg, outline="#AAB7C8")
+        editor._draw_drag_row(canvas, None, y, line=line, layout=(height, segments))
+
+    def _draw_drag_row(self, cv, index, y, muted=False, line=None, layout=None):
+        line = self.lines[index] if line is None else line
+        height, segments = self._row_drag["rows"][index] if layout is None else layout
         x = int(self.text.cget("padx"))
         if line["type"] == "todo":
             cv.create_image(x+self._check_margin+self._check_margin//2, y+height/2,
@@ -1007,6 +1127,41 @@ class NoteEditor:
     def _row_drag_release(self, event):
         drag = self._row_drag
         if drag is None:
+            return "break"
+        if "canvases" in drag:
+            drag["pointer"] = (event.x_root, event.y_root)
+            self._paint_columns_drag()
+            destination = drag["destination"]
+            commit = destination is not None and (destination is not self or drag["source"] != drag["target"])
+            self._cancel_row_drag(restore=not commit)
+            if commit:
+                self.win._columns_editing = True
+                try:
+                    source, target = drag["source"], drag["target"]
+                    indices = list(range(len(self.lines)))
+                    if destination is self:
+                        indices.insert(target, indices.pop(source))
+                    line = self.lines.pop(source)
+                    if destination is not self and destination._is_empty_todo_column():
+                        destination.lines = []
+                    destination.lines.insert(target, line)
+                    if not self.lines:
+                        self.lines = [{"type": "todo", "text": "", "checked": False}]
+                    for editor in self.win.editors:
+                        editor.render()
+                    if destination is self:
+                        row, col = self._row_col(drag["cursor"])
+                        destination.text.mark_set("insert", f"{indices.index(row)+1}.{col}")
+                    else:
+                        destination.text.mark_set("insert", f"{target+1}.{self._prefix_len(line)}")
+                    destination._clamp_todo_cursor()
+                finally:
+                    self.win._columns_editing = False
+                destination.text.focus_set()
+                destination._see_text("insert")
+                destination._remember_edit()
+                self.d["editedAt"] = datetime.now().isoformat(timespec="microseconds")
+                self.app.schedule_save()
             return "break"
         inside = (0 <= event.x_root-self.body.winfo_rootx() < self.body.winfo_width() and
                   0 <= event.y_root-self.body.winfo_rooty() < self.body.winfo_height())
@@ -1033,7 +1188,15 @@ class NoteEditor:
             self._row_drag_job = None
         if drag is not None:
             self._drag_handle.grab_release()
-            if drag["canvas"] is not None:
+            if "canvases" in drag:
+                for canvas in drag["canvases"].values():
+                    canvas.destroy()
+                drag["float"].destroy()
+                drag["measure"].destroy()
+                if restore:
+                    for editor, scroll in drag["scrolls"].items():
+                        editor._scroll_to(scroll)
+            elif drag["canvas"] is not None:
                 drag["canvas"].destroy()
             if restore:
                 self._scroll_to(drag["scroll"])
@@ -1440,10 +1603,14 @@ class NoteEditor:
             self._edit_redo.clear()
         else:
             self._edit_history[-1] = state
+        if len(self.win.__dict__.get("editors", ())) == 2:
+            self.win._remember_columns_edit(self.col)
 
     def _undo_edit(self, redo=False):
         if self.win._ime_composing(self.text):
             return "break"
+        if self.d.get("twoColumn"):
+            return self.win._undo_columns_edit(self.col, redo)
         self._sync_lines_from_text()
         if redo:
             if not self._edit_redo:
@@ -1922,11 +2089,14 @@ class NoteWindow(tk.Toplevel):
         self._resize_job = None
         self._relayout_job = None
         self.divider = None
+        self._columns_editing = False
+        self._columns_history, self._columns_redo = [], []
         # 编辑器在状态栏之后创建：render 会立即更新底部状态文字。
         self.editors = [NoteEditor(self, 0)]
         if self.d.get("twoColumn"):
             self.d.setdefault("lines2", [{"type": "todo", "text": "", "checked": False}])
             self.editors.append(NoteEditor(self, 1))
+            self._remember_columns_edit(0)
         self._draw_chip()
 
         self.bind("<Configure>", lambda e: self._queue_relayout() if e.widget == self else None)
@@ -2509,16 +2679,69 @@ class NoteWindow(tk.Toplevel):
         self.clear_btn.config(fg="#6F7780" if done else "#A9AFB6")
         self._layout_footer()
 
+    def _remember_columns_edit(self, column):
+        if self._columns_editing or not self.d.get("twoColumn") or len(self.editors) != 2:
+            return
+        state = (deepcopy([editor.lines for editor in self.editors]),
+                 [editor.text.index("insert") for editor in self.editors], column)
+        if not self._columns_history or self._columns_history[-1][0] != state[0]:
+            self._columns_history.append(state)
+            self._columns_redo.clear()
+        else:
+            self._columns_history[-1] = state
+
+    def _undo_columns_edit(self, column, redo=False):
+        if any(self._ime_composing(editor.text) for editor in self.editors):
+            return "break"
+        self._columns_editing = True
+        try:
+            for editor in self.editors:
+                editor._cancel_row_drag()
+                editor._sync_lines_from_text()
+        finally:
+            self._columns_editing = False
+        self._remember_columns_edit(column)
+        if redo:
+            if not self._columns_redo:
+                return "break"
+            state = self._columns_redo.pop()
+            self._columns_history.append(state)
+        else:
+            if len(self._columns_history) < 2:
+                return "break"
+            self._columns_redo.append(self._columns_history.pop())
+            state = self._columns_history[-1]
+        self._columns_editing = True
+        try:
+            for editor, lines in zip(self.editors, state[0]):
+                editor.lines = deepcopy(lines)
+            for editor, cursor in zip(self.editors, state[1]):
+                editor.render(keep_cursor=False)
+                editor.text.mark_set("insert", cursor)
+                editor._clamp_todo_cursor()
+        finally:
+            self._columns_editing = False
+        editor = self.editors[state[2]]
+        editor.text.focus_set()
+        editor._see_text("insert")
+        self.d["editedAt"] = datetime.now().isoformat(timespec="microseconds")
+        self.app.schedule_save()
+        return "break"
+
     # ---- 单双栏切换 ----
     def toggle_columns(self):
         focus = self.focus_get()
         if focus in self._editor_texts and self._ime_composing(focus):
             return
+        for editor in self.editors:
+            editor._cancel_row_drag()
+        self._columns_editing = True
         if self.d.get("twoColumn"):
             for editor in self.editors:
                 editor._sync_lines_from_text()
-            # 合并显示时保留每行归属，空行与空待办也参与往返还原。
-            self.d["lines"] += [dict(line, mergedColumn=1) for line in self.d["lines2"]]
+            # 单独的空待办仅作空栏占位；其余内容及空行保留归属，参与往返还原。
+            if not self.editors[1]._is_empty_todo_column():
+                self.d["lines"] += [dict(line, mergedColumn=1) for line in self.d["lines2"]]
             self.d["twoColumn"] = False
             self.d.pop("lines2", None)
             self.editors[1].teardown()
@@ -2548,6 +2771,12 @@ class NoteWindow(tk.Toplevel):
                 self.d["w"] = new_w
                 self.d["x"] = min(self.winfo_x(), max(0, sw - new_w))
                 self.geometry(f"{new_w}x{self.winfo_height()}+{self.d['x']}+{self.winfo_y()}")
+        self._columns_editing = False
+        self._columns_history, self._columns_redo = [], []
+        for editor in self.editors:
+            editor.__dict__.pop("_edit_history", None)
+            editor.__dict__.pop("_edit_redo", None)
+            editor._remember_edit()
         self._last_sz = None
         self.update_idletasks()
         self._relayout()
