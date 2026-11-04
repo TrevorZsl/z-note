@@ -1634,9 +1634,12 @@ class NoteEditor:
         ln = lines[row]
         pre = self._prefix_len(ln)
         rel = max(0, col - pre)
-        left, right = ln["text"][:rel], ln["text"][rel:]
-        ln["text"] = left
-        lines.insert(row + 1, dict(ln, text=right, checked=False))
+        if ln["type"] == "todo" and ln["text"] and rel == 0:
+            lines.insert(row, dict(ln, text="", checked=False))
+        else:
+            left, right = ln["text"][:rel], ln["text"][rel:]
+            ln["text"] = left
+            lines.insert(row + 1, dict(ln, text=right, checked=False))
         self.render(keep_cursor=False)
         nrow = row + 2
         self.text.mark_set("insert", f"{nrow}.0+{self._prefix_len(lines[row+1])}c")
@@ -1674,7 +1677,11 @@ class NoteEditor:
         if col <= self._prefix_len(ln) and row > 0:
             prev = lines[row - 1]
             target = self.text.index(f"{row}.end")
-            prev["text"] += ln["text"]
+            self._remember_edit()
+            if prev["type"] == ln["type"] == "todo" and not prev["text"] and ln["text"]:
+                lines[row - 1] = ln
+            else:
+                prev["text"] += ln["text"]
             del lines[row]
             self.render(keep_cursor=False)
             self.text.mark_set("insert", target)
@@ -1683,6 +1690,9 @@ class NoteEditor:
             self.app.schedule_save()
             return "break"
         if ln["type"] == "todo" and col <= self._prefix_len(ln):
+            if row == 0 and not ln["text"] and len(lines) > 1:
+                self._remember_edit()
+                self.delete_line(row)
             return "break"
         return None
 

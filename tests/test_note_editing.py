@@ -3847,6 +3847,40 @@ class NoteEditingTests(unittest.TestCase):
         self.assertEqual(self.text.index("insert"), "1.0")
         self.assertEqual(self.note.body.yview(), (0.0, 1.0))
 
+    def test_backspace_removes_empty_first_todo_without_changing_following_completion(self):
+        for two_column in (False, True):
+            if two_column:
+                self.note.toggle_columns()
+            for editor in self.note.editors:
+                with self.subTest(two_column=two_column, column=editor.col):
+                    original = [{"type": "todo", "text": "", "checked": False},
+                                {"type": "todo", "text": "月报", "checked": True},
+                                {"type": "todo", "text": "生息", "checked": True}]
+                    editor.lines = main.deepcopy(original)
+                    editor.render()
+                    editor.text.mark_set("insert", "1.3")
+                    self.assertEqual(editor._on_backspace(None), "break")
+                    editor._on_keyrelease(None)
+                    self.app.root.update()
+                    self.assertEqual(editor.lines, original[1:])
+                    self.assertEqual(editor.text.index("insert"), "1.3")
+                    self.assertEqual(len(editor._strike_widgets), 2)
+                    self.assertTrue(all(bar.winfo_ismapped() for bar in editor._strike_widgets))
+                    editor._undo_edit()
+                    self.assertEqual(editor.lines, original)
+                    self.assertEqual(editor.text.index("insert"), "1.3")
+                    editor._undo_edit(redo=True)
+                    self.assertEqual(editor.lines, original[1:])
+
+    def test_backspace_at_nonempty_first_todo_keeps_its_checkbox_and_text(self):
+        original = [{"type": "todo", "text": "月报", "checked": True},
+                    {"type": "todo", "text": "生息", "checked": True}]
+        self.note.d["lines"] = main.deepcopy(original)
+        self.note.render()
+        self.text.mark_set("insert", "1.3")
+        self.assertEqual(self.note._on_backspace(None), "break")
+        self.assertEqual(self.note.d["lines"], original)
+
     def test_backspace_merge_keeps_cursor_before_current_text(self):
         for previous_type in ("todo", "text"):
             for previous_text in ("上一项", "上一项😀" * 30, ""):
@@ -3862,13 +3896,61 @@ class NoteEditingTests(unittest.TestCase):
                     self.app.root.update()
                     self.assertEqual(self.note.d["lines"], [
                         {"type": previous_type, "text": previous_text + "当前待办文字",
-                         "checked": previous_type == "todo"}])
+                         "checked": previous_type == "todo" and bool(previous_text)}])
                     self.assertEqual(self.text.get("insert", "1.end"), "当前待办文字")
                     self.assertIsNotNone(self._visible_bbox("insert"))
                     self.text.insert("insert", "插入")
                     self.note._on_keyrelease(None)
                     self.assertEqual(self.note.d["lines"][0]["text"],
                                      previous_text + "插入当前待办文字")
+
+    def test_backspace_into_empty_todo_keeps_current_completion_and_undo_in_each_column(self):
+        self.note.toggle_columns()
+        for editor in self.note.editors:
+            for previous_checked in (False, True):
+                for checked in (False, True):
+                    with self.subTest(column=editor.col, previous_checked=previous_checked, checked=checked):
+                        original = [
+                            {"type": "todo", "text": "月报", "checked": False},
+                            {"type": "todo", "text": "", "checked": previous_checked},
+                            {"type": "todo", "text": "生息", "checked": checked}]
+                        editor.lines = main.deepcopy(original)
+                        editor.render()
+                        editor.text.mark_set("insert", "3.3")
+                        self.assertEqual(editor._on_backspace(None), "break")
+                        editor._on_keyrelease(None)
+                        self.app.root.update()
+                        expected = [original[0], original[2]]
+                        self.assertEqual(editor.lines, expected)
+                        self.assertEqual(editor.text.index("insert"), "2.3")
+                        self.assertEqual("done" in editor.text.tag_names("2.3"), checked)
+                        self.assertEqual(len(editor._strike_widgets), int(checked))
+                        if checked:
+                            self.assertEqual(editor._strike_widgets[0]._text_start, "2.3")
+                            self.assertTrue(editor._strike_widgets[0].winfo_ismapped())
+                        editor._undo_edit()
+                        self.assertEqual(editor.lines, original)
+                        self.assertEqual(editor.text.index("insert"), "3.3")
+                        editor._undo_edit(redo=True)
+                        self.app.root.update()
+                        self.assertEqual(editor.lines, expected)
+                        self.assertEqual(editor.text.index("insert"), "2.3")
+
+    def test_enter_then_backspace_restores_completed_todo_and_status(self):
+        original = [{"type": "todo", "text": "月报", "checked": False},
+                    {"type": "todo", "text": "生息", "checked": True}]
+        self.note.d["lines"] = main.deepcopy(original)
+        self.note.render()
+        self.text.mark_set("insert", "2.3")
+        self.note._on_enter(None)
+        self.note._on_backspace(None)
+        self.note._on_keyrelease(None)
+        self.app.root.update()
+        self.assertEqual(self.note.d["lines"], original)
+        self.assertEqual(self.text.index("insert"), "2.3")
+        self.assertEqual(self.note.status.cget("text"), "待办 1/2")
+        self.assertEqual(len(self.note._strike_widgets), 1)
+        self.assertEqual(self.note._strike_widgets[0]._text_start, "2.3")
 
     def test_backspace_empty_todo_keeps_scrolled_view_and_previous_row_cursor(self):
         for row in (25, 40):
@@ -3915,9 +3997,64 @@ class NoteEditingTests(unittest.TestCase):
                     self.assertEqual(self.note._on_enter(None), "break")
                     self.app.root.update()
                     self.assertEqual(self.note.d["lines"], [
-                        {"type": "todo", "text": original[:offset], "checked": checked},
-                        {"type": "todo", "text": original[offset:], "checked": False}])
+                        {"type": "todo", "text": original[:offset], "checked": checked and offset != 0},
+                        {"type": "todo", "text": original[offset:], "checked": checked and offset == 0}])
                     self.assertEqual(self.text.index("insert"), f"2.{prefix}")
+
+    def test_enter_at_todo_start_keeps_completion_strike_and_undo_in_each_column(self):
+        self.note.toggle_columns()
+        for editor in self.note.editors:
+            for checked in (False, True):
+                with self.subTest(column=editor.col, checked=checked):
+                    original = {"type": "todo", "text": "生息", "checked": checked}
+                    editor.lines = [dict(original)]
+                    editor.render()
+                    editor.text.mark_set("insert", "1.3")
+                    done = sum(line["checked"] for e in self.note.editors for line in e.lines)
+                    total = sum(line["type"] == "todo" for e in self.note.editors for line in e.lines)
+                    editor._on_enter(None)
+                    self.app.root.update()
+                    expected = [{"type": "todo", "text": "", "checked": False}, original]
+                    self.assertEqual(editor.lines, expected)
+                    self.assertEqual(editor.text.index("insert"), "2.3")
+                    self.assertEqual(self.note.status.cget("text"), f"待办 {done}/{total+1}")
+                    self.assertEqual("done" in editor.text.tag_names("2.3"), checked)
+                    self.assertEqual(len(editor._strike_widgets), int(checked))
+                    if checked:
+                        self.assertEqual(editor._strike_widgets[0]._text_start, "2.3")
+                        self.assertTrue(editor._strike_widgets[0].winfo_ismapped())
+                    editor._undo_edit()
+                    self.assertEqual(editor.lines, [original])
+                    self.assertEqual(editor.text.index("insert"), "1.3")
+                    editor._undo_edit(redo=True)
+                    self.app.root.update()
+                    self.assertEqual(editor.lines, expected)
+                    self.assertEqual(editor.text.index("insert"), "2.3")
+                    self.assertEqual(len(editor._strike_widgets), int(checked))
+
+    def test_enter_keeps_empty_plain_text_and_leading_space_behavior(self):
+        for kind, text, checked, offset in (("todo", "", True, 0), ("text", "正文", False, 0),
+                                             ("todo", " 生息", True, 1)):
+            with self.subTest(kind=kind, text=text):
+                self.note.d["lines"] = [{"type": kind, "text": text, "checked": checked}]
+                self.note.render()
+                prefix = self.note._prefix_len(self.note.d["lines"][0])
+                self.text.mark_set("insert", f"1.{prefix+offset}")
+                self.note._on_enter(None)
+                self.assertEqual(self.note.d["lines"], [
+                    {"type": kind, "text": text[:offset], "checked": checked},
+                    {"type": kind, "text": text[offset:], "checked": False}])
+
+    def test_enter_at_todo_start_after_selection_deletion_keeps_remaining_completion(self):
+        self.note.d["lines"] = [{"type": "todo", "text": "删掉生息", "checked": True}]
+        self.note.render()
+        self.text.mark_set("insert", "1.3")
+        self.text.tag_add("sel", "1.3", "1.5")
+        self.note._on_enter(None)
+        self.assertEqual(self.note.d["lines"], [
+            {"type": "todo", "text": "", "checked": False},
+            {"type": "todo", "text": "生息", "checked": True}])
+        self.assertEqual(self.text.index("insert"), "2.3")
 
     def test_cancel_cross_row_ime_restores_todo_icons_and_text(self):
         original = [dict(line) for line in self.note.d["lines"]]
