@@ -4,6 +4,8 @@ import struct
 from ctypes import wintypes
 
 
+NOTE_CORNER_PREFERENCE = 2  # DWMWCP_ROUND
+
 _user32 = ctypes.WinDLL("user32", use_last_error=True)
 _gdi32 = ctypes.WinDLL("gdi32", use_last_error=True)
 _dwmapi = ctypes.WinDLL("dwmapi")
@@ -57,7 +59,7 @@ class ResizeSurface:
         self.note, self.client_hwnd = note, client_hwnd
         self.hwnd = self.dc = self.bitmap = self.old_bitmap = None
         self._old_proc = self._proc = None
-        self._hidden = self._restored = False
+        self._hidden = False
         self._transitions = None
         self._fade_tables = {}
         self.capacity = (0, 0)
@@ -86,7 +88,7 @@ class ResizeSurface:
 
             self._proc = proc
             _user32.SetWindowLongPtrW(self.hwnd, -4, ctypes.cast(proc, ctypes.c_void_p))
-            preference = ctypes.c_int(2)
+            preference = ctypes.c_int(NOTE_CORNER_PREFERENCE)
             _dwmapi.DwmSetWindowAttribute(self.hwnd, 33, ctypes.byref(preference), ctypes.sizeof(preference))
             disabled = wintypes.BOOL(True)
             _dwmapi.DwmSetWindowAttribute(self.hwnd, 3, ctypes.byref(disabled), ctypes.sizeof(disabled))
@@ -179,25 +181,18 @@ class ResizeSurface:
         if self.hwnd:
             _user32.ShowWindow(self.hwnd, 0)
 
-    def prepare_restore(self):
-        # For an opaque note, restore its normal GDI mode while it is still
-        # covered. Transparent notes stay hidden until the final handover.
-        if self.note.d["opacity"] == 1:
-            _user32.SetLayeredWindowAttributes(self.note.hwnd, 0, 255, 2)
-            style = _user32.GetWindowLongPtrW(self.note.hwnd, -20)
-            _user32.SetWindowLongPtrW(self.note.hwnd, -20, style & ~0x00080000)
-            self._restored = True
-
     def close(self):
         if self.hwnd:
-            if not self._restored and _user32.IsWindow(self.note.hwnd):
+            source_exists = _user32.IsWindow(self.note.hwnd)
+            opacity = self.note.d["opacity"]
+            # Swap the finished frames before changing the source's rendering mode.
+            if source_exists:
+                _user32.SetLayeredWindowAttributes(self.note.hwnd, 0, round(opacity*255), 2)
+            _user32.SetLayeredWindowAttributes(self.hwnd, 0, 0, 2)
+            self.hide()
+            if source_exists and opacity == 1:
                 style = _user32.GetWindowLongPtrW(self.note.hwnd, -20)
-                if self.note.d["opacity"] < 1:
-                    _user32.SetWindowLongPtrW(self.note.hwnd, -20, style | 0x00080000)
-                    _user32.SetLayeredWindowAttributes(self.note.hwnd, 0, round(self.note.d["opacity"]*255), 2)
-                else:
-                    _user32.SetLayeredWindowAttributes(self.note.hwnd, 0, 255, 2)
-                    _user32.SetWindowLongPtrW(self.note.hwnd, -20, style & ~0x00080000)
+                _user32.SetWindowLongPtrW(self.note.hwnd, -20, style & ~0x00080000)
             if _user32.IsWindow(self.hwnd):
                 if self._old_proc:
                     _user32.SetWindowLongPtrW(self.hwnd, -4, self._old_proc)

@@ -20,7 +20,7 @@ from PIL import Image, ImageDraw, ImageFont, ImageTk
 from storage import DATA_FILE, DEFAULT_SETTINGS, load_data, save_data, backup_before_update
 from version import APP_VERSION
 import updater
-from resize_surface import ResizeSurface
+from resize_surface import NOTE_CORNER_PREFERENCE, ResizeSurface
 from bundled_fonts import CLASSIC_FAMILY, FONT_CHOICES, FONT_FAMILIES, FONT_DIR, load_fonts
 
 APP_NAME = "z-note"
@@ -267,6 +267,8 @@ user32.SetWindowLongPtrW.restype = ctypes.c_void_p
 user32.CallWindowProcW.argtypes = [ctypes.c_void_p, wintypes.HWND, wintypes.UINT,
                                  wintypes.WPARAM, wintypes.LPARAM]
 user32.CallWindowProcW.restype = ctypes.c_ssize_t
+user32.DefWindowProcW.argtypes = [wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM]
+user32.DefWindowProcW.restype = ctypes.c_ssize_t
 
 _WINEVENTPROC = ctypes.WINFUNCTYPE(None, wintypes.HANDLE, wintypes.DWORD, wintypes.HWND,
                                   wintypes.LONG, wintypes.LONG, wintypes.DWORD, wintypes.DWORD)
@@ -2339,7 +2341,7 @@ class NoteWindow(tk.Toplevel):
 
     def _round_window(self):
         # 由 DWM 抗锯齿裁切外框，避免透明色键的硬像素边缘。
-        preference = ctypes.c_int(2)  # DWMWCP_ROUND
+        preference = ctypes.c_int(NOTE_CORNER_PREFERENCE)
         dwmapi.DwmSetWindowAttribute(self.hwnd, 33, ctypes.byref(preference), ctypes.sizeof(preference))
 
     def _restyle(self):
@@ -3166,7 +3168,6 @@ class NoteWindow(tk.Toplevel):
         for editor in self.editors:
             editor._edge_fade._size = None
             editor._edge_fade.update(*editor.body.yview())
-        dwmapi.DwmFlush()  # one handover fence, not part of the drag-frame path
 
     def _finish_resize(self, cancel=False, redraw=True, hidden=False):
         if not self._resizing:
@@ -3213,14 +3214,10 @@ class NoteWindow(tk.Toplevel):
                     surface.hide()
                 self.withdraw()
             self.geometry(f"{target[2]}x{target[3]}+{target[0]}+{target[1]}")
-            if hidden:
+            if hidden or surface is None:
                 self.attributes("-alpha", self.d["opacity"])
             if not hidden:
                 self.update_idletasks()
-                self.attributes("-alpha", self.d["opacity"])
-                if surface:
-                    surface.keep_source_hidden()
-                    surface.prepare_restore()
                 if redraw:
                     self._repair_resize_frame()
             restored_geometry = True
@@ -3247,6 +3244,10 @@ class NoteWindow(tk.Toplevel):
             if user32.GetCapture() == self._resize_client_hwnd:
                 user32.ReleaseCapture()
             if surface:
+                if not hidden and redraw and restored_geometry:
+                    dwmapi.DwmFlush()  # Finish the preview frame immediately before the opacity swap.
+                if not hidden and self.winfo_exists() and self.attributes("-alpha") != self.d["opacity"]:
+                    self.attributes("-alpha", self.d["opacity"])
                 surface.close()
             self._resize_surface = None
             self._resize_busy = self._resize_ending = self._resize_release_pending = self._resize_cancel_requested = False
@@ -3274,8 +3275,9 @@ class NoteWindow(tk.Toplevel):
                 return 0
             if message == 0x0085:
                 return 0
-            if message == 0x0086:
-                return 1
+            if message == 0x0086:  # WM_NCACTIVATE
+                # Match the preview's lighter frame while keeping client focus.
+                return user32.DefWindowProcW(hwnd, message, 0, -1)
             if message == 0x0084:
                 return 1  # HTCLIENT; all eight resize zones are handled together.
             if message == 0x0112 and wparam & 0xFFF0 == 0xF000:
@@ -3292,6 +3294,7 @@ class NoteWindow(tk.Toplevel):
         self._z_proc = window_proc
         self._z_old_proc = user32.SetWindowLongPtrW(
             self.hwnd, -4, ctypes.cast(window_proc, ctypes.c_void_p))
+        user32.DefWindowProcW(self.hwnd, 0x0086, 0, -1)
 
     def set_z(self, state):
         if self.d["z"] == state:

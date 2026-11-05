@@ -1392,8 +1392,16 @@ class NoteEditingTests(unittest.TestCase):
 
     def test_resize_commits_one_complete_surface_and_saves_its_actual_rectangle(self):
         note = self.note
+        with patch.object(main.user32, "DefWindowProcW", wraps=main.user32.DefWindowProcW) as nonclient:
+            self.assertTrue(note._z_proc(note.hwnd, 0x0086, 1, 0))
+            nonclient.assert_called_once_with(note.hwnd, 0x0086, 0, -1)
         original = tuple(note.d[k] for k in ("x", "y", "w", "h"))
         surface = self._begin_resize_session()
+        for hwnd in (note.hwnd, surface.hwnd):
+            corner = main.ctypes.c_int()
+            self.assertEqual(main.dwmapi.DwmGetWindowAttribute(hwnd, 33, main.ctypes.byref(corner),
+                                                              main.ctypes.sizeof(corner)), 0)
+            self.assertEqual(corner.value, 2)  # DWMWCP_ROUND
         source_size = (note.winfo_width(), note.winfo_height())
         with patch.object(surface, "present", wraps=surface.present) as present, \
                 patch.object(main, "save_data") as save:
@@ -1405,7 +1413,31 @@ class NoteEditingTests(unittest.TestCase):
             self.assertEqual(tuple(note.d[k] for k in ("x", "y", "w", "h")), original)
             present.assert_called_once()
             save.assert_not_called()
-        note._edge_release(type("Pointer", (), dict(x_root=222, y_root=400))())
+        from resize_surface import _user32
+        get_alpha = _user32.GetLayeredWindowAttributes
+        get_alpha.argtypes = [main.wintypes.HWND, main.ctypes.c_void_p,
+                             main.ctypes.POINTER(main.wintypes.BYTE), main.ctypes.c_void_p]
+
+        def window_alpha(hwnd):
+            alpha = main.wintypes.BYTE()
+            self.assertTrue(get_alpha(hwnd, None, main.ctypes.byref(alpha), None))
+            return alpha.value
+
+        close, hide = surface.close, surface.hide
+
+        def close_after_hidden_repaint():
+            self.assertEqual(window_alpha(note.hwnd), 0)
+            close()
+
+        def hide_transparent_preview():
+            self.assertEqual(window_alpha(surface.hwnd), 0)
+            hide()
+
+        with patch.object(surface, "close", side_effect=close_after_hidden_repaint) as handover, \
+                patch.object(surface, "hide", side_effect=hide_transparent_preview) as hide_preview:
+            note._edge_release(type("Pointer", (), dict(x_root=222, y_root=400))())
+            handover.assert_called_once()
+            hide_preview.assert_called_once()
         self.assertEqual(tuple(note.d[k] for k in ("x", "y", "w", "h")), (220, 180, 400, 440))
         self.assertEqual((note.winfo_x(), note.winfo_y(), note.winfo_width(), note.winfo_height()), (220, 180, 400, 440))
         self.assertIsNone(note._resize_surface)
