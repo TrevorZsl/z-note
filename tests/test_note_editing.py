@@ -2421,6 +2421,43 @@ class NoteEditingTests(unittest.TestCase):
         self.assertEqual(self.app.notes[note_id].d["lines"], lines)
         self.assertFalse(self.app.data["deletedNotes"])
 
+    def test_settings_and_history_stay_transparent_until_layout(self):
+        for action in ("settings", "history"):
+            with self.subTest(action=action):
+                self.app.q.put(action)
+                self.app._pump()
+                win = getattr(self.app, f"{action}_win")
+                self.app.root.update_idletasks()
+                self.assertEqual(win.attributes("-alpha"), 0.0)
+                self.app.root.update()
+                content = win._close_button if action == "settings" else win.content.winfo_children()[0]
+                self.assertTrue(content.winfo_ismapped())
+                self.assertEqual(win.attributes("-alpha"), 1.0)
+                hwnd = main.user32.GetParent(win.winfo_id()) or win.winfo_id()
+                self.assertFalse(main.user32.GetWindowLongPtrW(hwnd, -20) & 0x00080000)
+                win.destroy()
+
+    def test_history_reopen_reuses_preview_and_refreshes_changed_note_name(self):
+        note_id = self.note.d["id"]
+        self.app.data["archives"] = [{"noteId": note_id, "clearedAt": "2026-11-05T09:00:00", "items": []}]
+        self.app.q.put("history")
+        self.app._pump()
+        win = self.app.history_win
+        self.app.root.update()
+        preview = win.content.winfo_children()[0]
+        win._minimize_button.event_generate("<Button-1>")
+        hwnd = main.user32.GetParent(win.winfo_id()) or win.winfo_id()
+        self.assertTrue(main.user32.IsIconic(hwnd))
+        self.app.q.put("history")
+        self.app._pump()
+        self.app.root.update()
+        self.assertIs(win.content.winfo_children()[0], preview)
+        self.assertTrue(preview.winfo_ismapped())
+        self.note.d["title"] = "修改后的标题"
+        self.app.q.put("history")
+        self.app._pump()
+        self.assertEqual(win.names, ["修改后的标题"])
+
     def test_recycle_bin_restore_button_preserves_note_and_handles_save_failure(self):
         from copy import deepcopy
         original = deepcopy(self.note.d)

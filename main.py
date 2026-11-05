@@ -3348,6 +3348,34 @@ class NoteWindow(tk.Toplevel):
         self.app.remove_note(self)
 
 # ---------- 设置窗口 ----------
+def _show_after_layout(window):
+    hwnd = user32.GetParent(window.winfo_id()) or window.winfo_id()
+
+    def reveal():
+        if window.winfo_exists():
+            window.update_idletasks()
+            if window.winfo_exists():
+                window.attributes("-alpha", 1.0)
+                style = user32.GetWindowLongPtrW(hwnd, -20)
+                user32.SetWindowLongPtrW(hwnd, -20, style & ~0x00080000)  # WS_EX_LAYERED
+
+    def on_map(event):
+        if event.widget == window:
+            window.unbind("<Map>", map_binding)
+            window.master.after_idle(reveal)
+
+    # 首次映射会触发布局，等正文挂载并绘制后再显示窗口。
+    map_binding = window.bind("<Map>", on_map, add="+")
+    preference = ctypes.c_int(2)
+    dwmapi.DwmSetWindowAttribute(hwnd, 33, ctypes.byref(preference), ctypes.sizeof(preference))
+    window.attributes("-alpha", 0.0)
+    # Tk 设置透明度时会重置扩展样式，因此随后再设置任务栏样式。
+    style = user32.GetWindowLongPtrW(hwnd, -20)
+    user32.SetWindowLongPtrW(hwnd, -20, style & ~0x80 | 0x40000)  # WS_EX_TOOLWINDOW / WS_EX_APPWINDOW
+    user32.SetWindowPos(hwnd, None, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | 0x04 | 0x20)
+    window.deiconify()
+
+
 class SettingsScale(tk.Canvas):
     def __init__(self, master, minimum, maximum, step, command):
         super().__init__(master, width=180, height=42, bg=NOTE_BG,
@@ -3834,13 +3862,7 @@ class SettingsWindow(tk.Toplevel):
                        work.left + (work.right - work.left - width) // 2,
                        work.top + (work.bottom - work.top - height) // 2))
         self.update_idletasks()
-        hwnd = user32.GetParent(self.winfo_id()) or self.winfo_id()
-        preference = ctypes.c_int(2)
-        dwmapi.DwmSetWindowAttribute(hwnd, 33, ctypes.byref(preference), ctypes.sizeof(preference))
-        style = user32.GetWindowLongPtrW(hwnd, -20)
-        user32.SetWindowLongPtrW(hwnd, -20, style & ~0x80 | 0x40000)  # WS_EX_TOOLWINDOW / WS_EX_APPWINDOW
-        user32.SetWindowPos(hwnd, None, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | 0x04 | 0x20)
-        self.deiconify()
+        _show_after_layout(self)
 
     def _update_action(self):
         if self._update_busy or self._update_installing:
@@ -4151,15 +4173,9 @@ class HistoryWindow(tk.Toplevel):
         SettingsWindow._lock_size(self, width, height)
         self.geometry(f"{width}x{height}+{work.left+(work.right-work.left-width)//2}+{work.top+(work.bottom-work.top-height)//2}")
         self.update_idletasks()
-        hwnd = user32.GetParent(self.winfo_id()) or self.winfo_id()
-        preference = ctypes.c_int(2)
-        dwmapi.DwmSetWindowAttribute(hwnd, 33, ctypes.byref(preference), ctypes.sizeof(preference))
-        style = user32.GetWindowLongPtrW(hwnd, -20)
-        user32.SetWindowLongPtrW(hwnd, -20, style & ~0x80 | 0x40000)
-        user32.SetWindowPos(hwnd, None, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | 0x04 | 0x20)
         self.hint.bind("<Configure>", lambda e: self.hint.configure(wraplength=max(1, e.width), justify="left"))
         self.refresh()
-        self.deiconify()
+        _show_after_layout(self)
 
     def button(self, parent, text, command):
         font = tkfont.Font(root=self, family=UI_FONT, size=10)
@@ -4181,12 +4197,7 @@ class HistoryWindow(tk.Toplevel):
         self.checked.clear()
         self.refresh()
 
-    def refresh(self):
-        for key, tab in self.tabs.items():
-            tab.configure(fg="#1F2328" if key == self.mode else QUIET,
-                          relief="sunken" if key == self.mode else "flat")
-        self.hint.configure(text="清除的已完成待办会保存在这里，按便签整理。" if self.mode == "archives"
-                            else "彻底删除便签不会删除已清除待办的记录。")
+    def refresh(self, *, if_changed=False):
         sources = {n["id"]: n for n in self.app.data["deletedNotes"] + self.app.data["notes"]}
         groups = {}
         stamp = "clearedAt" if self.mode == "archives" else "deletedAt"
@@ -4195,12 +4206,21 @@ class HistoryWindow(tk.Toplevel):
         for record in records:
             key = record["noteId"] if self.mode == "archives" else record["id"]
             groups.setdefault(key, []).append(record)
-        self.groups = groups
-        self.ids = list(groups)
         names = {}
         for key, records in groups.items():
             source = sources.get(key, records[0])
             names[key] = (source.get("title") or "无标题", source.get("editedAt", ""))
+        ids = list(groups)
+        if if_changed and ids == self.ids and groups == self.groups and names == self._source_names:
+            return
+        self.groups = groups
+        self.ids = ids
+        self._source_names = names
+        for key, tab in self.tabs.items():
+            tab.configure(fg="#1F2328" if key == self.mode else QUIET,
+                          relief="sunken" if key == self.mode else "flat")
+        self.hint.configure(text="清除的已完成待办会保存在这里，按便签整理。" if self.mode == "archives"
+                            else "彻底删除便签不会删除已清除待办的记录。")
         self.checked.intersection_update(self.ids)
         for child in self.left.content.winfo_children():
             child.destroy()
@@ -4884,8 +4904,9 @@ class App:
                 elif act == "history":
                     if self.history_win is None or not self.history_win.winfo_exists():
                         self.history_win = HistoryWindow(self)
-                    self.history_win.refresh()
-                    self.history_win.deiconify()
+                    else:
+                        self.history_win.refresh(if_changed=True)
+                        self.history_win.deiconify()
                     self.history_win.lift()
                     self.history_win.focus_force()
                 elif act == "settings":
