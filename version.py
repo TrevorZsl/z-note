@@ -1,3 +1,3 @@
 """Single source for application, installer and release versions."""
 
-APP_VERSION = "2.1.6"
+APP_VERSION = "2.1.7"
