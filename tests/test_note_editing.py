@@ -3063,11 +3063,12 @@ class NoteEditingTests(unittest.TestCase):
                                 self.note._chip_font.metrics("linespace") + 12)
 
     def test_title_is_slightly_heavier_than_body(self):
-        for font in (self.app.base_font, self.note.done_font, self.note._chip_font,
+        for font in (self.app.base_font, self.note.done_font,
                      main.tkfont.nametofont("TkDefaultFont", root=self.app.root),
                      main.tkfont.nametofont("TkMenuFont", root=self.app.root)):
             self.assertEqual(font.actual("family"), main.UI_FONT)
         self.assertEqual(self.app.base_font.actual("weight"), "normal")
+        self.assertEqual(self.note._chip_font.actual("family"), "Times New Roman")
         self.assertEqual(self.note._chip_font.actual("weight"), "bold")
 
     def test_convert_shortcut_majority_and_repeat_preserve_selection_and_history(self):

@@ -2046,7 +2046,7 @@ class NoteWindow(tk.Toplevel):
         # -- 工具栏 --
         self.toolbar = tk.Frame(self, bg=self._bg)
         self._tool_btns = []
-        self._chip_font = tkfont.Font(family=app.note_font_family(), size=10, weight="bold")
+        self._chip_font = tkfont.Font(family=app.note_title_font_family(), size=10, weight="bold")
         self._title_edit_font = self._chip_font
 
         def btn(icon, get_tip, cmd):
@@ -4503,11 +4503,17 @@ class App:
         choice = self.data["settings"]["fontFamily"]
         return self._system_font_family if choice == "system" else FONT_FAMILIES[choice]
 
+    def note_title_font_family(self):
+        # Windows can synthesize bold for Song glyphs; the bundled Classic bold embeds regular Song.
+        system_faces = {"classic": "Times New Roman", "simsun": "SimSun"}
+        return system_faces.get(self.data["settings"]["fontFamily"], self.note_font_family())
+
     def update_fonts(self):
         family = self.note_font_family()
+        title_family = self.note_title_font_family()
         self.base_font.config(family=family, size=self.data["settings"]["fontSize"])
         for w in self.notes.values():
-            w._chip_font.config(family=family)
+            w._chip_font.config(family=title_family)
             w._draw_chip()
             for editor in w.editors:
                 editor._sync_lines_from_text()

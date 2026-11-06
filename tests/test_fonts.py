@@ -37,24 +37,29 @@ class FontTests(unittest.TestCase):
 
     def test_selection_updates_notes_titles_and_new_notes_and_survives_restart(self):
         note = next(iter(self.app.notes.values()))
-        note.d["title"] = "中英文 Test"
+        note.d["title"] = "办公助手 ABC-11.06"
         note.d["lines"] = [{"type": "todo", "text": "中文 ABC", "checked": True}]
         note.render()
         win = main.SettingsWindow(self.app)
         original = deepcopy(note.d["lines"])
+        title_families = {"classic": "Times New Roman", "simsun": "SimSun"}
         for choice, label in FONT_CHOICES.items():
             win._font_family(label)
             self.app.root.update()
             expected = self.app.note_font_family()
+            title_family = title_families.get(choice, expected)
             self.assertEqual(self.app.base_font.actual("family"), expected)
             self.assertEqual(note.done_font.actual("family"), expected)
-            self.assertEqual(note._chip_font.actual("family"), expected)
+            self.assertEqual(note._chip_font.cget("family"), title_family)
+            for char in "办A1":
+                self.assertEqual(self.app.root.tk.call("font", "actual", note._chip_font.name,
+                                                       "-weight", "--", char), "bold")
             note.edit_title()
-            self.assertEqual(main.tkfont.Font(font=note._title_editor.cget("font")).actual("family"), expected)
+            self.assertEqual(note._title_editor.cget("font"), note._chip_font.name)
             self.assertEqual(note.d["lines"], original)
             created = self.app.new_note()
             self.assertEqual(created.done_font.actual("family"), expected)
-            self.assertEqual(created._chip_font.actual("family"), expected)
+            self.assertEqual(created._chip_font.cget("family"), title_family)
         win._font_family(FONT_CHOICES["yahei"])
         self.app.save_now()
         self.data = deepcopy(self.app.data)
