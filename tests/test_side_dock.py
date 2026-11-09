@@ -140,8 +140,10 @@ class SideDockTests(unittest.TestCase):
         for previous, window in zip(windows, windows[1:]):
             self.assertTrue(window.winfo_ismapped())
             self.assertEqual(window.master, self.root)
-            self.assertEqual(window.winfo_y(), previous.winfo_y()+previous.winfo_height()+6)
-            self.assertEqual(window.bar.winfo_width(), compact_width+12)
+            gap = 10 if previous is self.dock else 4
+            self.assertEqual(window.winfo_y(), previous.winfo_y()+previous.winfo_height()+gap)
+            self.assertGreaterEqual(window.bar.winfo_width(), 144)
+            self.assertEqual(window.winfo_height(), max(32, self.dock.font.metrics("linespace")+10))
             self.assertEqual(window.winfo_x()+window.bar.winfo_width(), main.user32.GetSystemMetrics(0))
         self.assertEqual(self.dock.bar.winfo_width(), compact_width)
         self.dock._leave()
@@ -164,13 +166,17 @@ class SideDockTests(unittest.TestCase):
         self.click_bar()
         note, bookmark = self.app.notes["0"], self.dock.bookmarks["0"]
         original = (note.winfo_x(), note.winfo_y(), note.winfo_width(), note.winfo_height(), note.d["z"])
-        self.assertEqual(bookmark.bar.cget("bg"), "#F0F3F7")
+        self.assertEqual(bookmark.bar.cget("bg"), main.NOTE_BG)
+        title_position = bookmark.bar.coords(bookmark.bar.find_all()[0])
+        self.assertTrue(bookmark.bar.find_withtag("dock-note-visible"))
         for visible in (False, True, False, True):
             self.click(bookmark)
             self.assertEqual(note.d["visible"], visible)
             self.assertIs(self.dock.bookmarks["0"], bookmark)
             self.assertEqual(bookmark._note_visible, visible)
-            self.assertEqual(bookmark.bar.cget("bg"), "#F0F3F7" if visible else main.NOTE_BG)
+            self.assertEqual(bookmark.bar.cget("bg"), main.NOTE_BG if visible else "#F0F3F7")
+            self.assertEqual(bool(bookmark.bar.find_withtag("dock-note-visible")), visible)
+            self.assertEqual(bookmark.bar.coords(bookmark.bar.find_all()[0]), title_position)
             self.assertTrue(self.dock.expanded)
             self.assertEqual((note.winfo_x(), note.winfo_y(), note.winfo_width(), note.winfo_height(), note.d["z"]), original)
 
@@ -203,9 +209,12 @@ class SideDockTests(unittest.TestCase):
             self.assertTrue(all(n.d["visible"] == visible for n in self.app.notes.values()))
             self.assertEqual(self.dock.bookmarks, original)
             self.assertTrue(self.dock.expanded)
+            for bookmark in original.values():
+                self.assertEqual(bool(bookmark.bar.find_withtag("dock-note-visible")), visible)
         self.app.notes["0"].hide()
         self.root.update()
         self.assertFalse(original["0"]._note_visible)
+        self.assertFalse(original["0"].bar.find_withtag("dock-note-visible"))
         self.assertEqual(self.dock.bookmarks, original)
 
     def test_opening_pinned_note_under_bookmarks_keeps_bookmark_clickable(self):
@@ -224,19 +233,21 @@ class SideDockTests(unittest.TestCase):
         self.assertTrue(hit == hwnd or main.user32.IsChild(hwnd, hit))
 
     def test_each_bookmark_hover_changes_only_its_width(self):
+        self.app.notes["1"].hide()
         self.click_bar()
-        bookmark, neighbor = self.dock.bookmarks["0"], self.dock.bookmarks["1"]
-        original = (bookmark.winfo_x(), bookmark.winfo_width())
-        neighbor_geometry = neighbor.winfo_geometry()
-        text = self.label(bookmark)
-        bookmark._enter()
-        self.wait(0.15)
-        self.assertEqual(self.label(bookmark), text)
-        self.assertEqual(bookmark.winfo_width(), original[1]+12)
-        self.assertEqual(neighbor.winfo_geometry(), neighbor_geometry)
-        bookmark._leave()
-        self.wait(0.15)
-        self.assertEqual((bookmark.winfo_x(), bookmark.winfo_width()), original)
+        shown, hidden = self.dock.bookmarks["0"], self.dock.bookmarks["1"]
+        for bookmark, neighbor in ((shown, hidden), (hidden, shown)):
+            original = (bookmark.winfo_x(), bookmark.winfo_width())
+            neighbor_geometry = neighbor.winfo_geometry()
+            text = self.label(bookmark)
+            bookmark._enter()
+            self.wait(0.15)
+            self.assertEqual(self.label(bookmark), text)
+            self.assertEqual(bookmark.winfo_width(), original[1]+12)
+            self.assertEqual(neighbor.winfo_geometry(), neighbor_geometry)
+            bookmark._leave()
+            self.wait(0.15)
+            self.assertEqual((bookmark.winfo_x(), bookmark.winfo_width()), original)
 
     def test_refresh_is_coalesced(self):
         self.click_bar()
@@ -266,7 +277,9 @@ class SideDockTests(unittest.TestCase):
             self.dock = self.app.dock = main.SideDock(self.app)
             self.dock.refresh()
             self.root.update()
+            self.app.notes["0"].d["title"] = "便签标题名"
             self.click_bar()
+            self.assertEqual(self.label(self.dock.bookmarks["0"]), "便签标题名")
             for note in list(self.app.notes.values()):
                 self.app.remove_note(note)
             self.root.update()
@@ -353,6 +366,21 @@ class SideDockTests(unittest.TestCase):
         self.click_bar()
         self.assertEqual(self.dock.winfo_y(), original_y)
 
+    def test_two_rows_fit_exactly_and_scroll_in_short_work_area(self):
+        self.add_many()
+        work = self.dock.work_area()
+        work.bottom = work.top+16+self.dock.bar_height+10+2*self.dock.bookmark_height+4
+        with patch.object(self.dock, "work_area", return_value=work):
+            self.click_bar()
+            self.assertEqual(list(self.dock.bookmarks), ["0", "1"])
+            self.assertEqual(self.dock.bookmarks["1"].winfo_y()+self.dock.bookmark_height,
+                             work.bottom-8)
+            self.dock._wheel(SimpleNamespace(delta=-120))
+            self.root.update()
+            self.assertEqual(list(self.dock.bookmarks), ["1", "2"])
+            self.assertEqual(self.dock.bookmarks["2"].winfo_y()+self.dock.bookmark_height,
+                             work.bottom-8)
+
     def test_drag_saves_collapsed_position_and_does_not_expand(self):
         y = self.dock._bar_y
         self.dock._drag_press(SimpleNamespace(x_root=100, y_root=y))
@@ -374,7 +402,7 @@ class SideDockTests(unittest.TestCase):
         self.root.update()
         self.assertTrue(self.dock.expanded)
         self.assertEqual(self.dock.winfo_y(), y-80)
-        self.assertEqual(self.dock.bookmarks["0"].winfo_y(), y-80+self.dock.bar_height+6)
+        self.assertEqual(self.dock.bookmarks["0"].winfo_y(), y-80+self.dock.bar_height+10)
         self.click_bar()
         self.assertEqual(self.dock.winfo_y(), y-80)
 
@@ -434,7 +462,7 @@ class SideDockTests(unittest.TestCase):
             self.root.update()
             mid_y = bookmark._position_y
             self.assertGreater(mid_y, entry_y)
-            self.assertLess(mid_y, entry_y+self.dock.bar_height+6)
+            self.assertLess(mid_y, entry_y+self.dock.bar_height+10)
             self.click_bar(settle=False)
             self.assertEqual(bookmark._position_y, mid_y)
             self.assertFalse(self.dock.expanded)

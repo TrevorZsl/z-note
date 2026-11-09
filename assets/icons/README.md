@@ -10,4 +10,4 @@ columns-2 = toggle single/double column layout; PNGs are rendered from the offic
 
 arrow-down-to-line = toggle always-on-bottom; pin and arrow-down-to-line are mutually exclusive. Arrow PNGs are rendered from the straight SVG paths with Pillow at 4x resolution and downsampled to 64 px.
 
-The dock disclosure indicator uses the filled [Lucide Play path](https://lucide.dev/icons/play) in the normal icon color (#4B5563). The down PNG rotates the right indicator by 90° clockwise.
+The dock disclosure indicator uses the filled [Lucide Play path](https://lucide.dev/icons/play) in the darker icon color (#1F2328). The down PNG rotates the right indicator by 90° clockwise.
