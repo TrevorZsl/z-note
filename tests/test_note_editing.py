@@ -26,6 +26,7 @@ class NoteEditingTests(unittest.TestCase):
                                {"type": "todo", "text": "右键这行：转换/插入/删除", "checked": False},
                                {"type": "todo", "text": "Ctrl+滚轮 调透明度", "checked": False}]}]}),
             patch.object(main, "save_data"),
+            patch.object(main.updater, "check_update", return_value=None),
             patch.object(main.Tooltip, "_font", None),
             patch.object(main.Tooltip, "_cur", None),
             patch.object(main.App, "_start_tray"),

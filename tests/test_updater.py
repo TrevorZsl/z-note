@@ -194,6 +194,13 @@ class GiteeUpdaterTests(unittest.TestCase):
                 self.assertIsNone(updater.check_update(self.cancel, "2.9.0"))
                 self.assertEqual(network.call_args.args[0], updater.API_URL)
 
+    def test_one_unavailable_source_cannot_confirm_a_known_update_is_gone(self):
+        for responses in ([updater.UpdateError("offline"), io.BytesIO(b'{"tag_name":"v2.9.0"}')],
+                          [io.BytesIO(b"[]"), updater.UpdateError("offline")]):
+            with self.subTest(responses=responses), patch.object(updater, "_open", side_effect=responses):
+                with self.assertRaisesRegex(updater.UpdateError, "offline"):
+                    updater.check_update(self.cancel, "2.9.0", require_confirmed_no_update=True)
+
     def test_corrupt_gitee_download_restarts_with_same_version_from_github(self):
         release = updater.Release("2.10.0", "", self.name, f"{self.base}/{self.name}",
                                   len(self.content), f"{self.base}/SHA256SUMS")

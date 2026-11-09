@@ -3884,6 +3884,7 @@ class SettingsWindow(tk.Toplevel):
                  font=(UI_FONT, 9)).pack(side="right")
         self._update_cancel = None
         self._update_busy = False
+        self._waiting_for_update_check = False
         self._update_release = self._update_download = None
         self._update_installing = False
         self._update_state = "idle"
@@ -3912,9 +3913,6 @@ class SettingsWindow(tk.Toplevel):
         self._update_status = tk.Label(f, text="点击检查正式版本更新。", bg=NOTE_BG, fg=QUIET,
                                        font=(UI_FONT, 9), justify="left", anchor="w")
         self._update_status.pack(fill="x", pady=(8, 0))
-        self._update_notes = tk.Label(f, text="", bg=NOTE_BG, fg="#475569",
-                                      font=(UI_FONT, 9), justify="left", anchor="w")
-        self._update_notes.pack(fill="x", pady=(4, 0))
         release_link = tk.Label(f, text="查看发布页面 ↗", bg=NOTE_BG, fg=QUIET,
                                 font=(UI_FONT, 9), cursor="hand2")
         release_link.pack(anchor="w", pady=(4, 0))
@@ -3943,8 +3941,7 @@ class SettingsWindow(tk.Toplevel):
         startup.configure(wraplength=max(1, content_width - self._check_images[False].width() - 16))
         hotkey_hint.configure(wraplength=max(1, content_width - 16))
         path.configure(wraplength=max(1, content_width - 16))
-        for label in (self._update_status, self._update_notes):
-            label.configure(wraplength=max(1, content_width - 16))
+        self._update_status.configure(wraplength=max(1, content_width - 16))
         layout_hotkeys(content_width)
         body.itemconfigure(content, width=content_width)
         for appearance_row in (font_row, row, row3):
@@ -3974,8 +3971,7 @@ class SettingsWindow(tk.Toplevel):
             startup.configure(wraplength=max(1, content_width - self._check_images[False].width() - 16))
             hotkey_hint.configure(wraplength=max(1, content_width - 16))
             path.configure(wraplength=max(1, content_width - 16))
-            for label in (self._update_status, self._update_notes):
-                label.configure(wraplength=max(1, content_width - 16))
+            self._update_status.configure(wraplength=max(1, content_width - 16))
             layout_hotkeys(content_width)
             for appearance_row in (row, row3):
                 label = appearance_row.winfo_children()[0]
@@ -4001,6 +3997,8 @@ class SettingsWindow(tk.Toplevel):
         self.geometry("%dx%d+%d+%d" % (width, height,
                        work.left + (work.right - work.left - width) // 2,
                        work.top + (work.bottom - work.top - height) // 2))
+        if app._update_check_succeeded:
+            self._show_available_update(app._available_update)
         self.update_idletasks()
         _show_after_layout(self)
 
@@ -4026,21 +4024,20 @@ class SettingsWindow(tk.Toplevel):
         self._update_cancel_button.pack(side="left")
         self._update_cancel_button.configure(state="normal")
         self._update_status.configure(text="正在下载更新…" if downloading else "正在检查更新…")
+        if not downloading:
+            self._waiting_for_update_check = True
+            self.app._check_for_update(manual=True)
+            return
         messages, release = self.app.q, self._update_release
 
         def work():
             try:
-                if downloading:
-                    value = updater.download_update(release, cancel, lambda done, total:
-                        messages.put(("update", self, cancel, "progress", (done, total))))
-                    kind = "downloaded"
-                else:
-                    value, kind = updater.check_update(cancel), "checked"
+                value = updater.download_update(release, cancel, lambda done, total:
+                    messages.put(("update", self, cancel, "progress", (done, total))))
                 if cancel.is_set():
-                    if kind == "downloaded":
-                        updater.remove_download(value[0])
+                    updater.remove_download(value[0])
                     raise updater.Cancelled("已取消更新。")
-                messages.put(("update", self, cancel, kind, value))
+                messages.put(("update", self, cancel, "downloaded", value))
             except updater.Cancelled:
                 messages.put(("update", self, cancel, "cancelled", "已取消更新。"))
             except Exception as exc:
@@ -4051,6 +4048,9 @@ class SettingsWindow(tk.Toplevel):
     def _cancel_update(self):
         if self._update_cancel is not None:
             self._update_cancel.set()
+            if self._waiting_for_update_check:
+                self._receive_update(self._update_cancel, "cancelled", "已取消更新。")
+                return
             self._update_status.configure(text="正在取消…")
             self._update_cancel_button.configure(state="disabled")
 
@@ -4061,6 +4061,18 @@ class SettingsWindow(tk.Toplevel):
             self._update_cancel.set()
         if self._update_download is not None:
             updater.remove_download(self._update_download[0])
+
+    def _show_available_update(self, release):
+        self._update_release = release
+        self._update_state = "found" if release else "idle"
+        self._update_status.configure(text=f"可更新至 v{release.version}" if release else "已是最新版本。")
+        self._update_button.configure(text="下载并安装" if release else "检查更新")
+
+    def _receive_update_check(self, kind, value):
+        if self._waiting_for_update_check:
+            self._receive_update(self._update_cancel, kind, value)
+        elif kind == "checked" and not self._update_busy and self._update_state != "ready":
+            self._show_available_update(value)
 
     def _receive_update(self, cancel, kind, value):
         if cancel is not self._update_cancel or cancel.is_set():
@@ -4074,24 +4086,21 @@ class SettingsWindow(tk.Toplevel):
             self._update_status.configure(text=f"正在下载：{done / total:.0%}（{done / 1048576:.1f} / {total / 1048576:.1f} MB）")
             return
         self._update_busy = False
+        self._waiting_for_update_check = False
         self._update_cancel_button.pack_forget()
         self._update_button.configure(state="normal")
         if kind == "checked":
-            self._update_release = value
-            self._update_state = "found" if value else "idle"
-            self._update_status.configure(text=f"发现新版本 {value.version}" if value else "已是最新版本。")
-            self._update_notes.configure(text=value.notes[:4000] if value else "")
+            self._show_available_update(value)
         elif kind == "downloaded":
             self._update_download = value
             self._update_state = "ready"
             self._update_status.configure(text="下载并校验完成。安装将保存数据并退出 z-note，无需卸载。")
-        else:
-            self._update_status.configure(text=value)
-        text = {"idle": "检查更新", "found": "下载并安装",
-                "ready": "立即安装"}[self._update_state]
-        self._update_button.configure(text=text)
-        if kind == "downloaded":
+            self._update_button.configure(text="立即安装")
             self._update_action()
+        else:
+            if self._update_state == "found" and self._update_release != self.app._available_update:
+                self._show_available_update(self.app._available_update)
+            self._update_status.configure(text=value)
 
     def _lock_size(self, width, height):
         self.minsize(width, height)
@@ -5198,6 +5207,10 @@ class App:
                     note["z"] = "normal"
             self.data["schemaVersion"] = 3
         self.q = queue.Queue()
+        self._last_update_check = None
+        self._update_check_cancel = None
+        self._update_check_succeeded = False
+        self._available_update = None
         self._bottom_refresh_pending = False
         self._bottom_hooks = []
         self._quitting = False
@@ -5241,6 +5254,7 @@ class App:
         self._start_tray()
         self._start_hotkeys()
         self.root.after(120, self._pump)
+        self.root.after(10_000, lambda: self._last_update_check is None and self._check_for_update())
         self.root.protocol("WM_DELETE_WINDOW", lambda: None)
 
     # 便签管理
@@ -5614,11 +5628,50 @@ class App:
             pystray.MenuItem("右侧收纳模式", lambda: self.q.put("toggle_side_dock"),
                              checked=lambda item: self.data["settings"].get("sideDock", True)),
             pystray.MenuItem("清除记录与回收站…", lambda: self.q.put("history")),
-            pystray.MenuItem("设置…", lambda: self.q.put("settings")),
+            pystray.MenuItem(lambda _item: "设置（有更新）…" if self._available_update else "设置…",
+                             lambda: self.q.put("settings")),
             pystray.MenuItem("退出", lambda: self.q.put("quit")),
         )
         self.icon = pystray.Icon(APP_NAME, _make_tray_icon(), "z-note 便签", menu)
         self.icon.run_detached()
+
+    def _check_for_update(self, *, manual=False):
+        if self._quitting or self._update_check_cancel is not None:
+            return
+        now = time.monotonic()
+        if not manual and self._last_update_check is not None and now - self._last_update_check < 86_400:
+            return
+        self._last_update_check = now
+        cancel = self._update_check_cancel = threading.Event()
+        require_confirmed_no_update = self._available_update is not None
+
+        def work():
+            try:
+                value = updater.check_update(cancel, require_confirmed_no_update=require_confirmed_no_update)
+                self.q.put(("update_check", cancel, "checked", value))
+            except updater.Cancelled:
+                self.q.put(("update_check", cancel, "cancelled", "已取消更新。"))
+            except Exception as exc:
+                self.q.put(("update_check", cancel, "error", str(exc)))
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _receive_update_check(self, cancel, kind, value):
+        if cancel is not self._update_check_cancel:
+            return
+        self._update_check_cancel = None
+        if self._quitting or cancel.is_set():
+            return
+        if kind == "checked":
+            had_update = self._available_update is not None
+            self._available_update = value
+            self._update_check_succeeded = True
+            icon = getattr(self, "icon", None)
+            if icon is not None and had_update != (value is not None):
+                icon.update_menu()
+        window = self.settings_win
+        if window is not None and window.winfo_exists():
+            window._receive_update_check(kind, value)
 
     def hotkey_text(self, action):
         if action in LOCAL_HOTKEY_ACTIONS:
@@ -5758,6 +5811,8 @@ class App:
                         window._receive_update(cancel, kind, value)
                     elif kind == "downloaded":
                         updater.remove_download(value[0])
+                elif isinstance(act, tuple) and act[0] == "update_check":
+                    self._receive_update_check(*act[1:])
                 elif isinstance(act, tuple) and act[0] == "capture_hotkey":
                     _, window, action, value = act
                     if window.winfo_exists():
@@ -5785,6 +5840,7 @@ class App:
                 elif act == "settings":
                     if self.settings_win is None or not self.settings_win.winfo_exists():
                         self.settings_win = SettingsWindow(self)
+                    self._check_for_update()
                     win = self.settings_win
                     win.attributes("-topmost", True)
                     win.deiconify()
@@ -5846,6 +5902,9 @@ class App:
 
     def quit(self, saved=False):
         self._stop_bottom_guard()
+        update_check = getattr(self, "_update_check_cancel", None)
+        if update_check is not None:
+            update_check.set()
         if getattr(self, "_dock_refresh_job", None) is not None:
             self.root.after_cancel(self._dock_refresh_job)
             self._dock_refresh_job = None

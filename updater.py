@@ -1,4 +1,4 @@
-"""Manual updates from the public release repositories."""
+"""Update checks and downloads from the public release repositories."""
 from dataclasses import dataclass, replace
 import hashlib
 from http.client import HTTPException
@@ -102,7 +102,7 @@ class Release:
     checksum_url: str
 
 
-def check_update(cancel, current=APP_VERSION):
+def check_update(cancel, current=APP_VERSION, *, require_confirmed_no_update=False):
     if GITEE_RELEASE_REPO:
         try:
             release = _check_gitee(cancel, current)
@@ -110,14 +110,19 @@ def check_update(cancel, current=APP_VERSION):
                 return release
         except Cancelled:
             raise
-        except UpdateError:
-            return _check_github(cancel, current)
+        except UpdateError as gitee_error:
+            release = _check_github(cancel, current)
+            if release is None and require_confirmed_no_update:
+                raise gitee_error
+            return release
         # GitHub may already have a newer formal release while Gitee is still in preview.
         try:
             return _check_github(cancel, current)
         except Cancelled:
             raise
         except UpdateError:
+            if require_confirmed_no_update:
+                raise
             return None
     return _check_github(cancel, current)
 
