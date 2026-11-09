@@ -58,18 +58,27 @@ class _GiteeRedirects(_GitHubRedirects):
     hosts = {"gitee.com", "foruda.gitee.com"}
     source = "Gitee"
 
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        redirected = super().redirect_request(req, fp, code, msg, headers, newurl)
+        if redirected is not None and req.get_method() == "HEAD":
+            redirected.method = "HEAD"
+        return redirected
 
-def _open(url):
+
+def _open(url, *, method=None):
     parsed = urlsplit(url)
     gitee = parsed.hostname == "gitee.com"
     redirects = _GiteeRedirects() if gitee else _GitHubRedirects()
     accept = "application/octet-stream"
+    gitee_releases_path = f"/{GITEE_RELEASE_REPO}/releases"
     if url == API_URL:
         accept = "application/vnd.github+json"
-    elif gitee and parsed.path.startswith("/api/v5/"):
+    elif gitee and (parsed.path.startswith("/api/v5/") or
+                   parsed.path == f"{gitee_releases_path}/latest" or
+                   parsed.path.startswith(f"{gitee_releases_path}/tag/")):
         accept = "application/json"
     request = Request(url, headers={"User-Agent": f"z-note/{APP_VERSION}",
-                                    "Accept": accept})
+                                    "Accept": accept}, method=method)
     try:
         return build_opener(redirects).open(request, timeout=TIMEOUT)
     except HTTPError as exc:
@@ -111,7 +120,12 @@ def check_update(cancel, current=APP_VERSION, *, require_confirmed_no_update=Fal
         except Cancelled:
             raise
         except UpdateError as gitee_error:
-            release = _check_github(cancel, current)
+            try:
+                release = _check_github(cancel, current)
+            except Cancelled:
+                raise
+            except UpdateError as github_error:
+                raise UpdateError(f"Gitee：{gitee_error}\nGitHub：{github_error}") from github_error
             if release is None and require_confirmed_no_update:
                 raise gitee_error
             return release
@@ -128,6 +142,15 @@ def check_update(cancel, current=APP_VERSION, *, require_confirmed_no_update=Fal
 
 
 def _check_gitee(cancel, current):
+    try:
+        return _check_gitee_api(cancel, current)
+    except UpdateError as exc:
+        if not isinstance(exc.__cause__, HTTPError) or exc.__cause__.code not in (403, 429):
+            raise
+        return _gitee_web_release(cancel, current=current)
+
+
+def _check_gitee_api(cancel, current):
     api = f"https://gitee.com/api/v5/repos/{GITEE_RELEASE_REPO}/releases"
     try:
         releases = json.loads(_read_small(api + "?per_page=30", 1024 * 1024, cancel))
@@ -150,6 +173,48 @@ def _check_gitee(cancel, current):
     except (KeyError, TypeError, ValueError, AttributeError) as exc:
         raise UpdateError("Gitee 更新信息格式无效，请联系发布者。") from exc
     except (OSError, URLError, HTTPException) as exc:
+        raise UpdateError("读取 Gitee 更新信息失败，请检查网络后重试。") from exc
+
+
+def _gitee_web_release(cancel, *, current=None, tag=None):
+    # The public release page also serves JSON, separately from the v5 API quota.
+    base = f"https://gitee.com/{GITEE_RELEASE_REPO}/releases"
+    url = f"{base}/latest" if tag is None else f"{base}/tag/{tag}"
+    try:
+        payload = json.loads(_read_small(url, 1024 * 1024, cancel))["release"]
+        release_tag = payload["tag"]["name"]
+        data = payload["release"]
+        version = parse_version(release_tag)
+        if data["is_prerelease"] is not False:
+            return None
+        if tag is not None and release_tag != tag:
+            raise ValueError("unexpected release tag")
+        if current is not None and version <= parse_version(current):
+            return None
+
+        number = release_tag.removeprefix("v")
+        name = f"z-note-setup-{number}.exe"
+        download = f"{base}/download/{release_tag}"
+        assets = data["attach_files"]
+        for filename in (name, "SHA256SUMS"):
+            if sum(asset["name"] == filename and not asset.get("censor_failed")
+                   and asset["cli_download_url"] == f"{download}/{filename}" for asset in assets) != 1:
+                raise UpdateError(f"新版缺少有效的 {filename}，请联系发布者。")
+
+        installer = f"{download}/{name}"
+        _cancelled(cancel)
+        with _open(installer, method="HEAD") as response:
+            size = int(response.headers["Content-Length"])
+        _cancelled(cancel)
+        if not 0 < size <= MAX_INSTALLER_SIZE:
+            raise UpdateError("发布文件大小无效。")
+        notes = data.get("description") or "此版本暂无更新说明。"
+        if not isinstance(notes, str):
+            raise ValueError("invalid release notes")
+        return Release(number, notes, name, installer, size, f"{download}/SHA256SUMS")
+    except (KeyError, TypeError, ValueError) as exc:
+        raise UpdateError("Gitee 更新信息格式无效，请联系发布者。") from exc
+    except (OSError, HTTPException) as exc:
         raise UpdateError("读取 Gitee 更新信息失败，请检查网络后重试。") from exc
 
 
@@ -213,19 +278,39 @@ def remove_download(path):
 
 
 def download_update(release, cancel, progress):
-    try:
-        return _download(release, cancel, progress)
-    except Cancelled:
-        raise
-    except UpdateError:
-        if urlsplit(release.installer_url).hostname != "gitee.com":
-            raise
-        base = f"https://github.com/{RELEASE_REPO}/releases/download/v{release.version}"
+    host = urlsplit(release.installer_url).hostname
+    fallback = release
+    if host == "gitee.com":
+        tag = release.installer_url.rsplit("/", 2)[1]
+        base = f"https://github.com/{RELEASE_REPO}/releases/download/{tag}"
         fallback = replace(release, installer_url=f"{base}/{release.installer_name}",
                            checksum_url=f"{base}/SHA256SUMS")
+    elif host != "github.com" or not GITEE_RELEASE_REPO:
+        return _download(release, cancel, progress)
+
+    gitee_error = None
+    try:
+        if host == "github.com":
+            tag = release.installer_url.rsplit("/", 2)[1]
+            release = _gitee_web_release(cancel, tag=tag)
+            if release is not None and release.size != fallback.size:
+                raise UpdateError("两边发布的安装包大小不一致。")
+        if release is not None:
+            return _download(release, cancel, progress)
+    except Cancelled:
+        raise
+    except UpdateError as exc:
+        gitee_error = exc
         _cancelled(cancel)
-        progress(0, release.size)
+        progress(0, fallback.size)
+    try:
         return _download(fallback, cancel, progress)
+    except Cancelled:
+        raise
+    except UpdateError as exc:
+        if gitee_error is None:
+            raise
+        raise UpdateError(f"Gitee：{gitee_error}\nGitHub：{exc}") from exc
 
 
 def _download(release, cancel, progress):

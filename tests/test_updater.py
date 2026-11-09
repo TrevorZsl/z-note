@@ -174,6 +174,55 @@ class GiteeUpdaterTests(unittest.TestCase):
         self.hash = hashlib.sha256(self.content).hexdigest()
         self.release = {"id": 37, "tag_name": "v2.10.0", "prerelease": False, "body": "更新说明"}
         self.assets = [{"name": self.name, "size": len(self.content)}, {"name": "SHA256SUMS", "size": 100}]
+        self.web_release = {"release": {"tag": {"name": "v2.10.0"}, "release": {
+            "is_prerelease": False, "description": "更新说明",
+            "attach_files": [dict(asset, cli_download_url=f"{self.base}/{asset['name']}")
+                             for asset in self.assets]}}}
+
+    def test_rate_limited_gitee_api_uses_public_release_without_github(self):
+        for code in (403, 429):
+            with self.subTest(code=code), patch.object(updater, "build_opener") as opener:
+                response = io.BytesIO(json.dumps(self.web_release).encode())
+                head = io.BytesIO()
+                head.headers = {"Content-Length": str(len(self.content))}
+                network = opener.return_value.open
+                network.side_effect = [HTTPError(self.api, code, "limited", {}, None), response, head]
+                release = updater.check_update(self.cancel, "2.9.0")
+                self.assertEqual(release.version, "2.10.0")
+                self.assertEqual(release.size, len(self.content))
+                self.assertEqual(release.installer_url, f"{self.base}/{self.name}")
+                requests = [call.args[0] for call in network.call_args_list]
+                self.assertEqual([req.full_url for req in requests], [self.api + "?per_page=30",
+                    "https://gitee.com/publisher/releases/releases/latest", release.installer_url])
+                self.assertEqual(requests[1].get_header("Accept"), "application/json")
+                self.assertEqual(requests[2].get_method(), "HEAD")
+
+    def test_rate_limited_gitee_api_does_not_offer_web_preview(self):
+        self.web_release["release"]["release"]["is_prerelease"] = True
+        with patch.object(updater, "build_opener") as opener:
+            network = opener.return_value.open
+            network.side_effect = [HTTPError(self.api, 403, "limited", {}, None),
+                                   io.BytesIO(json.dumps(self.web_release).encode()),
+                                   io.BytesIO(b'{"tag_name":"v2.9.0"}')]
+            self.assertIsNone(updater.check_update(self.cancel, "2.9.0"))
+            self.assertEqual(network.call_args.args[0].full_url, updater.API_URL)
+
+    def test_cached_github_release_can_download_same_formal_release_from_gitee(self):
+        base = f"https://github.com/{updater.RELEASE_REPO}/releases/download/v2.10.0"
+        release = updater.Release("2.10.0", "", self.name, f"{base}/{self.name}",
+                                  len(self.content), f"{base}/SHA256SUMS")
+        sums = f"{self.hash}  {self.name}\n".encode()
+        head = io.BytesIO()
+        head.headers = {"Content-Length": str(release.size)}
+        responses = [io.BytesIO(json.dumps(self.web_release).encode()), head,
+                     io.BytesIO(sums), io.BytesIO(self.content)]
+        with patch.object(updater, "_open", side_effect=responses) as network:
+            path, checksum = updater.download_update(release, self.cancel, Mock())
+        self.addCleanup(updater.remove_download, path)
+        updater.verify_installer(path, release, checksum)
+        self.assertEqual([call.args[0] for call in network.call_args_list], [
+            "https://gitee.com/publisher/releases/releases/tag/v2.10.0",
+            f"{self.base}/{self.name}", f"{self.base}/SHA256SUMS", f"{self.base}/{self.name}"])
 
     def test_gitee_uses_highest_formal_version_and_trusted_attachment_paths(self):
         releases = [dict(self.release, tag_name="v3.0.0", prerelease=True),
@@ -226,6 +275,8 @@ class GiteeUpdaterTests(unittest.TestCase):
         request = Request(f"{self.base}/{self.name}")
         cdn = f"https://foruda.gitee.com/attach_file/123/{self.name}"
         self.assertEqual(handler.redirect_request(request, None, 302, "", {}, cdn).full_url, cdn)
+        head = Request(request.full_url, method="HEAD")
+        self.assertEqual(handler.redirect_request(head, None, 302, "", {}, cdn).get_method(), "HEAD")
         for url in ("http://gitee.com/file", "https://foruda.gitee.com.example.com/file", "https://github.com/file"):
             with self.subTest(url=url), self.assertRaises(updater.UpdateError):
                 handler.redirect_request(request, None, 302, "", {}, url)
