@@ -4310,6 +4310,33 @@ class NoteEditingTests(unittest.TestCase):
                     editor._undo_edit(redo=True)
                     self.assertEqual(editor.lines, original[1:])
 
+    def test_backspace_removes_empty_first_text_and_keeps_following_line(self):
+        for two_column in (False, True):
+            if two_column:
+                self.note.toggle_columns()
+            for editor in self.note.editors:
+                for kind in ("text", "todo"):
+                    with self.subTest(two_column=two_column, column=editor.col, following=kind):
+                        original = [{"type": "text", "text": "", "checked": False},
+                                    {"type": kind, "text": "月报", "checked": kind == "todo"}]
+                        editor.lines = main.deepcopy(original)
+                        editor.render(keep_cursor=False)
+                        editor.text.focus_force()
+                        self.app.root.update()
+                        editor.text.mark_set("insert", "1.0")
+                        editor.text.event_generate("<KeyPress-BackSpace>")
+                        editor.text.event_generate("<KeyRelease-BackSpace>")
+                        self.app.root.update()
+                        self.assertEqual(editor.lines, original[1:])
+                        caret = "1.3" if kind == "todo" else "1.0"
+                        self.assertEqual(editor.text.index("insert"), caret)
+                        editor._undo_edit()
+                        self.assertEqual(editor.lines, original)
+                        self.assertEqual(editor.text.index("insert"), "1.0")
+                        editor._undo_edit(redo=True)
+                        self.assertEqual(editor.lines, original[1:])
+                        self.assertEqual(editor.text.index("insert"), caret)
+
     def test_backspace_at_nonempty_first_todo_keeps_its_checkbox_and_text(self):
         original = [{"type": "todo", "text": "月报", "checked": True},
                     {"type": "todo", "text": "生息", "checked": True}]

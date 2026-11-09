@@ -1877,7 +1877,12 @@ class NoteEditor:
         row, col = self._row_col(self.text.index("insert"))
         lines = self.lines
         ln = lines[row]
-        if col <= self._prefix_len(ln) and row > 0:
+        at_line_start = col <= self._prefix_len(ln)
+        if at_line_start and row == 0 and not ln["text"] and len(lines) > 1:
+            self._remember_edit()
+            self.delete_line(row)
+            return "break"
+        if at_line_start and row > 0:
             prev = lines[row - 1]
             target = self.text.index(f"{row}.end")
             self._remember_edit()
@@ -1892,10 +1897,7 @@ class NoteEditor:
             self.d["editedAt"] = datetime.now().isoformat(timespec="microseconds")
             self.app.schedule_save()
             return "break"
-        if ln["type"] == "todo" and col <= self._prefix_len(ln):
-            if row == 0 and not ln["text"] and len(lines) > 1:
-                self._remember_edit()
-                self.delete_line(row)
+        if ln["type"] == "todo" and at_line_start:
             return "break"
         return None
 
