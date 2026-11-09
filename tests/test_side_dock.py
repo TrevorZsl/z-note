@@ -207,7 +207,7 @@ class SideDockTests(unittest.TestCase):
         self.root.update()
         origin = self.native_frame(note)[:2]
         motion = self.app._note_motion
-        with patch.object(motion, "enabled", return_value=True), patch.object(main.time, "monotonic") as clock:
+        with patch.object(motion, "enabled", return_value=True), patch.object(main.time, "perf_counter") as clock:
             clock.return_value = 100
             self.click(bookmark, settle=False)
             x, y, alpha = self.native_frame(note)
@@ -247,7 +247,7 @@ class SideDockTests(unittest.TestCase):
         origins = [self.native_frame(note)[:2] for note in notes]
         z_states = [note.d["z"] for note in notes]
         change = motion.change
-        with patch.object(motion, "enabled", return_value=True), patch.object(main.time, "monotonic") as clock:
+        with patch.object(motion, "enabled", return_value=True), patch.object(main.time, "perf_counter") as clock:
             clock.return_value = 100
 
             def prepare(*args, **kwargs):
@@ -287,7 +287,7 @@ class SideDockTests(unittest.TestCase):
         note.hide()
         self.root.update()
         motion = self.app._note_motion
-        with patch.object(motion, "enabled", return_value=True), patch.object(main.time, "monotonic") as clock:
+        with patch.object(motion, "enabled", return_value=True), patch.object(main.time, "perf_counter") as clock:
             clock.return_value = 100
             frames = []
             for _ in range(2):
@@ -316,7 +316,7 @@ class SideDockTests(unittest.TestCase):
             initialize(note, *args, **kwargs)
             first_frames.append(self.native_frame(note))
 
-        with patch.object(motion, "enabled", return_value=True), patch.object(main.time, "monotonic") as clock, \
+        with patch.object(motion, "enabled", return_value=True), patch.object(main.time, "perf_counter") as clock, \
                 patch.object(main.NoteWindow, "__init__", record_initial_frame):
             clock.return_value = 100
             for from_toolbar in (True, False):
@@ -343,6 +343,20 @@ class SideDockTests(unittest.TestCase):
                 self.root.update()
                 self.assertEqual(self.native_frame(note), (*origin, 255))
                 self.assertFalse(main.user32.GetWindowLongPtrW(note.hwnd, -20) & motion._LAYERED)
+
+    def test_hotkey_new_notes_land_at_queued_cursor_without_cascading(self):
+        original_ids = set(self.app.notes)
+        self.app._cascade = 3
+        for _ in range(2):
+            self.app.q.put(("new_at_cursor", (220, 260)))
+        with patch.object(main, "cursor_pos", return_value=(600, 500)) as cursor:
+            self.app._pump()
+        self.root.update()
+        cursor.assert_not_called()
+        notes = [note for key, note in self.app.notes.items() if key not in original_ids]
+        self.assertEqual([(note.d["x"], note.d["y"]) for note in notes], [(220, 260)] * 2)
+        self.assertEqual([self.native_frame(note)[:2] for note in notes], [(220, 260)] * 2)
+        self.assertEqual(self.app._cascade, 3)
 
     def test_new_note_is_immediate_with_animation_disabled_or_native_failure(self):
         motion = self.app._note_motion
@@ -744,7 +758,7 @@ class SideDockTests(unittest.TestCase):
 
     def test_bookmarks_move_out_from_entry_and_reverse_in_place(self):
         import ctypes
-        with patch.object(main.time, "monotonic", return_value=100.0) as clock:
+        with patch.object(main.time, "perf_counter", return_value=100.0) as clock:
             self.click_bar(settle=False)
             bookmark = self.dock.bookmarks["0"]
             entry_y = self.dock._position_y

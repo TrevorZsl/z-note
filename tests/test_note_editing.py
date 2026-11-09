@@ -2330,8 +2330,9 @@ class NoteEditingTests(unittest.TestCase):
             self.assertEqual(self.app.data["settings"]["newHotkey"], "Ctrl+Shift+K")
             save.assert_called_once_with(self.app.data)
             self.assertIn("另一项", self.app.update_hotkey("hide", "Ctrl+Shift+K"))
-        self.app._hotkey_proc(self.app._hotkey_hwnd, main.WM_HOTKEY, 101, 0)
-        self.assertEqual(self.app.q.get_nowait(), "new")
+        with patch.object(main, "cursor_pos", return_value=(220, 260)):
+            self.app._hotkey_proc(self.app._hotkey_hwnd, main.WM_HOTKEY, 101, 0)
+        self.assertEqual(self.app.q.get_nowait(), ("new_at_cursor", (220, 260)))
         self.app._hotkey_proc(self.app._hotkey_hwnd, main.WM_HOTKEY, 2, 0)
         self.assertEqual(self.app.q.get_nowait(), "hide")
         self.app._hotkey_proc(self.app._hotkey_hwnd, main.WM_HOTKEY, 3, 0)

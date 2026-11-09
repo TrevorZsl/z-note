@@ -35,6 +35,8 @@ CORNER = RADIUS + 4                   # 四角斜向拉伸热区：整个圆角�
 ICON_DIR = os.path.join(getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__))), "assets", "icons")
 PREFIX_PAD = "  "                       # 勾选框后跟 2 个空格
 INK, QUIET = "#6B7280", "#666D75"      # 图标与状态栏的墨色（冷灰单色系）
+# Windows 上 Tk 的 16ms 定时器有时要等近两个系统时钟节拍。
+VISIBILITY_TICK_MS = 10
 
 # ---------- Win32 ----------
 user32 = ctypes.WinDLL("user32")
@@ -4835,13 +4837,13 @@ class SideDock(DockBookmark):
             motion.append((window, window._position_y, target, window.attributes("-alpha")))
         self.lift()
         self._draw()
-        started = time.monotonic()
+        started = time.perf_counter()
         duration = 0.21 if opening else 0.16
         opacity_target = 1 if opening else 0
 
         def frame():
             self._transition_job = None
-            elapsed = (time.monotonic()-started)/duration
+            elapsed = (time.perf_counter()-started)/duration
             if elapsed >= 1:
                 self._layout()
                 return
@@ -4851,9 +4853,9 @@ class SideDock(DockBookmark):
             for window, origin, target, opacity in motion:
                 window.set_motion_opacity(opacity+(opacity_target-opacity)*progress)
                 window.move_to(origin+(target-origin)*progress)
-            self._transition_job = self.after(16, frame)
+            self._transition_job = self.after(VISIBILITY_TICK_MS, frame)
 
-        frame()
+        self._transition_job = self.after(VISIBILITY_TICK_MS, frame)
 
     def _wheel(self, event):
         if self.expanded and event.delta:
@@ -5009,7 +5011,7 @@ class NoteVisibilityMotion:
         current = previous.current if previous else (x, y, 0 if visible else opacity)
         start = (x+dx, y+dy, 0) if visible and previous is None else current
         target = (x, y, opacity) if visible else (x+dx, y+dy, 0)
-        motion = _NoteTransition(rect, layered, visible, start, target, current, time.monotonic(), duration)
+        motion = _NoteTransition(rect, layered, visible, start, target, current, time.perf_counter(), duration)
 
         # show/hide 本身会清理旧动画，反向时先取出旧状态，再调用显示。
         self._active.pop(note, None)
@@ -5029,12 +5031,12 @@ class NoteVisibilityMotion:
             self.finish(note)
             return
         if self._job is None:
-            self._job = self.root.after(16, self._tick)
+            self._job = self.root.after(VISIBILITY_TICK_MS, self._tick)
         return motion
 
     def _tick(self):
         self._job = None
-        now = time.monotonic()
+        now = time.perf_counter()
         for note, motion in list(self._active.items()):
             elapsed = (now-motion.began)/motion.duration
             if elapsed >= 1:
@@ -5045,7 +5047,7 @@ class NoteVisibilityMotion:
             if not self._apply_frame(note, motion, (round(x), round(y), opacity)):
                 self.finish(note)
         if self._active:
-            self._job = self.root.after(16, self._tick)
+            self._job = self.root.after(VISIBILITY_TICK_MS, self._tick)
 
     def finish(self, note, *, apply_target=True):
         motion = self._active.pop(note, None)
@@ -5228,13 +5230,17 @@ class App:
             scale.set(100 - percent)
         self.schedule_save()
 
-    def new_note(self, *, animate=False):
+    def new_note(self, *, animate=False, position=None):
         fade = animate and self._note_motion.enabled()
-        cx, cy = cursor_pos()
+        if position is None:
+            cx, cy = cursor_pos()
+            offset = 24 * (self._cascade % 6)
+            self._cascade += 1
+            position = cx + offset, cy + offset
+        x, y = position
         sw, sh = self.root.winfo_screenwidth(), self.root.winfo_screenheight()
-        off = 24 * (self._cascade % 6); self._cascade += 1
         d = {"id": str(uuid.uuid4()),
-             "x": min(cx + off, sw - 240), "y": min(cy + off, sh - 200),
+             "x": min(x, sw - 240), "y": min(y, sh - 200),
              "w": 440, "h": 477, "z": "normal",
              "opacity": self.data["settings"]["opacity"],
              "color": self.data["settings"]["color"], "visible": True,
@@ -5375,7 +5381,7 @@ class App:
             if motion is not None:
                 motions.append(motion)
         # 等这一批窗口都准备好，再统一开始计时。
-        began = time.monotonic()
+        began = time.perf_counter()
         for motion in motions:
             motion.began = began
         self.request_dock_refresh()
@@ -5547,6 +5553,8 @@ class App:
                     capture = getattr(self, "_hotkey_capture", None)
                     if capture:
                         self.q.put(("capture_hotkey", *capture, self.hotkey_text(action)))
+                    elif action == "new":
+                        self.q.put(("new_at_cursor", cursor_pos()))
                     else:
                         self.q.put(action)
                 return 0
@@ -5666,6 +5674,8 @@ class App:
                     _, window, action, value = act
                     if window.winfo_exists():
                         window._apply_hotkey(action, value)
+                elif isinstance(act, tuple) and act[0] == "new_at_cursor":
+                    self.new_note(animate=True, position=act[1])
                 elif act == "new":
                     self.new_note(animate=True)
                 elif act == "hide":
