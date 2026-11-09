@@ -16,7 +16,7 @@ from tkinter import font as tkfont, messagebox
 from ctypes import wintypes
 
 import pystray
-from PIL import Image, ImageDraw, ImageFont, ImageTk
+from PIL import Image, ImageChops, ImageDraw, ImageFont, ImageTk
 
 from storage import DATA_FILE, DEFAULT_SETTINGS, load_data, save_data, backup_before_update
 from version import APP_VERSION
@@ -388,7 +388,7 @@ def set_autostart(on):
 
 # ---------- 悬停提示 ----------
 class Tooltip:
-    """悬停片刻后出现的深色圆角小提示，全局同一时间只显示一个。"""
+    """悬停片刻后出现的圆角小提示，全局同一时间只显示一个。"""
     _cur = None
     _font = None
 
@@ -428,21 +428,103 @@ class Tooltip:
         if Tooltip._font is None:
             Tooltip._font = tkfont.Font(family=UI_FONT, size=9, root=self._w)
         w, h = Tooltip._font.measure(text) + 24, 30
-        tw = tk.Toplevel(self._w)
-        tw.overrideredirect(True)
-        tw.attributes("-transparentcolor", T_COLOR)
-        tw.attributes("-topmost", True)
-        cv = tk.Canvas(tw, bg=T_COLOR, highlightthickness=0, bd=0)
-        cv.pack()
-        round_rect(cv, 1, 1, w - 2, h - 2, 8, fill="#FFFFFF", outline="#D9DCE1")
+        tw, cv = self._new_popup(self._w)
         cv.create_text(w / 2, h / 2, text=text, fill="#3A3F46",
                        font=(UI_FONT, 9))
         x = max(4, self._w.winfo_rootx() + self._w.winfo_width() // 2 - w // 2)
         y = self._w.winfo_rooty() - h - 6
         if y < 0:
             y = self._w.winfo_rooty() + self._w.winfo_height() + 6
-        tw.geometry(f"{w}x{h}+{x}+{y}")
-        Tooltip._cur = tw
+        self._show_popup(tw, cv, w, h, x, y)
+
+    @staticmethod
+    def _new_popup(widget):
+        popup = tk.Toplevel(widget)
+        popup.withdraw()
+        popup.overrideredirect(True)
+        popup.attributes("-topmost", True)
+        popup.attributes("-alpha", 0)
+        canvas = tk.Canvas(popup, bg=NOTE_BG, highlightthickness=0, bd=0)
+        return popup, canvas
+
+    @staticmethod
+    def _show_popup(popup, canvas, width, height, x, y):
+        def paint(retry=True):
+            if Tooltip._cur is not popup or not canvas.winfo_exists():
+                return
+            if Tooltip._paint(popup, canvas, width, height):
+                return
+            if retry:
+                # 首次绘制时 Windows 可能还没准备好供捕获的客户区画面。
+                canvas._root().after(16, paint, False)
+                return
+            canvas.configure(bg=T_COLOR)
+            border = round_rect(canvas, 1, 1, width-2, height-2, 8,
+                                fill=NOTE_BG, outline="#D9DCE1")
+            canvas.tag_lower(border)
+            popup.attributes("-transparentcolor", T_COLOR)
+            popup.attributes("-alpha", 1)
+
+        def on_expose(_event):
+            canvas.unbind("<Expose>")
+            canvas._root().after_idle(paint)
+
+        canvas.bind("<Expose>", on_expose)
+        canvas.place(x=0, y=0, width=width, height=height)
+        popup.geometry(f"{width}x{height}+{x}+{y}")
+        Tooltip._cur = popup
+        popup.deiconify()
+
+    @staticmethod
+    def _paint(popup, canvas, width, height):
+        # 保留 Tk 排版与字形，将白底文字合成到带逐像素透明度的圆角上。
+        scale = 4
+        background = Image.new("RGBA", (width*scale, height*scale))
+        bounds = (scale, scale, (width-1)*scale-1, (height-1)*scale-1)
+        ImageDraw.Draw(background).rounded_rectangle(
+            bounds, radius=8*scale, fill=NOTE_BG, outline="#D9DCE1", width=scale)
+        background = background.resize((width, height), Image.Resampling.BOX)
+        size = width*height*4
+        header = ctypes.create_string_buffer(struct.pack(
+            "<IiiHHIIiiII", 40, width, -height, 1, 32, 0, size, 0, 0, 0, 0))
+        bits = ctypes.c_void_p()
+        dc = gdi32.CreateCompatibleDC(None)
+        if not dc:
+            return False
+        bitmap = old = None
+        try:
+            bitmap = gdi32.CreateDIBSection(dc, header, 0, ctypes.byref(bits), None, 0)
+            if not bitmap:
+                return False
+            old = gdi32.SelectObject(dc, bitmap)
+            if not old or not user32.PrintWindow(canvas.winfo_id(), dc, 2):
+                return False
+            gdi32.GdiFlush()
+            text = Image.frombytes("RGB", (width, height), ctypes.string_at(bits, size), "raw", "BGRX")
+            if text.getpixel((0, 0)) != (255, 255, 255):
+                return False
+            image = ImageChops.multiply(background.convert("RGB"), text)
+            image.putalpha(background.getchannel("A"))
+            pixels = image.convert("RGBa").tobytes("raw", "BGRa")
+            ctypes.memmove(bits, pixels, size)
+
+            hwnd = user32.GetParent(popup.winfo_id()) or popup.winfo_id()
+            disabled = wintypes.BOOL(True)
+            dwmapi.DwmSetWindowAttribute(hwnd, 3, ctypes.byref(disabled), ctypes.sizeof(disabled))
+            style = user32.GetWindowLongPtrW(hwnd, -20)
+            # 先清除 Tk 为全窗透明度设置的分层样式，再切换到逐像素合成。
+            user32.SetWindowLongPtrW(hwnd, -20, style & ~0x00080000)
+            user32.SetWindowLongPtrW(hwnd, -20, style | 0x00080000)
+            extent, origin = wintypes.SIZE(width, height), _POINT(0, 0)
+            blend = ctypes.c_uint32(0x01FF0000)
+            return user32.UpdateLayeredWindow(hwnd, None, None, ctypes.byref(extent), dc,
+                                              ctypes.byref(origin), 0, ctypes.byref(blend), 2)
+        finally:
+            if old:
+                gdi32.SelectObject(dc, old)
+            if bitmap:
+                gdi32.DeleteObject(bitmap)
+            gdi32.DeleteDC(dc)
 
 # ---------- 工具栏圆形按钮 ----------
 def load_icon(master, name, size=22, active=False):
@@ -630,6 +712,8 @@ gdi32.CreateDIBSection.restype = wintypes.HBITMAP
 gdi32.SelectObject.argtypes = [wintypes.HDC, wintypes.HANDLE]
 gdi32.SelectObject.restype = wintypes.HANDLE
 gdi32.DeleteDC.argtypes = [wintypes.HDC]
+user32.PrintWindow.argtypes = [wintypes.HWND, wintypes.HDC, wintypes.UINT]
+user32.PrintWindow.restype = wintypes.BOOL
 user32.UpdateLayeredWindow.argtypes = [wintypes.HWND, wintypes.HDC, ctypes.c_void_p,
     ctypes.c_void_p, wintypes.HDC, ctypes.c_void_p, wintypes.DWORD, ctypes.c_void_p, wintypes.DWORD]
 user32.UpdateLayeredWindow.restype = wintypes.BOOL
@@ -4460,22 +4544,13 @@ class SideDockTooltip(Tooltip):
     def show_at(widget, text, *, beside=False):
         Tooltip._hide()
         work = SideDock.work_area()
-        popup = tk.Toplevel(widget)
-        popup.overrideredirect(True)
-        popup.attributes("-transparentcolor", T_COLOR)
-        popup.attributes("-topmost", True)
-        canvas = tk.Canvas(popup, bg=T_COLOR, highlightthickness=0, bd=0)
-        canvas.pack()
+        popup, canvas = Tooltip._new_popup(widget)
         label = canvas.create_text(0, 0, anchor="nw", text=text, font=(UI_FONT, 9),
                                    justify="left", fill="#3A3F46",
                                    width=max(1, min(480, work.right-work.left-48)))
         left, top, right, bottom = canvas.bbox(label)
         width, height = right-left+24, max(30, bottom-top+12)
-        canvas.configure(width=width, height=height)
         canvas.move(label, 12-left, (height-(bottom-top))/2-top)
-        background = round_rect(canvas, 1, 1, width-2, height-2, 8,
-                                fill=NOTE_BG, outline="#D9DCE1")
-        canvas.tag_lower(background, label)
         left, top = widget.winfo_rootx(), widget.winfo_rooty()
         if beside and left-width-8 >= work.left+8:
             x = left-width-8
@@ -4486,8 +4561,7 @@ class SideDockTooltip(Tooltip):
             if y < work.top+8:
                 y = top+widget.winfo_height()+6
         y = min(work.bottom-height-8, max(work.top+8, y))
-        popup.geometry(f"{width}x{height}+{x}+{y}")
-        Tooltip._cur = popup
+        Tooltip._show_popup(popup, canvas, width, height, x, y)
         return popup
 
 
