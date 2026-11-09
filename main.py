@@ -4548,7 +4548,8 @@ class DockBookmark(tk.Toplevel):
         elif is_note and self._note_visible:
             # 以当前显示的字形为准，英文下伸字母和中文可有不同中线。
             _, top, _, bottom = self.dock.label_ink_font.getbbox(text, anchor="ls")
-            dot_y = round(text_y + self.dock.label_baseline_offset + (top+bottom-1)/2)
+            ink_middle = text_y + self.dock.label_baseline_offset + (top+bottom)/2
+            dot_y = math.floor(ink_middle + 0.5)
             self.bar.create_image(19, dot_y, image=self.dock.note_visible_dot,
                                   tags="dock-note-visible")
 
