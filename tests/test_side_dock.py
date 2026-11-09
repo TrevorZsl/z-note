@@ -139,6 +139,10 @@ class SideDockTests(unittest.TestCase):
         self.assertIsNone(bookmark._animation_job)
 
     def test_click_opens_separate_bookmarks_and_leaving_keeps_them_open(self):
+        self.app.data["settings"]["uiDpi"] = 96
+        self.restart()
+        self.app.notes["0"].d["title"] = "11.06"
+        self.app.notes["1"].d["title"] = "2026年11月的工作便签与待办事项"
         compact_width = self.dock.bar.winfo_width()
         bar = self.dock.bar
         self.assertEqual(bar.itemcget("dock-disclosure", "image"), str(self.dock.disclosure_icons[0]))
@@ -148,6 +152,8 @@ class SideDockTests(unittest.TestCase):
         self.assertEqual(bar.itemcget("dock-disclosure", "image"), str(self.dock.disclosure_icons[1]))
         self.assertLess(bar.coords("dock-disclosure")[0], bar.coords(bar.find_all()[0])[0])
         self.assertEqual(list(self.dock.bookmarks), ["0", "1", "2"])
+        self.assertEqual(self.label(self.dock.bookmarks["0"]), "11.06")
+        self.assertTrue(self.label(self.dock.bookmarks["1"]).endswith("…"))
         self.assertFalse(hasattr(self.dock, "popup"))
         windows = [self.dock, *self.dock.bookmarks.values()]
         for previous, window in zip(windows, windows[1:]):
@@ -155,7 +161,7 @@ class SideDockTests(unittest.TestCase):
             self.assertEqual(window.master, self.root)
             gap = 10 if previous is self.dock else 4
             self.assertEqual(window.winfo_y(), previous.winfo_y()+previous.winfo_height()+gap)
-            self.assertGreaterEqual(window.bar.winfo_width(), 144)
+            self.assertEqual(window.bar.winfo_width(), compact_width+12)
             self.assertEqual(window.winfo_height(), max(32, self.dock.font.metrics("linespace")+10))
             self.assertEqual(window.winfo_x()+window.bar.winfo_width(), main.user32.GetSystemMetrics(0))
         self.assertEqual(self.dock.bar.winfo_width(), compact_width)
@@ -453,6 +459,7 @@ class SideDockTests(unittest.TestCase):
             self.wait(0.15)
             self.assertEqual(self.label(bookmark), text)
             self.assertEqual(bookmark.winfo_width(), original[1]+12)
+            self.assertEqual(bookmark.winfo_x()+bookmark.bar.winfo_width(), main.user32.GetSystemMetrics(0))
             self.assertEqual(neighbor.winfo_geometry(), neighbor_geometry)
             bookmark._leave()
             self.wait(0.15)
@@ -473,10 +480,73 @@ class SideDockTests(unittest.TestCase):
         self.root.update()
         self.assertTrue(self.dock.winfo_ismapped())
         self.assertFalse(self.dock.bookmarks)
-        self.assertEqual(self.label(self.dock._empty), "暂无便签")
-        self.click(self.dock._empty)
+        self.assertFalse(self.dock.expanded)
+        self.assertIsNone(self.dock._empty_tip)
+        self.restart()
         self.assertFalse(self.app.notes)
+        self.dock._enter()
+        self.assertEqual(self.label(self.dock), "z-note")
+        self.click_bar(settle=False)
+        self.assertFalse(self.dock.expanded)
+        self.assertFalse(self.dock.bookmarks)
+        self.assertEqual(self.label(self.dock), "z-note")
+        bar = self.dock.bar
+        self.assertEqual(bar.itemcget("dock-disclosure", "image"), str(self.dock.disclosure_icons[0]))
+        self.assertTrue(self.dock._empty_tip.winfo_ismapped())
+        self.dock._leave()
+        self.assertIsNone(self.dock._empty_tip)
+
+        self.click_bar(settle=False)
+        self.assertTrue(self.app.recover_note("0"))
+        self.root.update()
+        self.assertIsNone(self.dock._empty_tip)
+        self.app.hide_all()
+        self.click_bar()
         self.assertTrue(self.dock.expanded)
+        self.assertEqual(list(self.dock.bookmarks), ["0"])
+
+    def test_empty_tip_restarts_and_clears_on_drag_new_note_and_disable(self):
+        for note in list(self.app.notes.values()):
+            self.app.remove_note(note)
+        self.root.update()
+        self.click_bar(settle=False)
+        first = self.dock._empty_tip
+        self.wait(0.65)
+        self.click_bar(settle=False)
+        self.assertFalse(first.winfo_exists())
+        self.wait(0.65)
+        self.assertTrue(self.dock._empty_tip.winfo_ismapped())
+        self.wait(0.60)
+        self.assertIsNone(self.dock._empty_tip)
+        self.assertIsNone(self.dock._empty_tip_job)
+
+        self.click_bar(settle=False)
+        press = SimpleNamespace(x_root=self.dock.winfo_rootx()+30, y_root=self.dock.winfo_rooty()+15)
+        moved = SimpleNamespace(x_root=press.x_root, y_root=press.y_root+12)
+        self.dock._start_drag(press)
+        self.dock._move_drag(moved)
+        self.dock._end_drag(moved)
+        self.assertIsNone(self.dock._empty_tip)
+
+        self.click_bar(settle=False)
+        note = self.app.new_note()
+        self.root.update()
+        self.assertIsNone(self.dock._empty_tip)
+        self.assertFalse(self.dock.expanded)
+        self.app.remove_note(note)
+        self.root.update()
+        self.click_bar(settle=False)
+        self.app.toggle_side_dock()
+        self.root.update()
+        self.assertFalse(self.dock.winfo_ismapped())
+        self.assertIsNone(main.Tooltip._cur)
+        self.assertIsNone(self.dock._empty_tip_job)
+        self.app.toggle_side_dock()
+        self.root.update()
+        self.click_bar(settle=False)
+        self.dock.destroy()
+        self.assertIsNone(main.Tooltip._cur)
+        self.assertIsNone(self.dock._empty_tip_job)
 
     def test_large_system_scaling_keeps_empty_label_readable(self):
         scaling = self.root.tk.call("tk", "scaling")
@@ -488,11 +558,25 @@ class SideDockTests(unittest.TestCase):
             self.root.update()
             self.app.notes["0"].d["title"] = "便签标题名"
             self.click_bar()
-            self.assertEqual(self.label(self.dock.bookmarks["0"]), "便签标题名")
+            self.assertTrue(self.label(self.dock.bookmarks["0"]).endswith("…"))
+            widths = {window.bar.winfo_width() for window in self.dock.bookmarks.values()}
+            entry_width = self.dock.bar.winfo_width()
+            self.assertEqual(widths, {round(entry_width * 1.14)})
+            self.assertGreater(next(iter(widths)), entry_width+12)
             for note in list(self.app.notes.values()):
                 self.app.remove_note(note)
             self.root.update()
-            self.assertEqual(self.label(self.dock._empty), "暂无便签")
+            self.click_bar(settle=False)
+            popup = self.dock._empty_tip
+            canvas, = popup.winfo_children()
+            label = next(item for item in canvas.find_all() if canvas.type(item) == "text")
+            self.assertEqual(canvas.itemcget(label, "text"), "暂无便签")
+            self.assertLessEqual(canvas.bbox(label)[2], canvas.winfo_width()-8)
+            work = self.dock.work_area()
+            self.assertGreaterEqual(popup.winfo_x(), work.left)
+            self.assertLessEqual(popup.winfo_x()+popup.winfo_width(), self.dock.winfo_x())
+            self.assertGreaterEqual(popup.winfo_y(), work.top)
+            self.assertLessEqual(popup.winfo_y()+popup.winfo_height(), work.bottom)
         finally:
             self.root.tk.call("tk", "scaling", scaling)
 

@@ -4452,15 +4452,19 @@ class SideDockTooltip(Tooltip):
 
     def _show(self):
         self._aid = None
-        self._hide()
+        self.show_at(self._w, self._gt())
+
+    @staticmethod
+    def show_at(widget, text, *, beside=False):
+        Tooltip._hide()
         work = SideDock.work_area()
-        popup = tk.Toplevel(self._w)
+        popup = tk.Toplevel(widget)
         popup.overrideredirect(True)
         popup.attributes("-transparentcolor", T_COLOR)
         popup.attributes("-topmost", True)
         canvas = tk.Canvas(popup, bg=T_COLOR, highlightthickness=0, bd=0)
         canvas.pack()
-        label = canvas.create_text(0, 0, anchor="nw", text=self._gt(), font=(UI_FONT, 9),
+        label = canvas.create_text(0, 0, anchor="nw", text=text, font=(UI_FONT, 9),
                                    justify="left", fill="#3A3F46",
                                    width=max(1, min(480, work.right-work.left-48)))
         left, top, right, bottom = canvas.bbox(label)
@@ -4470,13 +4474,19 @@ class SideDockTooltip(Tooltip):
         background = round_rect(canvas, 1, 1, width-2, height-2, 8,
                                 fill=NOTE_BG, outline="#D9DCE1")
         canvas.tag_lower(background, label)
-        x = min(work.right-width-8, max(work.left+8, self._w.winfo_rootx()-width+40))
-        y = self._w.winfo_rooty()-height-6
-        if y < work.top+8:
-            y = self._w.winfo_rooty()+self._w.winfo_height()+6
+        left, top = widget.winfo_rootx(), widget.winfo_rooty()
+        if beside and left-width-8 >= work.left+8:
+            x = left-width-8
+            y = top+(widget.winfo_height()-height)//2
+        else:
+            x = min(work.right-width-8, max(work.left+8, left-width+40))
+            y = top-height-6
+            if y < work.top+8:
+                y = top+widget.winfo_height()+6
         y = min(work.bottom-height-8, max(work.top+8, y))
         popup.geometry(f"{width}x{height}+{x}+{y}")
         Tooltip._cur = popup
+        return popup
 
 
 class DockBookmark(tk.Toplevel):
@@ -4540,10 +4550,10 @@ class DockBookmark(tk.Toplevel):
         if self is self.dock:
             if self.dock.expanded:
                 text = "收起"
-            elif self._hovered:
+            elif self._hovered and self.dock._rows:
                 text = "展开"
-        limit = self.base_width - (self.NOTE_TITLE_X + self.NOTE_RIGHT_PADDING if is_note else 24)
-        if self is not self.dock and self.dock.font.measure(text) > limit:
+        limit = self.base_width - self.NOTE_TITLE_X - self.NOTE_RIGHT_PADDING
+        if is_note and self.dock.font.measure(text) > limit:
             while text and self.dock.font.measure(text + "…") > limit:
                 text = text[:-1]
             text += "…"
@@ -4689,13 +4699,12 @@ class SideDock(DockBookmark):
         label_width = max(self.font.measure(text) for text in ("z-note", "展开", "收起"))
         self.bar_width = max(88, label_width+42)  # 左侧留给三角，右侧保留文字留白。
         self.bar_height = max(34, line_height+16)
-        self.bookmark_width = max(144, self.font.measure("便签标题名")
-                                  + self.NOTE_TITLE_X + self.NOTE_RIGHT_PADDING)
+        self.bookmark_width = round(self.bar_width * 1.14)
         self.bookmark_height = max(32, line_height+10)
         self.expanded = False
         self._rows = []
         self.bookmarks = {}
-        self._empty = None
+        self._empty_tip = self._empty_tip_job = None
         self._offset = 0
         self._dragged = False
         self._drag_anchor = None
@@ -4725,12 +4734,18 @@ class SideDock(DockBookmark):
         self._rows = [self.app.notes[n["id"]] for n in self.app.data["notes"]
                       if n["id"] in self.app.notes]
         if not self.app.data["settings"].get("sideDock", True):
+            self._hide_empty_tip()
             self._cancel_transition()
             self.expanded = False
             self._offset = 0
             self._clear_bookmarks()
             self.hide_bookmark()
             return
+        if self._rows:
+            self._hide_empty_tip()
+        else:
+            self.expanded = False
+            self._cancel_transition()
         if self._transition_job is None:
             self._layout(self._drag_anchor if self._dragged and self._press else None)
 
@@ -4738,9 +4753,23 @@ class SideDock(DockBookmark):
         for window in self.bookmarks.values():
             window.destroy()
         self.bookmarks.clear()
-        if self._empty is not None:
-            self._empty.destroy()
-            self._empty = None
+
+    def _show_empty_tip(self):
+        self._hide_empty_tip()
+        self._empty_tip = SideDockTooltip.show_at(self.bar, "暂无便签", beside=True)
+        self._empty_tip_job = self.after(1200, self._hide_empty_tip)
+
+    def _hide_empty_tip(self):
+        if self._empty_tip_job is not None:
+            self.after_cancel(self._empty_tip_job)
+            self._empty_tip_job = None
+        if self._empty_tip is not None and self._empty_tip is Tooltip._cur:
+            Tooltip._hide()
+        self._empty_tip = None
+
+    def _leave(self, event=None):
+        self._hide_empty_tip()
+        super()._leave(event)
 
     def _layout(self, y=None, *, animate=False):
         self._cancel_transition()
@@ -4753,10 +4782,7 @@ class SideDock(DockBookmark):
         if not self.expanded:
             self._bar_y = int(min(work.bottom-8-self.bar_height, max(work.top+8, self._anchor_y)))
             if animate:
-                windows = [*self.bookmarks.values()]
-                if self._empty is not None:
-                    windows.append(self._empty)
-                self._animate_layout([(window, self._bar_y) for window in windows])
+                self._animate_layout([(window, self._bar_y) for window in self.bookmarks.values()])
                 return
             self._offset = 0
             self._clear_bookmarks()
@@ -4766,7 +4792,7 @@ class SideDock(DockBookmark):
         self._capacity = max(1, min(6, (room+row_gap)//row_step))
         self._offset = min(max(0, self._offset), max(0, len(self._rows)-self._capacity))
         page = self._rows[self._offset:self._offset+self._capacity]
-        group_height = self.bar_height+entry_gap+max(1, len(page))*row_step-row_gap
+        group_height = self.bar_height+entry_gap+len(page)*row_step-row_gap
         self._bar_y = int(max(work.top+8, min(self._anchor_y, work.bottom-8-group_height)))
         if y is not None:
             self._anchor_y = self._bar_y
@@ -4776,14 +4802,6 @@ class SideDock(DockBookmark):
                 self.bookmarks.pop(identity).destroy()
         next_y = self._bar_y+self.bar_height+entry_gap
         slots = []
-        if not page:
-            if self._empty is None:
-                self._empty = DockBookmark(self, self.bookmark_height)
-                self._empty.update_label("暂无便签")
-            slots.append((self._empty, next_y))
-        elif self._empty is not None:
-            self._empty.destroy()
-            self._empty = None
         for note in page:
             identity = note.d["id"]
             if identity not in self.bookmarks:
@@ -4853,8 +4871,9 @@ class SideDock(DockBookmark):
         if self._press is None:
             return
         x, y, origin = self._press
-        if max(abs(event.x_root-x), abs(event.y_root-y)) >= 5:
+        if not self._dragged and max(abs(event.x_root-x), abs(event.y_root-y)) >= 5:
             self._dragged = True
+            self._hide_empty_tip()
         if self._dragged:
             self._layout(origin+event.y_root-y)
             self._drag_anchor = self._anchor_y
@@ -4870,11 +4889,14 @@ class SideDock(DockBookmark):
             self.app.schedule_save()
             self._dragged = False
             self._drag_anchor = None
+        elif not self._rows:
+            self._show_empty_tip()
         else:
             self.expanded = not self.expanded
             self._layout(animate=True)
 
     def destroy(self):
+        self._hide_empty_tip()
         self._cancel_transition()
         self._clear_bookmarks()
         super().destroy()
