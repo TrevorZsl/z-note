@@ -4,6 +4,7 @@
 """
 import atexit, ctypes, math, os, queue, struct, sys, time, uuid, winreg
 from copy import deepcopy
+from dataclasses import dataclass
 from datetime import datetime
 import tkinter as tk
 import subprocess
@@ -40,6 +41,8 @@ user32 = ctypes.WinDLL("user32")
 kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
 user32.SetWindowPos.argtypes = [wintypes.HWND, wintypes.HWND, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int, wintypes.UINT]
 user32.SetWindowPos.restype = wintypes.BOOL
+user32.SetLayeredWindowAttributes.argtypes = [wintypes.HWND, wintypes.DWORD, wintypes.BYTE, wintypes.DWORD]
+user32.SetLayeredWindowAttributes.restype = wintypes.BOOL
 user32.PostMessageW.argtypes = [wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM]
 user32.PostMessageW.restype = wintypes.BOOL
 user32.SetCapture.argtypes = [wintypes.HWND]
@@ -2030,7 +2033,7 @@ class NoteEditor:
 
 
 class NoteWindow(tk.Toplevel):
-    def __init__(self, app, data):
+    def __init__(self, app, data, *, start_transparent=False):
         super().__init__(app.root)
         self.app, self.d = app, data
         self._temporarily_raised = False
@@ -2038,7 +2041,7 @@ class NoteWindow(tk.Toplevel):
         self.d["color"] = "白"
         self.configure(bg=self._bg)
         self.geometry(f"{data['w']}x{data['h']}+{data['x']}+{data['y']}")
-        self.attributes("-alpha", data["opacity"])
+        self.attributes("-alpha", 0.0 if start_transparent else data["opacity"])
         self.overrideredirect(True)
         self.minsize(280, 230)
 
@@ -2080,9 +2083,10 @@ class NoteWindow(tk.Toplevel):
 
         spacer = tk.Label(self.toolbar, text="", bg=self._bg, cursor="fleur")
         spacer.pack(side="left", fill="both", expand=True)
-        btn("minus", lambda: "隐藏这张便签", self.hide).pack(side="right", padx=(2, 8), pady=9)
+        btn("minus", lambda: "隐藏这张便签",
+            lambda: self.app.animate_note_visibility(self, False)).pack(side="right", padx=(2, 8), pady=9)
         btn("plus", lambda: f"新建便签（{self.app.hotkey_text('new')}）",
-            lambda: self.app.new_note()).pack(side="right", padx=5, pady=9)
+            lambda: self.app.new_note(animate=True)).pack(side="right", padx=5, pady=9)
         btn("trash", lambda: "删除便签", self.delete_self).pack(side="right", padx=5, pady=9)
         self.b_columns = btn("columns-2",
                              lambda: "切回单栏" if self.d.get("twoColumn") else "切换双栏",
@@ -2326,6 +2330,7 @@ class NoteWindow(tk.Toplevel):
             self._draw_pill(pill_width, pill_height)
 
     def destroy(self):
+        self.app._note_motion.finish(self, apply_target=False)
         self._cancel_dock_reveal()
         self._temporarily_raised = False
         for editor in getattr(self, "editors", ()):
@@ -2769,6 +2774,9 @@ class NoteWindow(tk.Toplevel):
         focus = self.focus_get()
         if focus in self._editor_texts and self._ime_composing(focus):
             return
+        origin = self.app._note_motion.finish(self)
+        if origin is not None and not self.d.get("visible", True):
+            return
         for editor in self.editors:
             editor._cancel_row_drag()
         self._columns_editing = True
@@ -2788,7 +2796,8 @@ class NoteWindow(tk.Toplevel):
             self.editors[0].render(keep_cursor=False)
             # 旧双栏数据未记录原宽度，按旧版扩宽比例还原。
             self.d["w"] = self.d.pop("singleColumnWidth", max(280, round(self.winfo_width() / 1.8)))
-            self.geometry(f"{self.d['w']}x{self.winfo_height()}+{self.winfo_x()}+{self.winfo_y()}")
+            x, y = origin if origin is not None else (self.winfo_x(), self.winfo_y())
+            self.geometry(f"{self.d['w']}x{self.winfo_height()}+{x}+{y}")
         else:
             self.editors[0]._sync_lines_from_text()
             self.d["singleColumnWidth"] = self.winfo_width()
@@ -2804,9 +2813,10 @@ class NoteWindow(tk.Toplevel):
             sw = self.winfo_screenwidth()
             new_w = min(max(520, round(self.d["singleColumnWidth"] * 1.3)), sw - 24)
             if new_w > self.winfo_width():
+                x, y = origin if origin is not None else (self.winfo_x(), self.winfo_y())
                 self.d["w"] = new_w
-                self.d["x"] = min(self.winfo_x(), max(0, sw - new_w))
-                self.geometry(f"{new_w}x{self.winfo_height()}+{self.d['x']}+{self.winfo_y()}")
+                self.d["x"] = min(x, max(0, sw - new_w))
+                self.geometry(f"{new_w}x{self.winfo_height()}+{self.d['x']}+{y}")
         self._columns_editing = False
         self._columns_history, self._columns_redo = [], []
         for editor in self.editors:
@@ -2925,9 +2935,13 @@ class NoteWindow(tk.Toplevel):
 
     # ---- 窗口操作 ----
     def _drag_press(self, e):
+        origin = self.app._note_motion.finish(self)
+        if origin is not None and not self.d.get("visible", True):
+            return "break"
         self._edge_sizing = False
         self._dragging = True
-        self._dx, self._dy = e.x_root - self.winfo_x(), e.y_root - self.winfo_y()
+        x, y = origin if origin is not None else (self.winfo_x(), self.winfo_y())
+        self._dx, self._dy = e.x_root - x, e.y_root - y
     def _drag_move(self, e):
         if not self._dragging:
             return "break"
@@ -2995,6 +3009,8 @@ class NoteWindow(tk.Toplevel):
         edges = self._edge_hit(event.x, event.y, getattr(event, "widget", None))
         if not any(edges):
             return self._drag_press(event)
+        if self.app._note_motion.finish(self) is not None and not self.d.get("visible", True):
+            return "break"
         native = wintypes.RECT()
         user32.GetWindowRect(self.hwnd, ctypes.byref(native))
         rect = (native.left, native.top, native.right-native.left, native.bottom-native.top)
@@ -3303,6 +3319,7 @@ class NoteWindow(tk.Toplevel):
         user32.DefWindowProcW(self.hwnd, 0x0086, 0, -1)
 
     def set_z(self, state):
+        self.app._note_motion.finish(self)
         self._cancel_dock_reveal()
         if self.d["z"] == state:
             return
@@ -3333,6 +3350,7 @@ class NoteWindow(tk.Toplevel):
                                 SWP_NOMOVE | SWP_NOSIZE | 0x0010)  # SWP_NOACTIVATE
 
     def hide(self):
+        self.app._note_motion.finish(self, apply_target=False)
         self._cancel_dock_reveal()
         self._temporarily_raised = False
         self.d["visible"] = False
@@ -3343,6 +3361,7 @@ class NoteWindow(tk.Toplevel):
         self.app.request_dock_refresh()
 
     def show(self, temporary_raise=False):
+        self.app._note_motion.finish(self, apply_target=False)
         self._cancel_dock_reveal()
         self._temporarily_raised = temporary_raise and self.d["z"] == "bottom"
         self.d["visible"] = True
@@ -4861,6 +4880,182 @@ class SideDock(DockBookmark):
         super().destroy()
 
 
+@dataclass
+class _NoteTransition:
+    rect: wintypes.RECT
+    layered: bool
+    visible: bool
+    start: tuple
+    target: tuple
+    current: tuple
+    began: float
+    duration: float
+
+
+class NoteVisibilityMotion:
+    """One UI timer for all note fades, independent of their saved geometry."""
+    SINGLE_DURATION = 0.16
+    LOCAL_DURATION = 0.15
+    _LAYERED = 0x00080000
+
+    def __init__(self, root):
+        self.root = root
+        self._active = {}
+        self._job = None
+
+    @staticmethod
+    def enabled():
+        allowed = wintypes.BOOL()
+        return bool(user32.SystemParametersInfoW(0x1042, 0, ctypes.byref(allowed), 0) and allowed.value)
+
+    @staticmethod
+    def _offset(rect, bookmark):
+        if bookmark is None or not bookmark.bar.winfo_ismapped():
+            return 0, 0
+        bar = bookmark.bar
+        x, y = (rect.left+rect.right)//2, (rect.top+rect.bottom)//2
+        bx, by = bar.winfo_rootx()+bar.winfo_width()//2, bar.winfo_rooty()+bar.winfo_height()//2
+        monitor = user32.MonitorFromPoint(wintypes.POINT(x, y), 0)
+        if not monitor or monitor != user32.MonitorFromPoint(wintypes.POINT(bx, by), 0):
+            return 0, 0
+
+        class MonitorInfo(ctypes.Structure):
+            _fields_ = [("size", wintypes.DWORD), ("monitor", wintypes.RECT),
+                        ("work", wintypes.RECT), ("flags", wintypes.DWORD)]
+        info = MonitorInfo()
+        info.size = ctypes.sizeof(info)
+        if not user32.GetMonitorInfoW(monitor, ctypes.byref(info)):
+            return 0, 0
+        work = info.work
+        if (rect.left < work.left or rect.right > work.right
+                or rect.top < work.top or rect.bottom > work.bottom):
+            return 0, 0
+        dx, dy = bx-x, by-y
+        scale = 24 / max(24, math.hypot(dx, dy))
+        return (min(work.right-rect.right, max(work.left-rect.left, int(dx*scale))),
+                min(work.bottom-rect.bottom, max(work.top-rect.top, int(dy*scale))))
+
+    @classmethod
+    def _alpha(cls, note, opacity):
+        style = user32.GetWindowLongPtrW(note.hwnd, -20)
+        if not style & cls._LAYERED:
+            user32.SetWindowLongPtrW(note.hwnd, -20, style | cls._LAYERED)
+        return user32.SetLayeredWindowAttributes(note.hwnd, 0, round(opacity*255), 2)
+
+    @staticmethod
+    def _move(note, x, y):
+        return user32.SetWindowPos(note.hwnd, None, x, y, 0, 0, SWP_NOSIZE | 0x0004 | 0x0010)
+
+    def _apply_frame(self, note, motion, frame):
+        if not self._alpha(note, frame[2]):
+            return False
+        if frame[:2] != motion.current[:2] and not self._move(note, *frame[:2]):
+            return False
+        motion.current = frame
+        return True
+
+    def change(self, note, visible, *, duration, bookmark=None, temporary_raise=False, first_show=False):
+        def apply_now():
+            if visible:
+                if first_show:
+                    self._restore_alpha(note, layered=False)
+                note.show(temporary_raise=temporary_raise)
+            else:
+                note.hide()
+
+        if not duration or note._resizing or note._dragging or note._ime_active:
+            apply_now()
+            return
+        previous = self._active.get(note)
+        if not first_show and note.d.get("visible", True) == visible:
+            if visible and previous is None:
+                apply_now()  # 一键显示仍按原规则前移已显示的便签。
+            return
+
+        if previous is None:
+            rect = wintypes.RECT()
+            if not user32.GetWindowRect(note.hwnd, ctypes.byref(rect)):
+                apply_now()
+                return
+            # 新建窗口在首次绘制前设置的 layered 仅用于这次淡入。
+            layered = not first_show and bool(user32.GetWindowLongPtrW(note.hwnd, -20) & self._LAYERED)
+        else:
+            rect, layered = previous.rect, previous.layered
+        x, y = rect.left, rect.top
+        dx, dy = self._offset(rect, bookmark)
+        opacity = note.d["opacity"]
+        current = previous.current if previous else (x, y, 0 if visible else opacity)
+        start = (x+dx, y+dy, 0) if visible and previous is None else current
+        target = (x, y, opacity) if visible else (x+dx, y+dy, 0)
+        motion = _NoteTransition(rect, layered, visible, start, target, current, time.monotonic(), duration)
+
+        # show/hide 本身会清理旧动画，反向时先取出旧状态，再调用显示。
+        self._active.pop(note, None)
+        if visible:
+            note.attributes("-alpha", start[2])
+            if not self._alpha(note, start[2]):
+                self._active[note] = motion
+                self.finish(note, apply_target=False)
+                apply_now()
+                return
+            note.show(temporary_raise=temporary_raise)
+        else:
+            note._cancel_dock_reveal()
+            note.d["visible"] = False
+        self._active[note] = motion
+        if not self._apply_frame(note, motion, start):
+            self.finish(note)
+            return
+        if self._job is None:
+            self._job = self.root.after(16, self._tick)
+        return motion
+
+    def _tick(self):
+        self._job = None
+        now = time.monotonic()
+        for note, motion in list(self._active.items()):
+            elapsed = (now-motion.began)/motion.duration
+            if elapsed >= 1:
+                self.finish(note)
+                continue
+            progress = elapsed * elapsed * (3 - 2 * elapsed)
+            x, y, opacity = (a+(b-a)*progress for a, b in zip(motion.start, motion.target))
+            if not self._apply_frame(note, motion, (round(x), round(y), opacity)):
+                self.finish(note)
+        if self._active:
+            self._job = self.root.after(16, self._tick)
+
+    def finish(self, note, *, apply_target=True):
+        motion = self._active.pop(note, None)
+        if motion is None:
+            return None
+        if not self._active and self._job is not None:
+            self.root.after_cancel(self._job)
+            self._job = None
+        hiding = apply_target and not motion.visible
+        if hiding:
+            self._alpha(note, 0)
+        origin = motion.rect.left, motion.rect.top
+        if motion.current[:2] != origin and not self._move(note, *origin):
+            note.geometry(f"+{origin[0]}+{origin[1]}")
+        if hiding:
+            note.hide()
+        self._restore_alpha(note, motion.layered)
+        return origin
+
+    def _restore_alpha(self, note, layered):
+        opacity = note.d["opacity"]
+        note.attributes("-alpha", opacity)
+        style = user32.GetWindowLongPtrW(note.hwnd, -20)
+        if style & self._LAYERED:
+            user32.SetLayeredWindowAttributes(note.hwnd, 0, round(opacity*255), 2)
+            if opacity == 1 and not layered:
+                user32.SetWindowLongPtrW(note.hwnd, -20, style & ~self._LAYERED)
+
+    def finish_all(self):
+        return {note: self.finish(note) for note in tuple(self._active)}
+
+
 class App:
     def __init__(self):
         load_fonts()
@@ -4895,6 +5090,7 @@ class App:
         self._bottom_hooks = []
         self._quitting = False
         self.root = tk.Tk()
+        self._note_motion = NoteVisibilityMotion(self.root)
         self._system_font_family = tkfont.nametofont("TkDefaultFont", root=self.root).actual("family")
         # 钉死 tk scaling：首次运行记录系统 DPI，此后不再跟随系统缩放变化，画面始终一致。
         # 想重新适配当前缩放，删掉 %APPDATA%/z-note/notes.json 里的 uiDpi 即可。
@@ -4995,6 +5191,7 @@ class App:
                 editor.render()
 
     def set_opacity(self, percent):
+        self._note_motion.finish_all()
         percent = min(100, max(50, 10 * round(percent / 10)))
         value = percent / 100
         self.data["settings"]["opacity"] = value
@@ -5009,7 +5206,8 @@ class App:
             scale.set(100 - percent)
         self.schedule_save()
 
-    def new_note(self):
+    def new_note(self, *, animate=False):
+        fade = animate and self._note_motion.enabled()
         cx, cy = cursor_pos()
         sw, sh = self.root.winfo_screenwidth(), self.root.winfo_screenheight()
         off = 24 * (self._cascade % 6); self._cascade += 1
@@ -5021,10 +5219,16 @@ class App:
              "editedAt": datetime.now().isoformat(timespec="microseconds"),
              "lines": [{"type": "todo", "text": "", "checked": False}]}
         self.data["notes"].append(d)
-        w = NoteWindow(self, d)
+        w = NoteWindow(self, d, start_transparent=fade)
         self.notes[d["id"]] = w
-        w.show()
-        w.text.focus_set()
+        if fade:
+            self._note_motion.change(w, True, duration=NoteVisibilityMotion.LOCAL_DURATION, first_show=True)
+        else:
+            w.show()
+        if animate:
+            w.text.focus_force()
+        else:
+            w.text.focus_set()
         self.schedule_save()
         return w
 
@@ -5072,6 +5276,7 @@ class App:
             w.render(keep_cursor=False)
 
     def remove_note(self, w):
+        self._note_motion.finish(w)
         w._sync_lines_from_text()
         def change(data):
             note = next(n for n in data["notes"] if n["id"] == w.d["id"])
@@ -5132,10 +5337,26 @@ class App:
         if self._store_history(change):
             self.notes[note_id].render(keep_cursor=False)
 
-    def hide_all(self):
-        for w in self.notes.values():
-            w.hide()
+    def hide_all(self, *, animate=False):
+        if animate and self._note_motion.enabled():
+            self._animate_all(False)
+        else:
+            for w in self.notes.values():
+                w.hide()
         self.schedule_save()
+
+    def _animate_all(self, visible, temporary_raise=False):
+        motions = []
+        for note in self.notes.values():
+            motion = self._note_motion.change(note, visible, duration=NoteVisibilityMotion.LOCAL_DURATION,
+                                              temporary_raise=temporary_raise)
+            if motion is not None:
+                motions.append(motion)
+        # 等这一批窗口都准备好，再统一开始计时。
+        began = time.monotonic()
+        for motion in motions:
+            motion.began = began
+        self.request_dock_refresh()
 
     def request_dock_refresh(self):
         if (getattr(self, "dock", None) is not None
@@ -5149,17 +5370,25 @@ class App:
 
     def toggle_docked_note(self, note_id):
         note = self.notes.get(note_id)
-        if note is None:
-            return
-        if note.d.get("visible", True):
-            note.hide()
-        else:
-            note.show(temporary_raise=True)
+        if note is not None:
+            self.animate_note_visibility(note, not note.d.get("visible", True))
+
+    def animate_note_visibility(self, note, visible):
+        bookmark = None
+        if self.dock is not None and self.dock.expanded and self.data["settings"].get("sideDock", True):
+            bookmark = self.dock.bookmarks.get(note.d["id"])
+            if bookmark is not None and not bookmark.attributes("-alpha"):
+                bookmark = None
+        duration = NoteVisibilityMotion.SINGLE_DURATION if self._note_motion.enabled() else 0
+        self._note_motion.change(note, visible, duration=duration,
+                                 bookmark=bookmark, temporary_raise=visible)
+        if visible:
             user32.SetForegroundWindow(note.hwnd)
         self.schedule_save()
         self.request_dock_refresh()
 
     def toggle_side_dock(self):
+        self._note_motion.finish_all()
         enabled = not self.data["settings"].get("sideDock", True)
         self.data["settings"]["sideDock"] = enabled
         for note in self.notes.values():
@@ -5170,11 +5399,14 @@ class App:
         self.request_dock_refresh()
         self.icon.update_menu()
 
-    def show_all(self, temporary_raise=True):
-        for w in self.notes.values():
-            w.show(temporary_raise=temporary_raise)
+    def show_all(self, temporary_raise=True, *, animate=False):
+        if animate and self._note_motion.enabled():
+            self._animate_all(True, temporary_raise)
+        else:
+            for w in self.notes.values():
+                w.show(temporary_raise=temporary_raise)
         if temporary_raise and self.notes:
-            user32.SetForegroundWindow(w.hwnd)
+            user32.SetForegroundWindow(next(reversed(self.notes.values())).hwnd)
         self.schedule_save()
 
     def _request_bottom_refresh(self):
@@ -5413,11 +5645,11 @@ class App:
                     if window.winfo_exists():
                         window._apply_hotkey(action, value)
                 elif act == "new":
-                    self.new_note()
+                    self.new_note(animate=True)
                 elif act == "hide":
-                    self.hide_all()
+                    self.hide_all(animate=True)
                 elif act == "show":
-                    self.show_all()
+                    self.show_all(animate=True)
                 elif act == "toggle_side_dock":
                     self.toggle_side_dock()
                 elif act == "refresh_bottom":
@@ -5482,9 +5714,13 @@ class App:
         self.quit(saved=True)
 
     def _save_positions(self):
+        motion = getattr(self, "_note_motion", None)
+        origins = motion.finish_all() if motion is not None else {}
         for w in self.notes.values():
             if w._resizing:
                 w._finish_resize(cancel=w._resize_cancel_requested, redraw=False, hidden=True)
+            elif w in origins:
+                w.d["x"], w.d["y"] = origins[w]
             else:
                 w.d["x"], w.d["y"] = w.winfo_x(), w.winfo_y()
 
@@ -5500,6 +5736,8 @@ class App:
         if not saved:
             self._save_positions()
             self.save_now()
+        elif getattr(self, "_note_motion", None) is not None:
+            self._note_motion.finish_all()
         try:
             self.icon.stop()
         except Exception:

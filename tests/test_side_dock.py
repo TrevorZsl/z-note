@@ -1,5 +1,7 @@
 """Side dock regressions with isolated data and real Windows/Tk windows."""
 from copy import deepcopy
+import ctypes
+from ctypes import wintypes
 import os
 from pathlib import Path
 import tempfile
@@ -56,10 +58,21 @@ class SideDockTests(unittest.TestCase):
         if settle:
             self.wait(0.24)
 
-    def click(self, window):
+    def click(self, window, *, settle=True):
         window.bar.event_generate("<ButtonPress-1>", x=30, y=15)
         window.bar.event_generate("<ButtonRelease-1>", x=30, y=15)
         self.root.update()
+        if settle and self.app._note_motion._active:
+            self.wait(0.20)
+
+    def native_frame(self, note):
+        rect = wintypes.RECT()
+        self.assertTrue(main.user32.GetWindowRect(note.hwnd, ctypes.byref(rect)))
+        alpha = ctypes.c_ubyte()
+        read_alpha = main.user32.GetLayeredWindowAttributes
+        read_alpha.argtypes = [wintypes.HWND, ctypes.c_void_p, ctypes.POINTER(ctypes.c_ubyte), ctypes.c_void_p]
+        layered = read_alpha(note.hwnd, None, ctypes.byref(alpha), None)
+        return rect.left, rect.top, alpha.value if layered else 255
 
     def label(self, window):
         return window.bar.itemcget(window.bar.find_all()[0], "text")
@@ -180,6 +193,203 @@ class SideDockTests(unittest.TestCase):
             self.assertTrue(self.dock.expanded)
             self.assertEqual((note.winfo_x(), note.winfo_y(), note.winfo_width(), note.winfo_height(), note.d["z"]), original)
 
+    def test_note_motion_reverses_from_native_frame_and_saves_original_position(self):
+        self.click_bar()
+        note, bookmark = self.app.notes["0"], self.dock.bookmarks["0"]
+        note.hide()
+        self.app.set_opacity(70)
+        self.root.update()
+        origin = self.native_frame(note)[:2]
+        motion = self.app._note_motion
+        with patch.object(motion, "enabled", return_value=True), patch.object(main.time, "monotonic") as clock:
+            clock.return_value = 100
+            self.click(bookmark, settle=False)
+            x, y, alpha = self.native_frame(note)
+            self.assertGreater(x, origin[0])
+            self.assertLessEqual((x-origin[0])**2 + (y-origin[1])**2, 24**2)
+            self.assertEqual(alpha, 0)
+            self.assertTrue(bookmark._note_visible)
+            clock.return_value += 0.06
+            time.sleep(0.03)
+            self.root.update()
+            frame = self.native_frame(note)
+            self.assertTrue(origin[0] < frame[0] < x)
+            self.assertTrue(0 < frame[2] < 178)
+
+            # 便签工具栏的减号和书签点击共用同一过渡。
+            note._tool_btns[2].event_generate("<Button-1>", x=15, y=15)
+            self.root.update()
+            self.assertEqual(self.native_frame(note), frame)
+            self.assertFalse(bookmark._note_visible)
+            clock.return_value += 0.09
+            time.sleep(0.03)
+            self.root.update()
+            frame = self.native_frame(note)
+            self.assertLess(frame[2], 100)
+            self.assertTrue(note.winfo_ismapped())
+            self.click(bookmark, settle=False)
+            self.assertEqual(self.native_frame(note), frame)
+            self.app._save_positions()
+            self.root.update()
+            self.assertEqual((note.d["x"], note.d["y"]), origin)
+            self.assertEqual(self.native_frame(note), (*origin, round(0.7*255)))
+            self.assertIsNone(motion._job)
+
+    def test_batch_motion_uses_one_timer_and_fades_in_place_in_both_modes(self):
+        motion = self.app._note_motion
+        notes = list(self.app.notes.values())
+        origins = [self.native_frame(note)[:2] for note in notes]
+        z_states = [note.d["z"] for note in notes]
+        change = motion.change
+        with patch.object(motion, "enabled", return_value=True), patch.object(main.time, "monotonic") as clock:
+            clock.return_value = 100
+
+            def prepare(*args, **kwargs):
+                transition = change(*args, **kwargs)
+                clock.return_value += 0.01
+                return transition
+
+            for enabled in (True, False):
+                self.app.data["settings"]["sideDock"] = enabled
+                for visible, action in ((False, self.app.hide_all), (True, self.app.show_all)):
+                    with patch.object(motion, "change", side_effect=prepare):
+                        action(animate=True)
+                    self.root.update()
+                    self.assertEqual(len(motion._active), len(notes))
+                    self.assertEqual({m.began for m in motion._active.values()}, {clock.return_value})
+                    self.assertEqual({m.duration for m in motion._active.values()}, {0.15})
+                    self.assertIsNotNone(motion._job)
+                    clock.return_value += 0.15 / 4
+                    time.sleep(0.03)
+                    self.root.update()
+                    frames = [self.native_frame(note) for note in notes]
+                    self.assertEqual([frame[:2] for frame in frames], origins)
+                    alphas = {frame[2] for frame in frames}
+                    self.assertEqual(len(alphas), 1)
+                    self.assertEqual(alphas, {40 if visible else 215})
+                    self.assertEqual([note.d["visible"] for note in notes], [visible]*len(notes))
+                    clock.return_value += 0.20
+                    time.sleep(0.03)
+                    self.root.update()
+                    self.assertFalse(motion._active)
+                    self.assertEqual([bool(note.winfo_ismapped()) for note in notes], [visible]*len(notes))
+                self.assertEqual([note.d["z"] for note in notes], z_states)
+
+    def test_single_note_show_and_hide_are_mirrored(self):
+        self.click_bar()
+        note, bookmark = self.app.notes["0"], self.dock.bookmarks["0"]
+        note.hide()
+        self.root.update()
+        motion = self.app._note_motion
+        with patch.object(motion, "enabled", return_value=True), patch.object(main.time, "monotonic") as clock:
+            clock.return_value = 100
+            frames = []
+            for _ in range(2):
+                self.click(bookmark, settle=False)
+                transition = motion._active[note]
+                self.assertEqual(transition.duration, 0.16)
+                clock.return_value += 0.16 / 4
+                time.sleep(0.03)
+                self.root.update()
+                frames.append(self.native_frame(note))
+                clock.return_value += 0.16
+                time.sleep(0.03)
+                self.root.update()
+            self.assertEqual([frame[2] for frame in frames], [40, 215])
+            for axis in (0, 1):
+                self.assertLessEqual(abs(frames[0][axis] + frames[1][axis]
+                                         - transition.start[axis] - transition.target[axis]), 1)
+
+    def test_toolbar_and_queued_new_note_fade_in_at_their_landing_position(self):
+        source = self.app.notes["0"]
+        motion = self.app._note_motion
+        first_frames = []
+        initialize = main.NoteWindow.__init__
+
+        def record_initial_frame(note, *args, **kwargs):
+            initialize(note, *args, **kwargs)
+            first_frames.append(self.native_frame(note))
+
+        with patch.object(motion, "enabled", return_value=True), patch.object(main.time, "monotonic") as clock, \
+                patch.object(main.NoteWindow, "__init__", record_initial_frame):
+            clock.return_value = 100
+            for from_toolbar in (True, False):
+                if from_toolbar:
+                    source._tool_btns[3].event_generate("<Button-1>", x=15, y=15)
+                else:
+                    self.app.q.put("new")
+                    self.app._pump()
+                self.root.update()
+                note = next(reversed(self.app.notes.values()))
+                origin = (note.d["x"], note.d["y"])
+                self.assertEqual(first_frames[-1], (*origin, 0))
+                self.assertEqual(self.native_frame(note), (*origin, 0))
+                self.assertEqual(motion._active[note].duration, 0.15)
+                self.assertIs(note.focus_get(), note.text)
+                note.text.event_generate("<KeyPress>", keysym="a")
+                self.assertIn("a", note.text.get("1.0", "end-1c"))
+                clock.return_value += 0.15 / 4
+                time.sleep(0.03)
+                self.root.update()
+                self.assertEqual(self.native_frame(note), (*origin, 40))
+                clock.return_value += 0.15
+                time.sleep(0.03)
+                self.root.update()
+                self.assertEqual(self.native_frame(note), (*origin, 255))
+                self.assertFalse(main.user32.GetWindowLongPtrW(note.hwnd, -20) & motion._LAYERED)
+
+    def test_new_note_is_immediate_with_animation_disabled_or_native_failure(self):
+        motion = self.app._note_motion
+        for enabled in (False, True):
+            with patch.object(motion, "enabled", return_value=enabled), \
+                    patch.object(motion, "_alpha", return_value=False):
+                note = self.app.new_note(animate=True)
+            self.root.update()
+            self.assertTrue(note.winfo_ismapped())
+            self.assertEqual(self.native_frame(note), (note.d["x"], note.d["y"], 255))
+            self.assertIs(note.focus_lastfor(), note.text)
+            self.assertFalse(motion._active)
+
+    def test_note_motion_is_local_without_a_bookmark_and_can_be_disabled(self):
+        note = self.app.notes["0"]
+        origin = self.native_frame(note)[:2]
+        motion = self.app._note_motion
+        with patch.object(motion, "enabled", return_value=True):
+            self.app.animate_note_visibility(note, False)
+            self.assertEqual(motion._active[note].target, (*origin, 0))
+            self.app.set_opacity(80)
+        self.assertFalse(note.winfo_ismapped())
+        with patch.object(main.user32, "SystemParametersInfoW", return_value=1) as spi:
+            self.app.animate_note_visibility(note, True)
+            self.assertEqual(spi.call_args.args[0], 0x1042)
+        self.assertTrue(note.winfo_ismapped())
+        self.assertFalse(motion._active)
+        with patch.object(motion, "enabled", return_value=True), patch.object(motion, "_alpha", return_value=False):
+            self.app.animate_note_visibility(note, False)
+        self.assertFalse(note.winfo_ismapped())
+        self.assertEqual(self.native_frame(note), (*origin, 204))
+        self.assertFalse(motion._active)
+
+    def test_cross_monitor_motion_fades_in_place_and_drag_settles_it(self):
+        self.click_bar()
+        note, bookmark = self.app.notes["0"], self.dock.bookmarks["0"]
+        note.hide()
+        self.root.update()
+        origin = self.native_frame(note)[:2]
+        motion = self.app._note_motion
+        with patch.object(motion, "enabled", return_value=True), \
+                patch.object(main.user32, "MonitorFromPoint", side_effect=(1, 2)):
+            self.click(bookmark, settle=False)
+        self.assertEqual(motion._active[note].start, (*origin, 0))
+        note._drag_press(SimpleNamespace(x_root=origin[0]+20, y_root=origin[1]+20))
+        self.assertFalse(motion._active)
+        self.assertIsNone(motion._job)
+        self.assertEqual(self.native_frame(note), (*origin, 255))
+        note._drag_move(SimpleNamespace(x_root=origin[0]+40, y_root=origin[1]+50))
+        self.root.update()
+        note._drag_release(None)
+        self.assertEqual((note.d["x"], note.d["y"]), (origin[0]+20, origin[1]+30))
+
     def test_main_toggle_only_changes_bookmarks_not_note_visibility(self):
         self.app.notes["0"].hide()
         self.root.update()
@@ -218,7 +428,6 @@ class SideDockTests(unittest.TestCase):
         self.assertEqual(self.dock.bookmarks, original)
 
     def test_opening_pinned_note_under_bookmarks_keeps_bookmark_clickable(self):
-        from ctypes import wintypes
         self.click_bar()
         note, bookmark = self.app.notes["1"], self.dock.bookmarks["1"]
         edge = main.user32.GetSystemMetrics(0)

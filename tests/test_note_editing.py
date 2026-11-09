@@ -1282,6 +1282,10 @@ class NoteEditingTests(unittest.TestCase):
                 self.app.q.put(action)
                 self.app._pump()
                 self.app.root.update()
+                if self.app._note_motion._active:
+                    settled = main.tk.BooleanVar(master=self.app.root)
+                    self.app.root.after(200, settled.set, True)
+                    self.app.root.wait_variable(settled)
                 for w, geometry in zip(self.app.notes.values(), original):
                     self.assertEqual(w.d["visible"], action == "show")
                     self.assertEqual(w.state(), "normal" if action == "show" else "withdrawn")

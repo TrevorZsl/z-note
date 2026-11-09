@@ -253,7 +253,7 @@ class AppLifecycleTests(unittest.TestCase):
              patch.object(app, "show_all") as show:
             app._pump()
         for action in (new, hide, show):
-            action.assert_called_once_with()
+            action.assert_called_once_with(animate=True)
         app.root.after.assert_called_once_with(120, app._pump)
 
     def test_exit_saves_positions_before_destroying_ui_and_exiting(self):
