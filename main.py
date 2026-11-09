@@ -4667,8 +4667,8 @@ class SideDock(DockBookmark):
                                                 round(app.root.winfo_fpixels(f"{label_size}p")))
         line_height = self.font.metrics("linespace")
         self.label_baseline_offset = self.font.metrics("ascent") - line_height//2
-        self.bar_width = max(110, self.font.measure("z-note")+32,
-                             self.font.measure("暂无便签")+24) - 12
+        label_width = max(self.font.measure(text) for text in ("z-note", "展开", "收起"))
+        self.bar_width = max(88, label_width+42)  # 左侧留给三角，右侧保留文字留白。
         self.bar_height = max(34, line_height+16)
         self.bookmark_width = max(144, self.font.measure("便签标题名")
                                   + self.NOTE_TITLE_X + self.NOTE_RIGHT_PADDING)
