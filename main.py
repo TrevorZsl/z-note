@@ -4366,11 +4366,13 @@ class HistoryWindow(tk.Toplevel):
             child.destroy()
         self.names = []
         self.rows = {}
+        recycled = self.mode == "deletedNotes"
         for key in self.ids:
-            name, stamp = names[key]
+            name, edited_at = names[key]
             suffix = ""
-            if sum(value[0] == name for value in names.values()) > 1:
-                suffix = " · " + (stamp.split(".")[0].replace("T", " ") or "编辑时间未知")
+            if recycled or sum(value[0] == name for value in names.values()) > 1:
+                timestamp = (edited_at or "").split(".")[0].replace("T", " ") or "编辑时间未知"
+                suffix = ("\n" if recycled else " · ") + timestamp
             self.names.append(name + suffix)
             row = tk.Frame(self.left.content, bg=NOTE_BG)
             row.pack(fill="x", pady=4)
@@ -4382,18 +4384,30 @@ class HistoryWindow(tk.Toplevel):
                     indicatoron=False, image=self._check_images[False], selectimage=self._check_images[True],
                     command=lambda k=key, v=value: self.check(k,v.get()), bd=0, highlightthickness=0)
                 box._value = value
-                box.pack(side="left", anchor="center", padx=(0, 6))
+                if recycled:
+                    box.grid(row=0, column=0, rowspan=2, padx=(0, 6))
+                else:
+                    box.pack(side="left", anchor="center", padx=(0, 6))
             label = tk.Label(row, text=name, bg=NOTE_BG, fg="#2B2F36", anchor="w",
                              justify="left", font=(UI_FONT,10), cursor="hand2")
-            label.pack(side="left", fill="x", expand=not suffix)
+            if recycled:
+                row.configure(padx=5, pady=2)
+                row.columnconfigure(1, weight=1)
+                label.grid(row=0, column=1, sticky="ew")
+            else:
+                label.pack(side="left", fill="x", expand=not suffix)
             if suffix:
-                row.bind("<Configure>", lambda e, l=label: l.configure(wraplength=max(1, e.width // 2)))
-                detail = tk.Label(row, text=suffix, bg=NOTE_BG, fg=INK, anchor="w",
-                                  justify="left", font=(UI_FONT, 10), cursor="hand2")
-                detail.pack(side="left", fill="x", expand=True)
+                detail = tk.Label(row, text=timestamp if recycled else suffix, bg=NOTE_BG, fg=INK,
+                                  anchor="w", justify="left", font=(UI_FONT, 9 if recycled else 10),
+                                  cursor="hand2")
+                if recycled:
+                    detail.grid(row=1, column=1, sticky="ew")
+                else:
+                    row.bind("<Configure>", lambda e, l=label: l.configure(wraplength=max(1, e.width // 2)))
+                    detail.pack(side="left", fill="x", expand=True)
                 detail.bind("<Configure>", lambda e, l=detail: l.configure(wraplength=max(1, e.width-8)))
                 detail.bind("<Button-1>", lambda e,k=key: self.choose(k))
-            else:
+            if recycled or not suffix:
                 label.bind("<Configure>", lambda e, l=label: l.configure(wraplength=max(1,e.width-8)))
             label.bind("<Button-1>", lambda e,k=key: self.choose(k))
         if self.selected_id not in self.ids:

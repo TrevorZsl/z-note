@@ -2910,19 +2910,44 @@ class NoteEditingTests(unittest.TestCase):
         self.assertEqual(work.right, 1200)
         self.assertEqual(fallback.call_args.args[0], 48)
 
-    def test_history_duplicate_name_suffix_only_shows_seconds(self):
+    def test_recycle_bin_stacks_edit_time_under_every_title(self):
         from copy import deepcopy
         note = deepcopy(self.note.d)
         note.update(id="second", title="同名", editedAt="2026-10-28T12:34:56.123456")
-        first = deepcopy(note)
-        first.update(id="first", editedAt="2026-10-28T11:22:33.654321")
-        self.app.data["deletedNotes"] = [first, note]
+        first = dict(note, id="first", editedAt="2026-10-28T11:22:33.654321")
+        unique = dict(note, id="unique", title="很长的唯一标题" * 4, editedAt="2026-10-28T10:20:30")
+        old = dict(note, id="old", title="")
+        old.pop("editedAt")
+        self.app.data["deletedNotes"] = [first, note, unique, old]
         win = main.HistoryWindow(self.app)
         win.switch("deletedNotes")
         self.app.root.update()
-        self.assertEqual(win.names, ["同名 · 2026-10-28 12:34:56", "同名 · 2026-10-28 11:22:33"])
-        win.choose("second")
-        self.assertEqual(win.rows["second"].cget("bg"), "#E9EDF2")
+        for key, name, timestamp in (
+                ("first", "同名", "2026-10-28 11:22:33"),
+                ("second", "同名", "2026-10-28 12:34:56"),
+                ("unique", unique["title"], "2026-10-28 10:20:30"),
+                ("old", "无标题", "编辑时间未知")):
+            with self.subTest(key=key):
+                title, detail = win.rows[key].winfo_children()
+                self.assertEqual((title.cget("text"), detail.cget("text")), (name, timestamp))
+                self.assertEqual(title.winfo_x(), detail.winfo_x())
+                self.assertGreaterEqual(detail.winfo_y(), title.winfo_y() + title.winfo_height())
+        row = win.rows["second"]
+        title, detail = row.winfo_children()
+        detail.event_generate("<Button-1>")
+        self.assertEqual(win.selected_id, "second")
+        for widget in (row, title, detail):
+            self.assertEqual(widget.cget("bg"), "#E9EDF2")
+        win.toggle_batch()
+        self.app.root.update()
+        row = win.rows["unique"]
+        box, title, detail = row.winfo_children()
+        self.assertGreater(title.winfo_height(), win.rows["second"].winfo_children()[1].winfo_height())
+        self.assertAlmostEqual(box.winfo_y() + box.winfo_height() / 2, row.winfo_height() / 2, delta=2)
+        box.invoke()
+        self.assertEqual(win.checked, {"unique"})
+        title.event_generate("<Button-1>")
+        self.assertEqual(win.selected_id, "unique")
         win.destroy()
 
     def test_scroll_thumb_has_smooth_round_caps_even_for_short_ranges(self):
