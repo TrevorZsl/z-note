@@ -10,6 +10,10 @@ on:
         description: Actions run ID whose built installer should be uploaded to Gitee
         required: true
         type: string
+      gitee_runner:
+        description: Optional label of a dedicated runner for this Gitee retry
+        required: false
+        type: string
 
 permissions:
   contents: read
@@ -103,8 +107,8 @@ jobs:
   gitee-preview:
     needs: build
     if: ${{ !cancelled() && ((needs.build.result == 'success' && needs.build.outputs.gitee_repo != '') || github.event_name == 'workflow_dispatch') }}
-    runs-on: ubuntu-latest
-    timeout-minutes: 100
+    runs-on: ${{ inputs.gitee_runner || vars.GITEE_RELEASE_RUNNER || 'ubuntu-latest' }}
+    timeout-minutes: 15
     permissions:
       actions: read
       contents: read
@@ -113,6 +117,9 @@ jobs:
       GITEE_RELEASE_REPO: ${{ needs.build.outputs.gitee_repo }}
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
       - name: Select the original release build for a Gitee retry
         if: github.event_name == 'workflow_dispatch'
         shell: pwsh
@@ -128,7 +135,7 @@ jobs:
             throw "Select a completed tag-triggered Windows release run"
           }
           "RELEASE_VERSION=$($run.head_branch.Substring(1))" >> $env:GITHUB_ENV
-          $giteeRepo = python3 -c "from updater import GITEE_RELEASE_REPO; print(GITEE_RELEASE_REPO)"
+          $giteeRepo = python -c "from updater import GITEE_RELEASE_REPO; print(GITEE_RELEASE_REPO)"
           if ($LASTEXITCODE -ne 0 -or $giteeRepo -cnotmatch '^[A-Za-z0-9_-]+/[A-Za-z0-9_.-]+$') { throw "Invalid Gitee release repository" }
           "GITEE_RELEASE_REPO=$giteeRepo" >> $env:GITHUB_ENV
       - uses: actions/download-artifact@v4
@@ -143,6 +150,7 @@ jobs:
           GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
         run: |
           if (-not $env:GITEE_TOKEN) { throw "Configure the GITEE_TOKEN Actions secret first" }
+          $env:no_proxy = 'gitee.com,foruda.gitee.com'
           $tag = "v$env:RELEASE_VERSION"
           $installer = Get-Item -LiteralPath "dist/z-note-setup-$env:RELEASE_VERSION.exe"
           $sums = Get-Item -LiteralPath 'dist/SHA256SUMS'
@@ -154,7 +162,7 @@ jobs:
           $repo = "https://gitee.com/api/v5/repos/$env:GITEE_RELEASE_REPO"
           $auth = @{ Authorization = "Bearer $env:GITEE_TOKEN" }
           try {
-            $target = Invoke-RestMethod -Uri $repo -Headers $auth -MaximumRedirection 0 -TimeoutSec 60
+            $target = Invoke-RestMethod -Uri $repo -Headers $auth -NoProxy -MaximumRedirection 0 -TimeoutSec 60
             if (-not $target.default_branch -or $target.private -ne $false) { throw "Gitee requires an initialized public repository" }
             $metadata = @{
               tag_name = $tag
@@ -165,32 +173,32 @@ jobs:
             } | ConvertTo-Json -Compress
             $release = $null
             try {
-              $release = Invoke-RestMethod -Uri "$repo/releases/tags/$tag" -Headers $auth -MaximumRedirection 0 -TimeoutSec 30
+              $release = Invoke-RestMethod -Uri "$repo/releases/tags/$tag" -Headers $auth -NoProxy -MaximumRedirection 0 -TimeoutSec 30
             } catch {
               if ($_.Exception.Response.StatusCode -ne 404) { throw }
             }
             if (-not $release) {
               $release = Invoke-RestMethod -Method Post -Uri "$repo/releases" -Headers $auth `
-                -ContentType 'application/json; charset=utf-8' -Body $metadata -MaximumRedirection 0 -TimeoutSec 60
+                -ContentType 'application/json; charset=utf-8' -Body $metadata -NoProxy -MaximumRedirection 0 -TimeoutSec 60
             }
             if (-not $release.id -or $release.tag_name -cne $tag -or $release.prerelease -ne $true) {
               throw "Gitee did not return the expected preview release"
             }
             $attachments = "$repo/releases/$($release.id)/attach_files"
-            $existing = Invoke-RestMethod -Uri $attachments -Headers $auth -MaximumRedirection 0 -TimeoutSec 30
+            $existing = Invoke-RestMethod -Uri $attachments -Headers $auth -NoProxy -MaximumRedirection 0 -TimeoutSec 30
             $downloads = "https://gitee.com/$env:GITEE_RELEASE_REPO/releases/download/$tag"
             foreach ($file in @($sums, $installer)) {
               $matches = @($existing | Where-Object name -CEQ $file.Name)
               if ($matches.Count) {
                 if ($matches.Count -ne 1 -or $matches[0].size -ne $file.Length) { throw "Existing Gitee attachment metadata mismatch: $($file.Name)" }
                 $expected = (Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
-                $actual = python3 -c 'import hashlib,sys; from updater import _open; stream = _open(sys.argv[1]); print(hashlib.file_digest(stream, "sha256").hexdigest()); stream.close()' "$downloads/$($file.Name)"
+                $actual = python -c 'import hashlib,sys; from updater import _open; stream = _open(sys.argv[1]); print(hashlib.file_digest(stream, "sha256").hexdigest()); stream.close()' "$downloads/$($file.Name)"
                 if ($LASTEXITCODE -ne 0 -or $actual -cne $expected) { throw "Existing Gitee attachment checksum mismatch: $($file.Name)" }
                 Write-Host "Reusing verified Gitee attachment $($file.Name)"
                 continue
               }
               Write-Host "Uploading $($file.Name) ($($file.Length) bytes) to Gitee"
-              $response = curl --silent --show-error --fail --connect-timeout 20 --max-time 5400 --speed-time 45 --speed-limit 1024 `
+              $response = curl --noproxy gitee.com --silent --show-error --fail --connect-timeout 20 --max-time 600 --speed-time 45 --speed-limit 1024 `
                 --write-out '%{stderr}Gitee HTTP %{http_code}, uploaded %{size_upload} bytes, total %{time_total}s\n' `
                 --form-string "access_token=$env:GITEE_TOKEN" --form "file=@$($file.FullName)" $attachments
               if ($LASTEXITCODE -ne 0) { throw "Gitee upload failed for $($file.Name) (curl $LASTEXITCODE)" }
