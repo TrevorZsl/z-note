@@ -46,11 +46,11 @@ gh run list --repo TrevorZsl/z-note --workflow release.yml --branch v2.1.9 --lim
 
 记下原构建运行编号，并跟到构建、`github-draft` 和 `gitee-preview` 三个任务结束。上传失败时先读失败步骤和平台附件列表。只补传失败的一侧，避免同时运行多个任务写入同一版本的附件。已正式发布的版本使用新标签修复，保留原标签和原附件。
 
-## Gitee 大文件上传过慢或失败时补传
+## 优先用 Windows Runner 直连 Gitee
 
 `v2.1.8` 的真实案例中，云端创建了预览版，`SHA256SUMS` 也上传成功，但安装包约 65.5 MB，一次重试在 600 秒时只记录了 11.7 MB 已发送，附件列表仍缺少安装包。这两个数字无法区分持续低速与中途卡住。用一次性 Windows Runner 从本机直连 Gitee 后，补传成功，整个补传任务用时 48 秒，随后从 Gitee 下载回读，两份附件的 SHA-256 均与 GitHub 一致。 [云端超时日志](https://github.com/TrevorZsl/z-note/actions/runs/42600426666) · [本机补传成功日志](https://github.com/TrevorZsl/z-note/actions/runs/42603403228)
 
-`v2.2.1` 再次遇到云端上传超时。复用本机 `.runtime-deps/gitee-actions-runner` 的官方 Runner 后补传成功，两边附件回读的 SHA-256 与原构建一致。下次若构建与 GitHub 草稿任务已成功，而 Gitee 上传步骤运行满 3 分钟仍缺安装包，就检查一次性 Runner 能否使用。确认本机可补传且原运行只剩 Gitee 上传在进行后，取消原运行并等它结束，避免两个任务同时写入。若 Gitee 附件已齐全，直接验收。 [原构建及超时日志](https://github.com/TrevorZsl/z-note/actions/runs/42649463586) · [本机补传成功日志](https://github.com/TrevorZsl/z-note/actions/runs/42651676794)
+`v2.2.1` 再次遇到云端上传超时。复用本机 `.runtime-deps/gitee-actions-runner` 的官方 Runner 后补传成功，两边附件回读的 SHA-256 与原构建一致。发版前先确认本机 Runner 能否使用。若已有在线的专用 Runner 和仓库变量，标签触发的 Gitee 任务会直接走本机。否则，构建与 GitHub 草稿任务成功后，若 Gitee 仍缺安装包且一次性 Runner 已在线，就结束原运行中剩下的 Gitee 云端任务，再用原构建产物补传。Gitee 附件已齐全时直接验收，本机暂不可用时继续跟踪云端上传。 [原构建及超时日志](https://github.com/TrevorZsl/z-note/actions/runs/42649463586) · [本机补传成功日志](https://github.com/TrevorZsl/z-note/actions/runs/42651676794)
 
 1. 确认原运行已结束且构建成功。核对 Gitee 现有附件，保留通过校验的文件。
 2. 选择维护者认可、能连接 GitHub Actions 和直连 Gitee 的 Windows 机器。确认已有 PowerShell 7、Git、GitHub CLI、curl 和可执行的 Python 3.12 或更新版本。将现有 Python 加入启动 Runner 的进程 `PATH`。z-note 的自托管上传步骤复用这个 Python，省去运行中再下载和安装。
