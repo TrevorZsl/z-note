@@ -13,15 +13,19 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  release:
+  build:
     runs-on: windows-2022
     timeout-minutes: 30
+    outputs:
+      version: ${{ steps.metadata.outputs.version }}
+      gitee_repo: ${{ steps.metadata.outputs.gitee_repo }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
       - name: Validate release tag and notes
+        id: metadata
         shell: pwsh
         run: |
           $version = python -c "from version import APP_VERSION; from updater import parse_version; parse_version(APP_VERSION); print(APP_VERSION)"
@@ -30,6 +34,10 @@ jobs:
           $notes = "releases/$version.md"
           if (-not (Test-Path -LiteralPath $notes)) { throw "Missing public release notes: $notes" }
           "RELEASE_VERSION=$version" >> $env:GITHUB_ENV
+          "version=$version" >> $env:GITHUB_OUTPUT
+          $giteeRepo = python -c "from updater import GITEE_RELEASE_REPO; print(GITEE_RELEASE_REPO)"
+          if ($giteeRepo -and $giteeRepo -cnotmatch '^[A-Za-z0-9_-]+/[A-Za-z0-9_.-]+$') { throw "Invalid Gitee release repository" }
+          "gitee_repo=$giteeRepo" >> $env:GITHUB_OUTPUT
       - name: Install build dependencies
         shell: pwsh
         run: |
@@ -61,6 +69,18 @@ jobs:
             dist/z-note-setup-${{ env.RELEASE_VERSION }}.exe
             dist/SHA256SUMS
           if-no-files-found: error
+
+  github-draft:
+    needs: build
+    runs-on: windows-2022
+    env:
+      RELEASE_VERSION: ${{ needs.build.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: z-note-${{ needs.build.outputs.version }}
+          path: dist
       - name: Create draft in public release repository
         shell: pwsh
         env:
@@ -72,3 +92,55 @@ jobs:
           # No --clobber: a published release or an existing draft is never overwritten.
           gh release create $tag "dist/z-note-setup-$env:RELEASE_VERSION.exe" "dist/SHA256SUMS" --repo $env:RELEASE_REPO --draft --title "z-note $env:RELEASE_VERSION" --notes-file "releases/$env:RELEASE_VERSION.md"
           if ($LASTEXITCODE -ne 0) { throw "Draft upload failed; inspect the target release before retrying" }
+
+  gitee-preview:
+    needs: build
+    if: needs.build.outputs.gitee_repo != ''
+    runs-on: windows-2022
+    timeout-minutes: 15
+    env:
+      RELEASE_VERSION: ${{ needs.build.outputs.version }}
+      GITEE_RELEASE_REPO: ${{ needs.build.outputs.gitee_repo }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: z-note-${{ needs.build.outputs.version }}
+          path: dist
+      - name: Create Gitee preview and upload the same installer
+        shell: pwsh
+        env:
+          GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
+        run: |
+          if (-not $env:GITEE_TOKEN) { throw "Configure the GITEE_TOKEN Actions secret first" }
+          $tag = "v$env:RELEASE_VERSION"
+          $installer = Get-Item -LiteralPath "dist/z-note-setup-$env:RELEASE_VERSION.exe"
+          if ($installer.Length -gt 100MB) { throw "Installer exceeds Gitee's 100 MB attachment limit" }
+          $repo = "https://gitee.com/api/v5/repos/$env:GITEE_RELEASE_REPO"
+          $auth = @{ Authorization = "Bearer $env:GITEE_TOKEN" }
+          try {
+            $target = Invoke-RestMethod -Uri $repo -Headers $auth -MaximumRedirection 0 -TimeoutSec 60
+            if (-not $target.default_branch -or $target.private -ne $false) { throw "Gitee requires an initialized public repository" }
+            $metadata = @{
+              tag_name = $tag
+              name = "z-note $env:RELEASE_VERSION"
+              body = Get-Content -Raw -Encoding UTF8 -LiteralPath "releases/$env:RELEASE_VERSION.md"
+              target_commitish = $target.default_branch
+              prerelease = $true
+            } | ConvertTo-Json -Compress
+            $release = Invoke-RestMethod -Method Post -Uri "$repo/releases" -Headers $auth `
+              -ContentType 'application/json; charset=utf-8' -Body $metadata -MaximumRedirection 0 -TimeoutSec 60
+            if (-not $release.id -or $release.tag_name -cne $tag -or $release.prerelease -ne $true) {
+              throw "Gitee did not return the expected preview release"
+            }
+            foreach ($file in @($installer, (Get-Item -LiteralPath 'dist/SHA256SUMS'))) {
+              $asset = Invoke-RestMethod -Method Post -Uri "$repo/releases/$($release.id)/attach_files" -Headers $auth `
+                -Form @{ file = $file } -MaximumRedirection 0 -TimeoutSec 300
+              if ($asset.name -cne $file.Name -or $asset.size -ne $file.Length) { throw "Gitee attachment metadata mismatch" }
+            }
+          } catch {
+            $code = $_.Exception.Response.StatusCode
+            if ($code) { throw "Gitee Release API failed (HTTP $([int]$code)). Check the preview before retrying." }
+            throw
+          }
+          "Gitee preview: https://gitee.com/$env:GITEE_RELEASE_REPO/releases/tag/$tag" >> $env:GITHUB_STEP_SUMMARY

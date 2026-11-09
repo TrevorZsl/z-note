@@ -1,5 +1,5 @@
-"""Manual GitHub Release updates; no UI or third-party dependencies."""
-from dataclasses import dataclass
+"""Manual updates from the public release repositories."""
+from dataclasses import dataclass, replace
 import hashlib
 from http.client import HTTPException
 import json
@@ -15,6 +15,7 @@ from version import APP_VERSION
 
 
 RELEASE_REPO = "TrevorZsl/z-note-releases"
+GITEE_RELEASE_REPO = "trevorzsl/z-note-releases"
 RELEASES_URL = f"https://github.com/{RELEASE_REPO}/releases"
 API_URL = f"https://api.github.com/repos/{RELEASE_REPO}/releases/latest"
 TIMEOUT = 15
@@ -41,28 +42,44 @@ def _cancelled(cancel):
 
 
 class _GitHubRedirects(HTTPRedirectHandler):
+    hosts = {"github.com", "release-assets.githubusercontent.com",
+             "objects.githubusercontent.com", "github-releases.githubusercontent.com"}
+    source = "GitHub"
+
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         url = urlsplit(newurl)
         if (url.scheme != "https" or url.username or url.password or url.port not in (None, 443)
-                or url.hostname not in {"github.com", "release-assets.githubusercontent.com",
-                                        "objects.githubusercontent.com", "github-releases.githubusercontent.com"}):
-            raise UpdateError("更新下载被重定向到非 GitHub 地址，已停止。")
+                or url.hostname not in self.hosts):
+            raise UpdateError(f"更新下载被重定向到非 {self.source} 地址，已停止。")
         return super().redirect_request(req, fp, code, msg, headers, newurl)
 
 
+class _GiteeRedirects(_GitHubRedirects):
+    hosts = {"gitee.com", "foruda.gitee.com"}
+    source = "Gitee"
+
+
 def _open(url):
+    parsed = urlsplit(url)
+    gitee = parsed.hostname == "gitee.com"
+    redirects = _GiteeRedirects() if gitee else _GitHubRedirects()
+    accept = "application/octet-stream"
+    if url == API_URL:
+        accept = "application/vnd.github+json"
+    elif gitee and parsed.path.startswith("/api/v5/"):
+        accept = "application/json"
     request = Request(url, headers={"User-Agent": f"z-note/{APP_VERSION}",
-                                    "Accept": "application/vnd.github+json" if url == API_URL else "application/octet-stream"})
+                                    "Accept": accept})
     try:
-        return build_opener(_GitHubRedirects()).open(request, timeout=TIMEOUT)
+        return build_opener(redirects).open(request, timeout=TIMEOUT)
     except HTTPError as exc:
         if exc.code in (403, 429):
-            raise UpdateError("GitHub 请求受限，请稍后重试。") from exc
+            raise UpdateError(f"{redirects.source} 请求受限，请稍后重试。") from exc
         if exc.code == 404:
             raise UpdateError("尚无可用的正式版本，或发布文件不存在。") from exc
         raise UpdateError(f"更新服务返回错误（HTTP {exc.code}），请稍后重试。") from exc
     except (URLError, OSError) as exc:
-        raise UpdateError("无法连接 GitHub，请检查网络后重试。") from exc
+        raise UpdateError(f"无法连接 {redirects.source}，请检查网络后重试。") from exc
 
 
 def _read_small(url, limit, cancel):
@@ -86,6 +103,52 @@ class Release:
 
 
 def check_update(cancel, current=APP_VERSION):
+    if GITEE_RELEASE_REPO:
+        try:
+            release = _check_gitee(cancel, current)
+            if release is not None:
+                return release
+        except Cancelled:
+            raise
+        except UpdateError:
+            return _check_github(cancel, current)
+        # GitHub may already have a newer formal release while Gitee is still in preview.
+        try:
+            return _check_github(cancel, current)
+        except Cancelled:
+            raise
+        except UpdateError:
+            return None
+    return _check_github(cancel, current)
+
+
+def _check_gitee(cancel, current):
+    api = f"https://gitee.com/api/v5/repos/{GITEE_RELEASE_REPO}/releases"
+    try:
+        releases = json.loads(_read_small(api + "?per_page=30", 1024 * 1024, cancel))
+        if not isinstance(releases, list):
+            raise ValueError("not a release list")
+        stable = [(parse_version(item["tag_name"]), item) for item in releases
+                  if item.get("prerelease") is False and not item.get("draft")]
+        if not stable:
+            return None
+        version, data = max(stable, key=lambda item: item[0])
+        if version <= parse_version(current):
+            return None
+        tag = data["tag_name"]
+        release_id = data["id"]
+        if type(release_id) is not int or release_id <= 0:
+            raise ValueError("invalid release ID")
+        assets = json.loads(_read_small(f"{api}/{release_id}/attach_files", 1024 * 1024, cancel))
+        base = f"https://gitee.com/{GITEE_RELEASE_REPO}/releases/download/{tag}"
+        return _release_from_assets(data, assets, base, gitee=True)
+    except (KeyError, TypeError, ValueError, AttributeError) as exc:
+        raise UpdateError("Gitee 更新信息格式无效，请联系发布者。") from exc
+    except (OSError, URLError, HTTPException) as exc:
+        raise UpdateError("读取 Gitee 更新信息失败，请检查网络后重试。") from exc
+
+
+def _check_github(cancel, current):
     try:
         data = json.loads(_read_small(API_URL, 1024 * 1024, cancel))
         if not isinstance(data, dict):
@@ -96,31 +159,33 @@ def check_update(cancel, current=APP_VERSION):
         version = parse_version(tag)
         if version <= parse_version(current):
             return None
-        number = tag.removeprefix("v")
-        name = f"z-note-setup-{number}.exe"
-        assets = data["assets"]
-        selected = []
-        for expected in (name, "SHA256SUMS"):
-            matches = [asset for asset in assets if asset.get("name") == expected]
-            if len(matches) != 1:
-                raise UpdateError(f"新版缺少有效的 {expected}，请联系发布者。")
-            asset = matches[0]
-            url = f"https://github.com/{RELEASE_REPO}/releases/download/{tag}/{expected}"
-            if asset["browser_download_url"] != url:
-                raise UpdateError("发布文件地址不属于指定的更新仓库。")
-            size = asset["size"]
-            if type(size) is not int or not 0 < size <= (MAX_INSTALLER_SIZE if expected == name else 65536):
-                raise UpdateError("发布文件大小无效。")
-            selected.append(asset)
-        notes = data.get("body") or "此版本暂无更新说明。"
-        if not isinstance(notes, str):
-            raise ValueError("invalid release notes")
-        return Release(number, notes, name, selected[0]["browser_download_url"],
-                       selected[0]["size"], selected[1]["browser_download_url"])
+        base = f"https://github.com/{RELEASE_REPO}/releases/download/{tag}"
+        return _release_from_assets(data, data["assets"], base)
     except (KeyError, TypeError, ValueError, AttributeError) as exc:
         raise UpdateError("更新信息格式无效，请联系发布者。") from exc
     except (OSError, URLError, HTTPException) as exc:
         raise UpdateError("读取更新信息失败，请检查网络后重试。") from exc
+
+
+def _release_from_assets(data, assets, base, *, gitee=False):
+    number = data["tag_name"].removeprefix("v")
+    name = f"z-note-setup-{number}.exe"
+    sizes = []
+    for expected, limit in ((name, MAX_INSTALLER_SIZE), ("SHA256SUMS", 65536)):
+        matches = [asset for asset in assets if asset.get("name") == expected]
+        if len(matches) != 1:
+            raise UpdateError(f"新版缺少有效的 {expected}，请联系发布者。")
+        asset = matches[0]
+        if not gitee and asset["browser_download_url"] != f"{base}/{expected}":
+            raise UpdateError("发布文件地址不属于指定的更新仓库。")
+        size = asset["size"]
+        if type(size) is not int or not 0 < size <= limit:
+            raise UpdateError("发布文件大小无效。")
+        sizes.append(size)
+    notes = data.get("body") or "此版本暂无更新说明。"
+    if not isinstance(notes, str):
+        raise ValueError("invalid release notes")
+    return Release(number, notes, name, f"{base}/{name}", sizes[0], f"{base}/SHA256SUMS")
 
 
 def verify_installer(path, release, expected_hash):
@@ -143,6 +208,22 @@ def remove_download(path):
 
 
 def download_update(release, cancel, progress):
+    try:
+        return _download(release, cancel, progress)
+    except Cancelled:
+        raise
+    except UpdateError:
+        if urlsplit(release.installer_url).hostname != "gitee.com":
+            raise
+        base = f"https://github.com/{RELEASE_REPO}/releases/download/v{release.version}"
+        fallback = replace(release, installer_url=f"{base}/{release.installer_name}",
+                           checksum_url=f"{base}/SHA256SUMS")
+        _cancelled(cancel)
+        progress(0, release.size)
+        return _download(fallback, cancel, progress)
+
+
+def _download(release, cancel, progress):
     destination = None
     partial = None
     try:

@@ -1,4 +1,4 @@
-"""Update protocol tests never contact GitHub or run an installer."""
+"""Update protocol tests use simulated network responses and installers."""
 from copy import deepcopy
 import hashlib
 from http.client import IncompleteRead
@@ -17,6 +17,7 @@ import updater
 
 class UpdaterTests(unittest.TestCase):
     def setUp(self):
+        self.enterContext(patch.object(updater, "GITEE_RELEASE_REPO", ""))
         root = self.enterContext(tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parent))
         self.enterContext(patch.object(tempfile, "tempdir", root))
         self.cancel = threading.Event()
@@ -158,3 +159,66 @@ class UpdaterTests(unittest.TestCase):
         with patch.object(updater, "_open", return_value=response):
             with self.assertRaisesRegex(updater.UpdateError, "网络"):
                 updater.check_update(self.cancel)
+
+
+class GiteeUpdaterTests(unittest.TestCase):
+    def setUp(self):
+        self.enterContext(patch.object(updater, "GITEE_RELEASE_REPO", "publisher/releases"))
+        root = self.enterContext(tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parent))
+        self.enterContext(patch.object(tempfile, "tempdir", root))
+        self.cancel = threading.Event()
+        self.api = "https://gitee.com/api/v5/repos/publisher/releases/releases"
+        self.base = "https://gitee.com/publisher/releases/releases/download/v2.10.0"
+        self.name = "z-note-setup-2.10.0.exe"
+        self.content = b"test installer"
+        self.hash = hashlib.sha256(self.content).hexdigest()
+        self.release = {"id": 37, "tag_name": "v2.10.0", "prerelease": False, "body": "更新说明"}
+        self.assets = [{"name": self.name, "size": len(self.content)}, {"name": "SHA256SUMS", "size": 100}]
+
+    def test_gitee_uses_highest_formal_version_and_trusted_attachment_paths(self):
+        releases = [dict(self.release, tag_name="v3.0.0", prerelease=True),
+                    dict(self.release, tag_name="v2.9.0"), self.release]
+        responses = [io.BytesIO(json.dumps(data).encode()) for data in (releases, self.assets)]
+        with patch.object(updater, "_open", side_effect=responses) as network:
+            release = updater.check_update(self.cancel, "2.8.0")
+        self.assertEqual(release.version, "2.10.0")
+        self.assertEqual(release.installer_url, f"{self.base}/{self.name}")
+        self.assertEqual(release.checksum_url, f"{self.base}/SHA256SUMS")
+        self.assertEqual([call.args[0] for call in network.call_args_list],
+                         [self.api + "?per_page=30", self.api + "/37/attach_files"])
+
+    def test_github_fallback_when_gitee_is_unavailable_or_has_only_preview(self):
+        for response in (updater.UpdateError("offline"), io.BytesIO(b'[{"prerelease":true}]')):
+            with self.subTest(response=response), patch.object(updater, "_open", side_effect=[
+                    response, io.BytesIO(b'{"tag_name":"v2.9.0"}')]) as network:
+                self.assertIsNone(updater.check_update(self.cancel, "2.9.0"))
+                self.assertEqual(network.call_args.args[0], updater.API_URL)
+
+    def test_corrupt_gitee_download_restarts_with_same_version_from_github(self):
+        release = updater.Release("2.10.0", "", self.name, f"{self.base}/{self.name}",
+                                  len(self.content), f"{self.base}/SHA256SUMS")
+        sums = f"{self.hash}  {self.name}\n".encode()
+        responses = [io.BytesIO(data) for data in (sums, b"x" * release.size, sums, self.content)]
+        with patch.object(updater, "_open", side_effect=responses) as network:
+            path, checksum = updater.download_update(release, self.cancel, Mock())
+        self.addCleanup(updater.remove_download, path)
+        updater.verify_installer(path, release, checksum)
+        github = f"https://github.com/{updater.RELEASE_REPO}/releases/download/v2.10.0"
+        self.assertEqual([call.args[0] for call in network.call_args_list],
+                         [release.checksum_url, release.installer_url, f"{github}/SHA256SUMS", f"{github}/{self.name}"])
+        self.assertEqual(list(Path(tempfile.tempdir).iterdir()), [path.parent])
+
+    def test_gitee_cancellation_never_falls_back(self):
+        self.cancel.set()
+        with patch.object(updater, "_open") as network, self.assertRaises(updater.Cancelled):
+            updater.check_update(self.cancel)
+        network.assert_not_called()
+
+    def test_gitee_redirects_are_limited_to_gitee_https(self):
+        handler = updater._GiteeRedirects()
+        request = Request(f"{self.base}/{self.name}")
+        cdn = f"https://foruda.gitee.com/attach_file/123/{self.name}"
+        self.assertEqual(handler.redirect_request(request, None, 302, "", {}, cdn).full_url, cdn)
+        for url in ("http://gitee.com/file", "https://foruda.gitee.com.example.com/file", "https://github.com/file"):
+            with self.subTest(url=url), self.assertRaises(updater.UpdateError):
+                handler.redirect_request(request, None, 302, "", {}, url)
