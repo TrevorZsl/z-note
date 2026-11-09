@@ -11,7 +11,7 @@ BACKUP_DIR = os.path.join(DATA_DIR, "backup")
 
 DEFAULT_SETTINGS = {"autostart": False, "showOnStartup": True,
                     "opacity": 1.0, "color": "白", "fontSize": 11,
-                    "fontFamily": "classic"}
+                    "fontFamily": "classic", "sideDock": True, "sideDockY": 0.5}
 
 def load_data():
     if not os.path.exists(DATA_FILE):

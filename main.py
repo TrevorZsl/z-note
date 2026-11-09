@@ -1804,6 +1804,8 @@ class NoteEditor:
         self.lines = lines
         if old != lines:
             self.d["editedAt"] = datetime.now().isoformat(timespec="microseconds")
+            if not self.win.d.get("title"):
+                self.app.request_dock_refresh()
         structure_changed = (len(old) != len(lines) or
                              any(a["type"] != b["type"] for a, b in zip(old, lines)))
         if structure_changed:
@@ -2322,6 +2324,7 @@ class NoteWindow(tk.Toplevel):
             self._draw_pill(pill_width, pill_height)
 
     def destroy(self):
+        self._cancel_dock_reveal()
         self._temporarily_raised = False
         for editor in getattr(self, "editors", ()):
             editor.teardown()
@@ -2692,6 +2695,7 @@ class NoteWindow(tk.Toplevel):
             self.d["title"] = e.get().strip()
             self.d["editedAt"] = datetime.now().isoformat(timespec="microseconds")
             self.app.schedule_save()
+            self.app.request_dock_refresh()
             e.destroy()
             self._title_editor = None
             self._draw_chip()
@@ -3297,6 +3301,7 @@ class NoteWindow(tk.Toplevel):
         user32.DefWindowProcW(self.hwnd, 0x0086, 0, -1)
 
     def set_z(self, state):
+        self._cancel_dock_reveal()
         if self.d["z"] == state:
             return
         previous = self.d["z"]
@@ -3326,14 +3331,17 @@ class NoteWindow(tk.Toplevel):
                                 SWP_NOMOVE | SWP_NOSIZE | 0x0010)  # SWP_NOACTIVATE
 
     def hide(self):
+        self._cancel_dock_reveal()
         self._temporarily_raised = False
         self.d["visible"] = False
         if self._resizing:
             self._finish_resize(cancel=True, redraw=False, hidden=True)
         self.withdraw()
         self.app.schedule_save()
+        self.app.request_dock_refresh()
 
     def show(self, temporary_raise=False):
+        self._cancel_dock_reveal()
         self._temporarily_raised = temporary_raise and self.d["z"] == "bottom"
         self.d["visible"] = True
         self.deiconify()
@@ -3346,6 +3354,28 @@ class NoteWindow(tk.Toplevel):
         self.apply_z()
         if self.d["z"] != "bottom" or self._temporarily_raised:
             self.lift()
+        self.app.request_dock_refresh()
+
+    def _cancel_dock_reveal(self):
+        job = getattr(self, "_dock_reveal_job", None)
+        if job is not None:
+            self.after_cancel(job)
+            self._dock_reveal_job = None
+            self._temporarily_raised = False
+            self.apply_z()
+
+    def reveal_from_dock_mode(self):
+        self.show(temporary_raise=True)
+        self._temporarily_raised = True
+        self.attributes("-topmost", True)
+        self.lift()
+
+        def restore():
+            self._dock_reveal_job = None
+            self._temporarily_raised = False
+            self.apply_z()
+
+        self._dock_reveal_job = self.after(1000, restore)
 
     def delete_self(self):
         self.app.remove_note(self)
@@ -4394,11 +4424,343 @@ class HistoryWindow(tk.Toplevel):
                 [r for r in data[key] if r["id"] != record_id]))
 
 
+class SideDockTooltip(Tooltip):
+    @classmethod
+    def _hide(cls):
+        Tooltip._hide()
+
+    def _show(self):
+        self._aid = None
+        self._hide()
+        work = SideDock.work_area()
+        popup = tk.Toplevel(self._w)
+        popup.overrideredirect(True)
+        popup.attributes("-topmost", True)
+        tk.Label(popup, text=self._gt(), font=(UI_FONT, 9), justify="left",
+                 bg=NOTE_BG, fg="#3A3F46", padx=12, pady=8,
+                 wraplength=min(480, work.right-work.left-48)).pack()
+        popup.update_idletasks()
+        width, height = popup.winfo_reqwidth(), popup.winfo_reqheight()
+        x = min(work.right-width-8, max(work.left+8, self._w.winfo_rootx()-width+40))
+        y = self._w.winfo_rooty()-height-6
+        if y < work.top+8:
+            y = self._w.winfo_rooty()+self._w.winfo_height()+6
+        y = min(work.bottom-height-8, max(work.top+8, y))
+        popup.geometry(f"{width}x{height}+{x}+{y}")
+        Tooltip._cur = popup
+
+
+class DockBookmark(tk.Toplevel):
+    """主入口和便签书签共用的贴边圆角窗口。"""
+    def __init__(self, dock, height, command=None):
+        super().__init__(dock.app.root)
+        self.withdraw()
+        self.dock, self.command, self.height = dock, command, height
+        self.base_width = dock.compact_width - 12 if self is dock else dock.compact_width
+        self.full_label = ""
+        self._note_visible = False
+        self._hovered = False
+        self._extension = 0
+        self._animation_job = None
+        self._position_y = 0
+        self._press = None
+        self._drawn = None
+        self.overrideredirect(True)
+        self.attributes("-topmost", True)
+        self.configure(bg=NOTE_BG)
+        self.bar = tk.Canvas(self, bg=NOTE_BG, bd=0, highlightthickness=0,
+                             cursor="hand2" if command or self is dock else "arrow")
+        if self is dock:
+            self.disclosure_icons = (load_icon(self.bar, "disclosure-right", 9),
+                                     load_icon(self.bar, "disclosure-down", 9))
+        self.bar.place(x=0, y=0)
+        self.bar.bind("<Enter>", self._enter)
+        self.bar.bind("<Leave>", self._leave)
+        self.bar.bind("<ButtonPress-1>", self._drag_press)
+        self.bar.bind("<B1-Motion>", self._drag_move)
+        self.bar.bind("<ButtonRelease-1>", self._drag_release)
+        self.bar.bind("<MouseWheel>", dock._wheel)
+        self.tip = SideDockTooltip(self.bar, lambda: self.full_label) if self is not dock else None
+        self.bind("<Map>", self._style_native)
+
+    def _style_native(self, event):
+        if event.widget != self:
+            return
+        # Tk 映射后才生成最终外层句柄，在此设置圆角，避免样式落到临时句柄上。
+        hwnd = user32.GetParent(self.winfo_id()) or self.winfo_id()
+        style = user32.GetWindowLongPtrW(hwnd, -20)
+        user32.SetWindowLongPtrW(hwnd, -20, style & ~0x40000 | 0x80)
+        preference = ctypes.c_int(NOTE_CORNER_PREFERENCE)
+        dwmapi.DwmSetWindowAttribute(hwnd, 33, ctypes.byref(preference), ctypes.sizeof(preference))
+
+    def update_label(self, label, visible=False):
+        self.full_label, self._note_visible = label, visible
+        self._draw()
+
+    def _draw(self):
+        width = self.base_width + self._extension
+        text = self.full_label
+        if self is self.dock:
+            if self.dock.expanded:
+                text = "收起"
+            elif self._hovered:
+                text = "展开"
+        limit = self.base_width - 24
+        if self is not self.dock and self.dock.font.measure(text) > limit:
+            while text and self.dock.font.measure(text + "…") > limit:
+                text = text[:-1]
+            text += "…"
+        bg = "#F0F3F7" if self._note_visible else NOTE_BG
+        if self._drawn == (text, bg, width):
+            return
+        self._drawn = (text, bg, width)
+        self.configure(bg=bg)
+        self.bar.configure(bg=bg)
+        self.bar.place_configure(width=width, height=self.height)
+        self.bar.delete("all")
+        text_x = width/2 + (8 if self is self.dock else 0)
+        text_y = self.height/2
+        if self is self.dock and text == self.full_label:
+            text_y -= 2  # 补偿英文小写字形的视觉中心偏下。
+        self.bar.create_text(text_x, text_y, text=text, font=self.dock.font,
+                             fill="#475569")
+        if self is self.dock:
+            icon_y = self.height/2 - (1 if self.dock.expanded else 0)
+            self.bar.create_image(19, icon_y, image=self.disclosure_icons[self.dock.expanded],
+                                  tags="dock-disclosure")
+
+    def place_at(self, y):
+        self._position_y = int(y)
+        self.lift()
+        self._position()
+        if not self.winfo_ismapped():
+            self.deiconify()
+
+    def _position(self):
+        width = self.base_width + self._extension
+        edge = user32.GetSystemMetrics(0)
+        # 原生窗口右端伸出屏幕，让可见部分只保留 DWM 抗锯齿左圆角。
+        self.geometry(f"{width+24}x{self.height}+{edge-width}+{self._position_y}")
+        self._draw()
+
+    def _animate(self, target):
+        self._cancel_animation()
+        origin, started = self._extension, time.monotonic()
+
+        def frame():
+            self._animation_job = None
+            progress = min(1.0, (time.monotonic()-started)/0.1)
+            self._extension = round(origin+(target-origin)*(1-(1-progress)**2))
+            self._position()
+            if progress < 1:
+                self._animation_job = self.after(16, frame)
+
+        frame()
+
+    def _cancel_animation(self):
+        if self._animation_job is not None:
+            self.after_cancel(self._animation_job)
+            self._animation_job = None
+
+    def _enter(self, event=None):
+        self._hovered = True
+        if self is self.dock:
+            self._draw()
+        else:
+            self._animate(12)
+
+    def _leave(self, event=None):
+        self._hovered = False
+        if self is self.dock:
+            self._draw()
+        else:
+            self._animate(0)
+
+    def _drag_press(self, event):
+        if self is self.dock:
+            self.dock._start_drag(event)
+        else:
+            self._press = (event.x_root, event.y_root)
+
+    def _drag_move(self, event):
+        if self is self.dock:
+            self.dock._move_drag(event)
+        elif self._press and max(abs(event.x_root-self._press[0]),
+                                 abs(event.y_root-self._press[1])) >= 5:
+            self._press = None
+
+    def _drag_release(self, event):
+        if self is self.dock:
+            self.dock._end_drag(event)
+        elif self._press is not None:
+            self._press = None
+            if self.command:
+                self.command()
+
+    def hide_bookmark(self):
+        self._cancel_animation()
+        if self.tip:
+            self.tip._leave(None)
+        self._hovered, self._extension = False, 0
+        self._drawn = None
+        self.withdraw()
+
+    def destroy(self):
+        self._cancel_animation()
+        if self.tip:
+            self.tip._leave(None)
+        super().destroy()
+
+
+class SideDock(DockBookmark):
+    """主入口和有限数量的独立书签，不使用共同的弹出面板。"""
+    def __init__(self, app):
+        self.app = app
+        self.font = tkfont.Font(root=app.root, family=UI_FONT, size=10)
+        self.compact_width = max(110, self.font.measure("z-note")+32,
+                                 self.font.measure("暂无便签")+24)
+        self.bar_height = max(34, self.font.metrics("linespace")+16)
+        self.expanded = False
+        self._rows = []
+        self.bookmarks = {}
+        self._empty = None
+        self._offset = 0
+        self._dragged = False
+        self._drag_anchor = None
+        super().__init__(self, self.bar_height)
+        self.update_label("z-note")
+
+    @staticmethod
+    def work_area():
+        work = wintypes.RECT()
+        user32.SystemParametersInfoW(48, 0, ctypes.byref(work), 0)
+        return work
+
+    @staticmethod
+    def note_label(note):
+        title = note.get("title", "").strip()
+        if title:
+            return title
+        for key in ("lines", "lines2"):
+            for line in note.get(key) or []:
+                for text in line.get("text", "").splitlines():
+                    if text.strip():
+                        return text.strip()
+        return "无标题便签"
+
+    def refresh(self):
+        self._rows = [self.app.notes[n["id"]] for n in self.app.data["notes"]
+                      if n["id"] in self.app.notes]
+        if not self.app.data["settings"].get("sideDock", True):
+            self.expanded = False
+            self._offset = 0
+            self._clear_bookmarks()
+            self.hide_bookmark()
+            return
+        self._layout(self._drag_anchor if self._dragged and self._press else None)
+
+    def _clear_bookmarks(self):
+        for window in self.bookmarks.values():
+            window.destroy()
+        self.bookmarks.clear()
+        if self._empty is not None:
+            self._empty.destroy()
+            self._empty = None
+
+    def _layout(self, y=None):
+        work = self.work_area()
+        gap = 6
+        travel = max(1, work.bottom-work.top-self.bar_height-16)
+        ratio = min(1, max(0, self.app.data["settings"].get("sideDockY", 0.5)))
+        self._anchor_y = work.top+8+round(travel*ratio) if y is None else y
+        if not self.expanded:
+            self._clear_bookmarks()
+            self._bar_y = int(min(work.bottom-8-self.bar_height, max(work.top+8, self._anchor_y)))
+            self.place_at(self._bar_y)
+            return
+        room = work.bottom-work.top-16-self.bar_height
+        self._capacity = max(1, min(6, room//(self.bar_height+gap)))
+        self._offset = min(max(0, self._offset), max(0, len(self._rows)-self._capacity))
+        page = self._rows[self._offset:self._offset+self._capacity]
+        group_height = self.bar_height+max(1, len(page))*(self.bar_height+gap)
+        self._bar_y = int(max(work.top+8, min(self._anchor_y, work.bottom-8-group_height)))
+        if y is not None:
+            self._anchor_y = self._bar_y
+        self.place_at(self._bar_y)
+        visible_ids = {note.d["id"] for note in page}
+        for identity in list(self.bookmarks):
+            if identity not in visible_ids:
+                self.bookmarks.pop(identity).destroy()
+        next_y = self._bar_y+self.bar_height+gap
+        if not page:
+            if self._empty is None:
+                self._empty = DockBookmark(self, self.bar_height)
+                self._empty.update_label("暂无便签")
+            self._empty.place_at(next_y)
+        elif self._empty is not None:
+            self._empty.destroy()
+            self._empty = None
+        for note in page:
+            identity = note.d["id"]
+            if identity not in self.bookmarks:
+                self.bookmarks[identity] = DockBookmark(self, self.bar_height,
+                    lambda key=identity: self.app.toggle_docked_note(key))
+            window = self.bookmarks[identity]
+            window.update_label(self.note_label(note.d), note.d.get("visible", True))
+            window.place_at(next_y)
+            next_y += self.bar_height+gap
+
+    def _wheel(self, event):
+        if self.expanded and event.delta:
+            steps = -int(event.delta/120) or (-1 if event.delta > 0 else 1)
+            self._offset += steps
+            self._layout()
+        return "break"
+
+    def _start_drag(self, event):
+        self._press = (event.x_root, event.y_root, self._bar_y)
+        self._dragged = False
+        self._drag_anchor = None
+
+    def _move_drag(self, event):
+        if self._press is None:
+            return
+        x, y, origin = self._press
+        if max(abs(event.x_root-x), abs(event.y_root-y)) >= 5:
+            self._dragged = True
+        if self._dragged:
+            self._layout(origin+event.y_root-y)
+            self._drag_anchor = self._anchor_y
+
+    def _end_drag(self, event):
+        if self._press is None:
+            return
+        self._press = None
+        if self._dragged:
+            work = self.work_area()
+            travel = max(1, work.bottom-work.top-self.bar_height-16)
+            self.app.data["settings"]["sideDockY"] = min(1, max(0, (self._anchor_y-work.top-8)/travel))
+            self.app.schedule_save()
+            self._dragged = False
+            self._drag_anchor = None
+        else:
+            self.expanded = not self.expanded
+            if not self.expanded:
+                self._offset = 0
+            self.refresh()
+
+    def destroy(self):
+        self._clear_bookmarks()
+        super().destroy()
+
+
 class App:
     def __init__(self):
         load_fonts()
         self.data = load_data()
         settings = self.data["settings"]
+        settings.setdefault("sideDock", True)
+        settings.setdefault("sideDockY", 0.5)
         if settings.get("fontFamily") not in FONT_CHOICES:
             settings["fontFamily"] = "classic"
         if "toggleHotkey" in settings:
@@ -4445,6 +4807,8 @@ class App:
         for name in ("TkDefaultFont", "TkMenuFont"):
             tkfont.nametofont(name, root=self.root).configure(family=UI_FONT)
         self.notes = {}
+        self.dock = None
+        self._dock_refresh_job = None
         self._save_job = None
         self._cascade = 0
         self.settings_win = None
@@ -4454,6 +4818,8 @@ class App:
                                      size=self.data["settings"]["fontSize"])
 
         self._restore_notes()
+        self.dock = SideDock(self)
+        self.dock.refresh()
         self._start_bottom_guard()
         if migrate_opacity or migrate_z:
             self.save_now()
@@ -4608,6 +4974,7 @@ class App:
         if self._store_history(change):
             self.notes.pop(w.d["id"], None)
             w.destroy()
+            self.request_dock_refresh()
 
     def recover_note(self, note_id):
         def change(data):
@@ -4662,6 +5029,39 @@ class App:
         for w in self.notes.values():
             w.hide()
         self.schedule_save()
+
+    def request_dock_refresh(self):
+        if (getattr(self, "dock", None) is not None
+                and not getattr(self, "_quitting", False)
+                and self._dock_refresh_job is None):
+            self._dock_refresh_job = self.root.after_idle(self._refresh_dock)
+
+    def _refresh_dock(self):
+        self._dock_refresh_job = None
+        self.dock.refresh()
+
+    def toggle_docked_note(self, note_id):
+        note = self.notes.get(note_id)
+        if note is None:
+            return
+        if note.d.get("visible", True):
+            note.hide()
+        else:
+            note.show(temporary_raise=True)
+            user32.SetForegroundWindow(note.hwnd)
+        self.schedule_save()
+        self.request_dock_refresh()
+
+    def toggle_side_dock(self):
+        enabled = not self.data["settings"].get("sideDock", True)
+        self.data["settings"]["sideDock"] = enabled
+        for note in self.notes.values():
+            note._cancel_dock_reveal()
+            if not enabled:
+                note.reveal_from_dock_mode()
+        self.schedule_save()
+        self.request_dock_refresh()
+        self.icon.update_menu()
 
     def show_all(self, temporary_raise=True):
         for w in self.notes.values():
@@ -4720,7 +5120,8 @@ class App:
                 hwnd = user32.GetWindow(hwnd, 4)  # GW_OWNER includes associated IME windows.
             if not in_app:
                 for note in self.notes.values():
-                    note._temporarily_raised = False
+                    if getattr(note, "_dock_reveal_job", None) is None:
+                        note._temporarily_raised = False
         for note in self.notes.values():
             if note.d["z"] != "bottom" or not note.d.get("visible", True) or note._resizing:
                 continue
@@ -4755,6 +5156,8 @@ class App:
             pystray.MenuItem(lambda _item: f"显示所有便签  {self.hotkey_text('show')}", lambda: self.q.put("show")),
             pystray.MenuItem(lambda _item: f"隐藏所有便签  {self.hotkey_text('hide')}", lambda: self.q.put("hide")),
             pystray.Menu.SEPARATOR,
+            pystray.MenuItem("右侧收纳模式", lambda: self.q.put("toggle_side_dock"),
+                             checked=lambda item: self.data["settings"].get("sideDock", True)),
             pystray.MenuItem("清除记录与回收站…", lambda: self.q.put("history")),
             pystray.MenuItem("设置…", lambda: self.q.put("settings")),
             pystray.MenuItem("退出", lambda: self.q.put("quit")),
@@ -4908,6 +5311,8 @@ class App:
                     self.hide_all()
                 elif act == "show":
                     self.show_all()
+                elif act == "toggle_side_dock":
+                    self.toggle_side_dock()
                 elif act == "refresh_bottom":
                     self._refresh_bottom_notes()
                 elif act == "history":
@@ -4978,6 +5383,13 @@ class App:
 
     def quit(self, saved=False):
         self._stop_bottom_guard()
+        if getattr(self, "_dock_refresh_job", None) is not None:
+            self.root.after_cancel(self._dock_refresh_job)
+            self._dock_refresh_job = None
+        if getattr(self, "dock", None) is not None:
+            self.dock.destroy()
+        for note in self.notes.values():
+            note._cancel_dock_reveal()
         if not saved:
             self._save_positions()
             self.save_now()
