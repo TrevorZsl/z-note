@@ -4,16 +4,23 @@ on:
   push:
     tags:
       - 'v*.*.*'
+  workflow_dispatch:
+    inputs:
+      source_run:
+        description: Actions run ID whose built installer should be uploaded to Gitee
+        required: true
+        type: string
 
 permissions:
   contents: read
 
 concurrency:
-  group: release-${{ github.ref }}
+  group: release-${{ inputs.source_run || github.run_id }}
   cancel-in-progress: false
 
 jobs:
   build:
+    if: github.event_name == 'push'
     runs-on: windows-2022
     timeout-minutes: 30
     outputs:
@@ -95,18 +102,41 @@ jobs:
 
   gitee-preview:
     needs: build
-    if: needs.build.outputs.gitee_repo != ''
-    runs-on: windows-2022
+    if: ${{ !cancelled() && ((needs.build.result == 'success' && needs.build.outputs.gitee_repo != '') || github.event_name == 'workflow_dispatch') }}
+    runs-on: ubuntu-latest
     timeout-minutes: 15
+    permissions:
+      actions: read
+      contents: read
     env:
       RELEASE_VERSION: ${{ needs.build.outputs.version }}
       GITEE_RELEASE_REPO: ${{ needs.build.outputs.gitee_repo }}
     steps:
       - uses: actions/checkout@v4
+      - name: Select the original release build for a Gitee retry
+        if: github.event_name == 'workflow_dispatch'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_RUN: ${{ inputs.source_run }}
+        run: |
+          if ($env:SOURCE_RUN -cnotmatch '^[0-9]+$') { throw "Invalid Actions run ID" }
+          $run = gh api "repos/$env:GITHUB_REPOSITORY/actions/runs/$env:SOURCE_RUN" | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0 -or $run.path -cnotmatch '^\.github/workflows/release\.yml(@.+)?$' -or
+              $run.event -cne 'push' -or $run.status -cne 'completed' -or
+              $run.head_branch -cnotmatch '^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$') {
+            throw "Select a completed tag-triggered Windows release run"
+          }
+          "RELEASE_VERSION=$($run.head_branch.Substring(1))" >> $env:GITHUB_ENV
+          $giteeRepo = python3 -c "from updater import GITEE_RELEASE_REPO; print(GITEE_RELEASE_REPO)"
+          if ($LASTEXITCODE -ne 0 -or $giteeRepo -cnotmatch '^[A-Za-z0-9_-]+/[A-Za-z0-9_.-]+$') { throw "Invalid Gitee release repository" }
+          "GITEE_RELEASE_REPO=$giteeRepo" >> $env:GITHUB_ENV
       - uses: actions/download-artifact@v4
         with:
-          name: z-note-${{ needs.build.outputs.version }}
+          name: z-note-${{ env.RELEASE_VERSION }}
           path: dist
+          github-token: ${{ github.token }}
+          run-id: ${{ inputs.source_run || github.run_id }}
       - name: Create Gitee preview and upload the same installer
         shell: pwsh
         env:
@@ -115,6 +145,11 @@ jobs:
           if (-not $env:GITEE_TOKEN) { throw "Configure the GITEE_TOKEN Actions secret first" }
           $tag = "v$env:RELEASE_VERSION"
           $installer = Get-Item -LiteralPath "dist/z-note-setup-$env:RELEASE_VERSION.exe"
+          $sums = Get-Item -LiteralPath 'dist/SHA256SUMS'
+          $hash = (Get-FileHash -LiteralPath $installer.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ((Get-Content -Raw -LiteralPath $sums.FullName).TrimEnd() -cne "$hash  $($installer.Name)") {
+            throw "Build artifact checksum mismatch"
+          }
           if ($installer.Length -gt 100MB) { throw "Installer exceeds Gitee's 100 MB attachment limit" }
           $repo = "https://gitee.com/api/v5/repos/$env:GITEE_RELEASE_REPO"
           $auth = @{ Authorization = "Bearer $env:GITEE_TOKEN" }
@@ -128,14 +163,28 @@ jobs:
               target_commitish = $target.default_branch
               prerelease = $true
             } | ConvertTo-Json -Compress
-            $release = Invoke-RestMethod -Method Post -Uri "$repo/releases" -Headers $auth `
-              -ContentType 'application/json; charset=utf-8' -Body $metadata -MaximumRedirection 0 -TimeoutSec 60
+            $release = $null
+            try {
+              $release = Invoke-RestMethod -Uri "$repo/releases/tags/$tag" -Headers $auth -MaximumRedirection 0 -TimeoutSec 30
+            } catch {
+              if ($_.Exception.Response.StatusCode -ne 404) { throw }
+            }
+            if (-not $release) {
+              $release = Invoke-RestMethod -Method Post -Uri "$repo/releases" -Headers $auth `
+                -ContentType 'application/json; charset=utf-8' -Body $metadata -MaximumRedirection 0 -TimeoutSec 60
+            }
             if (-not $release.id -or $release.tag_name -cne $tag -or $release.prerelease -ne $true) {
               throw "Gitee did not return the expected preview release"
             }
-            foreach ($file in @($installer, (Get-Item -LiteralPath 'dist/SHA256SUMS'))) {
-              $asset = Invoke-RestMethod -Method Post -Uri "$repo/releases/$($release.id)/attach_files" -Headers $auth `
-                -Form @{ file = $file } -MaximumRedirection 0 -TimeoutSec 300
+            $attachments = "$repo/releases/$($release.id)/attach_files"
+            $existing = Invoke-RestMethod -Uri $attachments -Headers $auth -MaximumRedirection 0 -TimeoutSec 30
+            if ($existing) { throw "The Gitee preview already has attachments. Check them before retrying." }
+            foreach ($file in @($installer, $sums)) {
+              Write-Host "Uploading $($file.Name) ($($file.Length) bytes) to Gitee"
+              $response = curl --silent --show-error --fail --http1.1 --connect-timeout 30 --max-time 600 `
+                --header "Authorization: $($auth.Authorization)" --header 'Expect:' --form "file=@$($file.FullName)" $attachments
+              if ($LASTEXITCODE -ne 0) { throw "Gitee upload failed for $($file.Name) (curl $LASTEXITCODE)" }
+              $asset = $response | ConvertFrom-Json
               if ($asset.name -cne $file.Name -or $asset.size -ne $file.Length) { throw "Gitee attachment metadata mismatch" }
             }
           } catch {
