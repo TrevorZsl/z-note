@@ -104,7 +104,7 @@ jobs:
     needs: build
     if: ${{ !cancelled() && ((needs.build.result == 'success' && needs.build.outputs.gitee_repo != '') || github.event_name == 'workflow_dispatch') }}
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 100
     permissions:
       actions: read
       contents: read
@@ -190,7 +190,7 @@ jobs:
                 continue
               }
               Write-Host "Uploading $($file.Name) ($($file.Length) bytes) to Gitee"
-              $response = curl --silent --show-error --fail --connect-timeout 20 --max-time 600 --speed-time 45 --speed-limit 1024 `
+              $response = curl --silent --show-error --fail --connect-timeout 20 --max-time 5400 --speed-time 45 --speed-limit 1024 `
                 --write-out '%{stderr}Gitee HTTP %{http_code}, uploaded %{size_upload} bytes, total %{time_total}s\n' `
                 --form-string "access_token=$env:GITEE_TOKEN" --form "file=@$($file.FullName)" $attachments
               if ($LASTEXITCODE -ne 0) { throw "Gitee upload failed for $($file.Name) (curl $LASTEXITCODE)" }
