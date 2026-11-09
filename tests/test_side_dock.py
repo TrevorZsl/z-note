@@ -49,10 +49,12 @@ class SideDockTests(unittest.TestCase):
             time.sleep(0.01)
         self.root.update()
 
-    def click_bar(self):
+    def click_bar(self, *, settle=True):
         self.dock.bar.event_generate("<ButtonPress-1>", x=30, y=15)
         self.dock.bar.event_generate("<ButtonRelease-1>", x=30, y=15)
         self.root.update()
+        if settle:
+            self.wait(0.24)
 
     def click(self, window):
         window.bar.event_generate("<ButtonPress-1>", x=30, y=15)
@@ -400,7 +402,7 @@ class SideDockTests(unittest.TestCase):
         self.assertEqual(len(self.dock.bookmarks), 3)
 
     def test_mode_switch_and_deletion_cancel_pending_animations(self):
-        self.click_bar()
+        self.click_bar(settle=False)
         bookmark = self.dock.bookmarks["0"]
         bookmark._enter()
         self.dock._enter()
@@ -408,6 +410,7 @@ class SideDockTests(unittest.TestCase):
         self.root.update()
         self.assertIsNone(bookmark._animation_job)
         self.assertIsNone(self.dock._animation_job)
+        self.assertIsNone(self.dock._transition_job)
         self.app.toggle_side_dock()
         self.root.update()
         self.click_bar()
@@ -417,6 +420,53 @@ class SideDockTests(unittest.TestCase):
         self.root.update()
         self.assertIsNone(bookmark._animation_job)
         self.wait(0.15)
+
+    def test_bookmarks_move_out_from_entry_and_reverse_in_place(self):
+        import ctypes
+        with patch.object(main.time, "monotonic", return_value=100.0) as clock:
+            self.click_bar(settle=False)
+            bookmark = self.dock.bookmarks["0"]
+            entry_y = self.dock._position_y
+            self.assertEqual(bookmark._position_y, entry_y)
+            self.assertEqual(bookmark.attributes("-alpha"), 0)
+            clock.return_value += 0.08
+            time.sleep(0.025)
+            self.root.update()
+            mid_y = bookmark._position_y
+            self.assertGreater(mid_y, entry_y)
+            self.assertLess(mid_y, entry_y+self.dock.bar_height+6)
+            self.click_bar(settle=False)
+            self.assertEqual(bookmark._position_y, mid_y)
+            self.assertFalse(self.dock.expanded)
+            clock.return_value += 0.08
+            time.sleep(0.025)
+            self.root.update()
+            closing_y = bookmark._position_y
+            self.assertLess(closing_y, mid_y)
+            self.assertTrue(bookmark.winfo_exists())
+            self.click_bar(settle=False)
+            self.assertIs(self.dock.bookmarks["0"], bookmark)
+            self.assertEqual(bookmark._position_y, closing_y)
+            clock.return_value += 0.24
+            time.sleep(0.025)
+            self.root.update()
+            self.assertTrue(self.dock.expanded)
+            self.assertEqual(bookmark.attributes("-alpha"), 1)
+            self.click_bar(settle=False)
+            clock.return_value += 0.08
+            time.sleep(0.025)
+            self.root.update()
+            hwnd = main.user32.GetParent(bookmark.winfo_id()) or bookmark.winfo_id()
+            get_alpha = main.user32.GetLayeredWindowAttributes
+            get_alpha.argtypes = [main.wintypes.HWND, ctypes.c_void_p,
+                                  ctypes.POINTER(ctypes.c_ubyte), ctypes.c_void_p]
+            alpha = ctypes.c_ubyte()
+            self.assertTrue(get_alpha(hwnd, None, ctypes.byref(alpha), None))
+            self.assertTrue(0 < alpha.value < 255)
+            clock.return_value += 0.16
+            time.sleep(0.025)
+            self.root.update()
+        self.assertFalse(bookmark.winfo_exists())
 
     def test_hide_delete_layer_change_and_fast_mode_switch_cancel_restore(self):
         self.app.toggle_side_dock()

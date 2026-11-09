@@ -4530,11 +4530,30 @@ class DockBookmark(tk.Toplevel):
                                   tags="dock-disclosure")
 
     def place_at(self, y):
-        self._position_y = int(y)
         self.lift()
-        self._position()
+        self.move_to(y)
         if not self.winfo_ismapped():
             self.deiconify()
+
+    def move_to(self, y):
+        self._position_y = round(y)
+        self._position()
+
+    def set_motion_opacity(self, opacity):
+        previous = self.attributes("-alpha")
+        if previous == opacity:
+            return
+        if previous == 1 and self.winfo_ismapped():
+            # Tk 会缓存分层样式，已映射的窗口需要重新打开它才能淡出。
+            hwnd = user32.GetParent(self.winfo_id()) or self.winfo_id()
+            style = user32.GetWindowLongPtrW(hwnd, -20)
+            user32.SetWindowLongPtrW(hwnd, -20, style | 0x00080000)
+        self.attributes("-alpha", opacity)
+        if opacity == 1:
+            # Tk 保留分层样式，完成动画后恢复普通的 DWM 圆角窗口。
+            hwnd = user32.GetParent(self.winfo_id()) or self.winfo_id()
+            style = user32.GetWindowLongPtrW(hwnd, -20)
+            user32.SetWindowLongPtrW(hwnd, -20, style & ~0x00080000)
 
     def _position(self):
         width = self.base_width + self._extension
@@ -4627,6 +4646,7 @@ class SideDock(DockBookmark):
         self._offset = 0
         self._dragged = False
         self._drag_anchor = None
+        self._transition_job = None
         super().__init__(self, self.bar_height)
         self.update_label("z-note")
 
@@ -4652,12 +4672,14 @@ class SideDock(DockBookmark):
         self._rows = [self.app.notes[n["id"]] for n in self.app.data["notes"]
                       if n["id"] in self.app.notes]
         if not self.app.data["settings"].get("sideDock", True):
+            self._cancel_transition()
             self.expanded = False
             self._offset = 0
             self._clear_bookmarks()
             self.hide_bookmark()
             return
-        self._layout(self._drag_anchor if self._dragged and self._press else None)
+        if self._transition_job is None:
+            self._layout(self._drag_anchor if self._dragged and self._press else None)
 
     def _clear_bookmarks(self):
         for window in self.bookmarks.values():
@@ -4667,15 +4689,23 @@ class SideDock(DockBookmark):
             self._empty.destroy()
             self._empty = None
 
-    def _layout(self, y=None):
+    def _layout(self, y=None, *, animate=False):
+        self._cancel_transition()
         work = self.work_area()
         gap = 6
         travel = max(1, work.bottom-work.top-self.bar_height-16)
         ratio = min(1, max(0, self.app.data["settings"].get("sideDockY", 0.5)))
         self._anchor_y = work.top+8+round(travel*ratio) if y is None else y
         if not self.expanded:
-            self._clear_bookmarks()
             self._bar_y = int(min(work.bottom-8-self.bar_height, max(work.top+8, self._anchor_y)))
+            if animate:
+                windows = [*self.bookmarks.values()]
+                if self._empty is not None:
+                    windows.append(self._empty)
+                self._animate_layout([(window, self._bar_y) for window in windows])
+                return
+            self._offset = 0
+            self._clear_bookmarks()
             self.place_at(self._bar_y)
             return
         room = work.bottom-work.top-16-self.bar_height
@@ -4686,17 +4716,17 @@ class SideDock(DockBookmark):
         self._bar_y = int(max(work.top+8, min(self._anchor_y, work.bottom-8-group_height)))
         if y is not None:
             self._anchor_y = self._bar_y
-        self.place_at(self._bar_y)
         visible_ids = {note.d["id"] for note in page}
         for identity in list(self.bookmarks):
             if identity not in visible_ids:
                 self.bookmarks.pop(identity).destroy()
         next_y = self._bar_y+self.bar_height+gap
+        slots = []
         if not page:
             if self._empty is None:
                 self._empty = DockBookmark(self, self.bar_height)
                 self._empty.update_label("暂无便签")
-            self._empty.place_at(next_y)
+            slots.append((self._empty, next_y))
         elif self._empty is not None:
             self._empty.destroy()
             self._empty = None
@@ -4707,8 +4737,51 @@ class SideDock(DockBookmark):
                     lambda key=identity: self.app.toggle_docked_note(key))
             window = self.bookmarks[identity]
             window.update_label(self.note_label(note.d), note.d.get("visible", True))
-            window.place_at(next_y)
+            slots.append((window, next_y))
             next_y += self.bar_height+gap
+        if animate:
+            self._animate_layout(slots)
+        else:
+            self.place_at(self._bar_y)
+            for window, target in slots:
+                window.set_motion_opacity(1)
+                window.place_at(target)
+
+    def _cancel_transition(self):
+        if self._transition_job is not None:
+            self.after_cancel(self._transition_job)
+            self._transition_job = None
+
+    def _animate_layout(self, slots):
+        opening = self.expanded
+        bar_start, bar_target = self._position_y, self._bar_y
+        motion = []
+        for window, target in slots:
+            if not window.winfo_ismapped():
+                window.set_motion_opacity(0)
+                window.place_at(bar_start)
+            motion.append((window, window._position_y, target, window.attributes("-alpha")))
+        self.lift()
+        self._draw()
+        started = time.monotonic()
+        duration = 0.21 if opening else 0.16
+        opacity_target = 1 if opening else 0
+
+        def frame():
+            self._transition_job = None
+            elapsed = (time.monotonic()-started)/duration
+            if elapsed >= 1:
+                self._layout()
+                return
+            # 展开先拉开间距再减速，收起时向入口加速并淡出。
+            progress = 1-(1-elapsed)**3 if opening else elapsed**2
+            self.move_to(bar_start+(bar_target-bar_start)*progress)
+            for window, origin, target, opacity in motion:
+                window.set_motion_opacity(opacity+(opacity_target-opacity)*progress)
+                window.move_to(origin+(target-origin)*progress)
+            self._transition_job = self.after(16, frame)
+
+        frame()
 
     def _wheel(self, event):
         if self.expanded and event.delta:
@@ -4718,7 +4791,7 @@ class SideDock(DockBookmark):
         return "break"
 
     def _start_drag(self, event):
-        self._press = (event.x_root, event.y_root, self._bar_y)
+        self._press = (event.x_root, event.y_root, self._position_y)
         self._dragged = False
         self._drag_anchor = None
 
@@ -4745,11 +4818,10 @@ class SideDock(DockBookmark):
             self._drag_anchor = None
         else:
             self.expanded = not self.expanded
-            if not self.expanded:
-                self._offset = 0
-            self.refresh()
+            self._layout(animate=True)
 
     def destroy(self):
+        self._cancel_transition()
         self._clear_bookmarks()
         super().destroy()
 
