@@ -46,15 +46,15 @@ gh run list --repo TrevorZsl/z-note --workflow release.yml --branch v2.1.9 --lim
 
 记下原构建运行编号，并跟到构建、`github-draft` 和 `gitee-preview` 三个任务结束。上传失败时先读失败步骤和平台附件列表。只补传失败的一侧，避免同时运行多个任务写入同一版本的附件。已正式发布的版本使用新标签修复，保留原标签和原附件。
 
-## Gitee 大文件超时后的自动补传
+## Gitee 大文件上传过慢或失败时补传
 
 `v2.1.8` 的真实案例中，云端创建了预览版，`SHA256SUMS` 也上传成功，但安装包约 65.5 MB，一次重试在 600 秒时只记录了 11.7 MB 已发送，附件列表仍缺少安装包。这两个数字无法区分持续低速与中途卡住。用一次性 Windows Runner 从本机直连 Gitee 后，补传成功，整个补传任务用时 48 秒，随后从 Gitee 下载回读，两份附件的 SHA-256 均与 GitHub 一致。 [云端超时日志](https://github.com/TrevorZsl/z-note/actions/runs/42600426666) · [本机补传成功日志](https://github.com/TrevorZsl/z-note/actions/runs/42603403228)
 
-遇到同类超时，可以按以下步骤复用这条已验证的链路：
+`v2.2.1` 再次遇到云端上传超时。复用本机 `.runtime-deps/gitee-actions-runner` 的官方 Runner 后补传成功，两边附件回读的 SHA-256 与原构建一致。下次若构建与 GitHub 草稿任务已成功，而 Gitee 上传步骤运行满 3 分钟仍缺安装包，就检查一次性 Runner 能否使用。确认本机可补传且原运行只剩 Gitee 上传在进行后，取消原运行并等它结束，避免两个任务同时写入。若 Gitee 附件已齐全，直接验收。 [原构建及超时日志](https://github.com/TrevorZsl/z-note/actions/runs/42649463586) · [本机补传成功日志](https://github.com/TrevorZsl/z-note/actions/runs/42651676794)
 
-1. 查看原运行的构建任务是否成功，并确认失败的上传任务已结束。核对 Gitee 现有附件，保留通过校验的文件。
+1. 确认原运行已结束且构建成功。核对 Gitee 现有附件，保留通过校验的文件。
 2. 选择维护者认可、能连接 GitHub Actions 和直连 Gitee 的 Windows 机器。确认已有 PowerShell 7、Git、GitHub CLI、curl 和可执行的 Python 3.12 或更新版本。将现有 Python 加入启动 Runner 的进程 `PATH`。z-note 的自托管上传步骤复用这个 Python，省去运行中再下载和安装。
-3. 在私有源码仓的 **Settings → Actions → Runners → New self-hosted runner** 取官方 Windows Runner，校验下载包。使用独占标签和 `--ephemeral` 注册一次性 Runner。它处理一个任务后自动注销。等待状态显示 `Online` 后再派发补传。若在接单前中止，按 GitHub 的移除流程注销该 Runner。 [GitHub Runner 参考](https://docs.github.com/en/actions/reference/runners/self-hosted-runners)
+3. 优先复用本机已经校验、解压且未注册的官方 Runner。没有可复用的副本时，在私有源码仓的 **Settings → Actions → Runners → New self-hosted runner** 取官方 Windows Runner，并校验下载包。使用独占标签和 `--ephemeral` 注册，等状态显示 `Online` 后再派发补传。Runner 处理一个任务后自动注销。若在接单前中止，按 GitHub 的移除流程注销该 Runner。 [GitHub Runner 参考](https://docs.github.com/en/actions/reference/runners/self-hosted-runners)
 4. 如果 GitHub 需要代理，只给 Runner 进程配置 `https_proxy` / `http_proxy`，将 `gitee.com,foruda.gitee.com` 放入 `no_proxy`。Gitee API 和上传命令也显式绕过 HTTP 代理。如果代理软件接管系统流量（TUN），还要确认软件的分流规则让 Gitee 直连。Runner 通过出站 HTTPS 领任务，无需设置入站端口或开机自启。 [GitHub Runner 代理配置](https://docs.github.com/en/actions/how-tos/manage-runners/use-proxy-servers)
 5. 用原构建的运行编号和临时 Runner 标签派发补传，记录新运行编号并等待结果。任务成功后核对 Gitee 的两份附件，再确认一次性 Runner 已从仓库 Runner 列表消失。
 
