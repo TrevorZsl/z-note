@@ -571,8 +571,17 @@ class SideDockTests(unittest.TestCase):
             self.dock.refresh()
             self.root.update()
             self.app.notes["0"].d["title"] = "便签标题名"
+            self.app.notes["1"].d.update(title="", lines=[])
+            self.app.data["settings"]["sideDockBlankNumbers"] = {"1": 123}
             self.click_bar()
             self.assertTrue(self.label(self.dock.bookmarks["0"]).endswith("…"))
+            bookmark = self.dock.bookmarks["1"]
+            self.assertEqual(self.label(bookmark), "#123")
+            bookmark.tip._show()
+            canvas, = main.Tooltip._cur.winfo_children()
+            label = next(item for item in canvas.find_all() if canvas.type(item) == "text")
+            self.assertEqual(canvas.itemcget(label, "text"), "便签 123")
+            main.Tooltip._hide()
             widths = {window.bar.winfo_width() for window in self.dock.bookmarks.values()}
             entry_width = self.dock.bar.winfo_width()
             self.assertEqual(widths, {round(entry_width * 1.14)})
@@ -593,6 +602,27 @@ class SideDockTests(unittest.TestCase):
             self.assertLessEqual(popup.winfo_y()+popup.winfo_height(), work.bottom)
         finally:
             self.root.tk.call("tk", "scaling", scaling)
+
+    def test_two_digit_blank_labels_fit_at_high_scaling(self):
+        original_scaling = self.root.tk.call("tk", "scaling")
+        for note in self.app.notes.values():
+            note.d.update(title="", lines=[])
+        self.app.data["settings"]["sideDockBlankNumbers"] = {"0": 10, "1": 11, "2": 12}
+        try:
+            for dpi in (144, 192, 240):
+                with self.subTest(dpi=dpi):
+                    self.root.tk.call("tk", "scaling", dpi / 72)
+                    self.dock.destroy()
+                    self.dock = self.app.dock = main.SideDock(self.app)
+                    self.dock.refresh()
+                    self.root.update()
+                    self.click_bar()
+                    for key, number in (("0", 10), ("1", 11), ("2", 12)):
+                        bookmark = self.dock.bookmarks[key]
+                        self.assertIn(self.label(bookmark), (f"便签 {number}", f"便签{number}"))
+                        self.assertLess(bookmark.bar.bbox("all")[2], bookmark.bar.winfo_width())
+        finally:
+            self.root.tk.call("tk", "scaling", original_scaling)
 
     def test_add_delete_and_recover_bookmarks(self):
         self.click_bar()
@@ -630,12 +660,87 @@ class SideDockTests(unittest.TestCase):
         self.assertEqual(bookmark.full_label, "正文新的第一行")
         self.assertIs(self.dock.bookmarks["0"], bookmark)
 
+    def test_blank_bookmark_name_does_not_change_new_note_title(self):
+        self.app.new_note()
+        note = self.app.new_note()
+        self.click_bar()
+        bookmark = self.dock.bookmarks[note.d["id"]]
+        chip, = (item for item in note.title_chip.find_all() if note.title_chip.type(item) == "text")
+        self.assertEqual(note.title_chip.itemcget(chip, "text"), "无标题")
+        self.assertFalse(note.d.get("title"))
+        self.assertEqual(bookmark.full_label, "便签 2")
+
+        note.text.insert("1.end", "周五确认酒店")
+        note._sync_lines_from_text()
+        self.root.update()
+        self.assertEqual(bookmark.full_label, "周五确认酒店")
+        note.edit_title()
+        self.root.update()
+        note._title_editor.insert(0, "旅行清单")
+        note._title_editor.event_generate("<Return>")
+        self.root.update()
+        self.assertEqual(bookmark.full_label, "旅行清单")
+        note.text.delete("1.0", "end")
+        note._sync_lines_from_text()
+        note.edit_title()
+        self.root.update()
+        note._title_editor.delete(0, "end")
+        note._title_editor.event_generate("<Return>")
+        self.root.update()
+        self.assertEqual(bookmark.full_label, "便签 2")
+        self.assertFalse(note.d.get("title"))
+        self.assertIs(self.dock.bookmarks[note.d["id"]], bookmark)
+
+    def test_blank_numbers_follow_note_ids_through_sort_delete_restore_and_restart(self):
+        first, second, third, fourth = [self.app.new_note() for _ in range(4)]
+        ids = [note.d["id"] for note in (first, second, third, fourth)]
+        self.click_bar()
+        expected = dict(zip(ids, range(1, 5)))
+        self.assertEqual(self.app.data["settings"]["sideDockBlankNumbers"], expected)
+        self.drag_bookmark(ids[3], ids[0])
+        self.assertLess(self.bookmark_order().index(ids[3]), self.bookmark_order().index(ids[0]))
+        self.assertEqual(self.dock.bookmarks[ids[3]].full_label, "便签 4")
+
+        self.app.remove_note(third)
+        fifth = self.app.new_note()
+        fifth_id = fifth.d["id"]
+        self.root.update()
+        self.assertEqual(self.dock.bookmarks[fifth_id].full_label, "便签 5")
+        self.assertEqual(self.dock.bookmarks[ids[3]].full_label, "便签 4")
+        self.assertTrue(self.app.recover_note(ids[2]))
+        self.root.update()
+        self.assertEqual(self.dock.bookmarks[ids[2]].full_label, "便签 3")
+
+        self.app.remove_note(fifth)
+        sixth = self.app.new_note()
+        sixth_id = sixth.d["id"]
+        self.root.update()
+        self.assertEqual(self.dock.bookmarks[sixth_id].full_label, "便签 6")
+        self.app.remove_note(sixth)
+        history = self.app.history_win = main.HistoryWindow(self.app)
+        history.switch("deletedNotes")
+        with patch.object(main.messagebox, "askyesno", return_value=True):
+            history.delete_record(sixth_id)
+        self.root.update()
+        expected[fifth_id] = 5
+        self.assertEqual(self.app.data["settings"]["sideDockBlankNumbers"], expected)
+        self.app.save_now()
+        self.assertEqual(self.saved.call_args.args[0]["settings"]["sideDockBlankNumbers"], expected)
+        self.restart()
+        self.click_bar()
+        self.assertEqual(self.dock.bookmarks[ids[3]].full_label, "便签 4")
+        self.assertTrue(self.app.recover_note(fifth_id))
+        replacement = self.app.new_note()
+        self.root.update()
+        self.assertEqual(self.dock.bookmarks[fifth_id].full_label, "便签 5")
+        self.assertEqual(self.dock.bookmarks[replacement.d["id"]].full_label, "便签 6")
+
     def test_labels(self):
         label = main.SideDock.note_label
         self.assertEqual(label({"title": " 标题 ", "lines": [{"text": "正文"}]}), "标题")
         self.assertEqual(label({"lines": [{"text": "\n \n正文第一行\n第二行"}]}), "正文第一行")
         self.assertEqual(label({"lines": [], "lines2": [{"text": "第二栏"}]}), "第二栏")
-        self.assertEqual(label({}), "无标题便签")
+        self.assertEqual(label({}), "")
 
     def bookmark_order(self):
         return sorted(self.dock.bookmarks, key=lambda key: self.dock.bookmarks[key]._position_y)
@@ -1056,12 +1161,14 @@ class SideDockTests(unittest.TestCase):
             with patch.object(storage, "DATA_DIR", folder), patch.object(storage, "DATA_FILE", target), \
                     patch.object(storage, "BACKUP_DIR", str(Path(folder) / "backup")):
                 self.app.data["settings"].update(sideDock=False, sideDockY=0.8,
-                                                 sideDockOrder=["1", "0", "2"])
+                                                 sideDockOrder=["1", "0", "2"],
+                                                 sideDockBlankNumbers={"1": 3})
                 storage.save_data(self.app.data)
                 restored = storage.load_data()
         self.assertFalse(restored["settings"]["sideDock"])
         self.assertEqual(restored["settings"]["sideDockY"], 0.8)
         self.assertEqual(restored["settings"]["sideDockOrder"], ["1", "0", "2"])
+        self.assertEqual(restored["settings"]["sideDockBlankNumbers"], {"1": 3})
 
     def test_long_tooltip_stays_on_screen_and_destruction_cancels_it(self):
         self.app.notes["0"].d["title"] = "很长的中文标题，需要完整显示。" * 12

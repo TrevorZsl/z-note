@@ -4563,10 +4563,16 @@ class HistoryWindow(tk.Toplevel):
             return
         if messagebox.askyesno("批量删除", f"彻底删除选中的 {len(keys)} 张便签记录？此操作无法恢复。", parent=self):
             field = "noteId" if self.mode == "archives" else "id"
-            mode = self.mode
-            def change(data):
-                data[mode] = [r for r in data[mode] if r[field] not in keys]
-            self.app._store_history(change)
+            self._delete_records(field, keys)
+
+    def _delete_records(self, field, keys):
+        mode = self.mode
+
+        def change(data):
+            data[mode] = [record for record in data[mode] if record[field] not in keys]
+
+        if self.app._store_history(change) and mode == "deletedNotes":
+            self.app.request_dock_refresh()
 
     def label(self, text, bold=False, parent=None):
         label = tk.Label(parent or self.content, text=text, bg=NOTE_BG, fg="#2B2F36",
@@ -4649,9 +4655,7 @@ class HistoryWindow(tk.Toplevel):
         message = ("彻底删除这张便签？此操作无法恢复，已清除待办的记录仍保留。"
                    if self.mode == "deletedNotes" else "永久删除这次清除记录？此操作无法恢复。")
         if messagebox.askyesno("彻底删除", message, parent=self):
-            key = self.mode
-            self.app._store_history(lambda data: data.__setitem__(key,
-                [r for r in data[key] if r["id"] != record_id]))
+            self._delete_records("id", {record_id})
 
 
 class SideDockTooltip(Tooltip):
@@ -4694,6 +4698,7 @@ class DockBookmark(tk.Toplevel):
     """主入口和便签书签共用的贴边圆角窗口。"""
     NOTE_TITLE_X = 30
     NOTE_RIGHT_PADDING = 12
+    NUMBER_RIGHT_PADDING = 6
     HOVER_EXTENSION = 12
 
     def __init__(self, dock, height, note_id=None):
@@ -4702,6 +4707,7 @@ class DockBookmark(tk.Toplevel):
         self.dock, self.note_id, self.height = dock, note_id, height
         self.base_width = dock.bar_width if self is dock else dock.bookmark_width
         self.full_label = ""
+        self._compact_label = None
         self._note_visible = False
         self._hovered = False
         self._extension = 0
@@ -4743,8 +4749,9 @@ class DockBookmark(tk.Toplevel):
         preference = ctypes.c_int(3)  # DWMWCP_ROUNDSMALL
         dwmapi.DwmSetWindowAttribute(hwnd, 33, ctypes.byref(preference), ctypes.sizeof(preference))
 
-    def update_label(self, label, visible=False):
+    def update_label(self, label, visible=False, *, compact_label=None):
         self.full_label, self._note_visible = label, visible
+        self._compact_label = compact_label
         self._draw()
 
     def _draw(self):
@@ -4756,7 +4763,12 @@ class DockBookmark(tk.Toplevel):
                 text = "收起"
             elif self._hovered and self.dock._rows:
                 text = "展开"
-        limit = self.base_width - self.NOTE_TITLE_X - self.NOTE_RIGHT_PADDING
+        right_padding = self.NUMBER_RIGHT_PADDING if self._compact_label else self.NOTE_RIGHT_PADDING
+        limit = self.base_width - self.NOTE_TITLE_X - right_padding
+        if self._compact_label and self.dock.font.measure(text) > limit:
+            text = text.replace(" ", "", 1)
+            if self.dock.font.measure(text) > limit:
+                text = self._compact_label
         if is_note and self.dock.font.measure(text) > limit:
             while text and self.dock.font.measure(text + "…") > limit:
                 text = text[:-1]
@@ -4954,7 +4966,7 @@ class SideDock(DockBookmark):
 
     @staticmethod
     def note_label(note):
-        title = note.get("title", "").strip()
+        title = (note.get("title") or "").strip()
         if title:
             return title
         for key in ("lines", "lines2"):
@@ -4962,7 +4974,28 @@ class SideDock(DockBookmark):
                 for text in line.get("text", "").splitlines():
                     if text.strip():
                         return text.strip()
-        return "无标题便签"
+        return ""
+
+    def _sync_blank_numbers(self):
+        data = self.app.data
+        settings = data["settings"]
+        previous = settings.get("sideDockBlankNumbers", {})
+        retained_ids = {note["id"] for key in ("notes", "deletedNotes") for note in data[key]}
+        numbers = {}
+        if isinstance(previous, dict):
+            numbers = {identity: number for identity, number in previous.items()
+                       if identity in retained_ids and type(number) is int and number > 0}
+        if settings.get("sideDock", True):
+            next_number = max(numbers.values(), default=0) + 1
+            for note in data["notes"]:
+                identity = note["id"]
+                if identity not in numbers and not self.note_label(note):
+                    numbers[identity] = next_number
+                    next_number += 1
+        if numbers != previous:
+            settings["sideDockBlankNumbers"] = numbers
+            self.app.schedule_save()
+        return numbers
 
     def refresh(self):
         settings = self.app.data["settings"]
@@ -4976,6 +5009,7 @@ class SideDock(DockBookmark):
             settings["sideDockOrder"] = active_order
             self.app.schedule_save()
         self._rows = ordered + list(remaining.values())
+        self._sync_blank_numbers()
         if not settings.get("sideDock", True):
             self._hide_empty_tip()
             self._cancel_transition()
@@ -5069,7 +5103,15 @@ class SideDock(DockBookmark):
         if identity not in self.bookmarks:
             self.bookmarks[identity] = DockBookmark(self, self.bookmark_height, identity)
         window = self.bookmarks[identity]
-        window.update_label(self.note_label(note.d), note.d.get("visible", True))
+        label = self.note_label(note.d)
+        compact_label = None
+        if not label:
+            number = self.app.data["settings"].get("sideDockBlankNumbers", {}).get(identity)
+            if number is None:
+                # A scroll or animation can draw before the queued editor refresh.
+                number = self._sync_blank_numbers()[identity]
+            label, compact_label = f"便签 {number}", f"#{number}"
+        window.update_label(label, note.d.get("visible", True), compact_label=compact_label)
         return window
 
     def _cancel_transition(self):
