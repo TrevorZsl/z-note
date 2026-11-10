@@ -22,6 +22,7 @@ class UpdateStateTests(unittest.TestCase):
         self.window._update_button = Mock()
         self.window._update_cancel_button = Mock()
         self.window._update_status = Mock()
+        self.window._update_status.pack_info.return_value = {"in": self.window._update_status.master}
         self.release = updater.Release("2.2.0", "更新说明", "setup.exe", "url", 100, "sums")
         self.confirm = self.enterContext(patch.object(main.messagebox, "askyesno", return_value=False))
 
@@ -192,6 +193,26 @@ class UpdateLayoutTests(unittest.TestCase):
         self.assertGreater(status.winfo_height(), initial_height)
         self.assertLessEqual(status.winfo_width(), window.winfo_width())
         self.assertEqual(window._update_button.cget("state"), "normal")
+
+    def test_up_to_date_status_sits_beside_check_button(self):
+        window = self.window
+        button, status = window._update_button, window._update_status
+        with patch.object(self.app, "_check_for_update"):
+            button.invoke()
+            window._receive_update_check("checked", None)
+            self.app.root.update()
+            self.assertEqual(status.cget("text"), "已是最新版本。")
+            self.assertGreater(status.winfo_rootx(), button.winfo_rootx() + button.winfo_width())
+            button_center = button.winfo_rooty() + button.winfo_height() / 2
+            status_center = status.winfo_rooty() + status.winfo_height() / 2
+            self.assertAlmostEqual(status_center, button_center, delta=1)
+            self.assertEqual(status.winfo_width(), status.winfo_reqwidth())
+
+            button.invoke()
+            window._receive_update_check("error", "网络错误")
+            self.app.root.update()
+            self.assertEqual(status.cget("text"), "网络错误")
+            self.assertGreater(status.winfo_rooty(), button.winfo_rooty() + button.winfo_height())
 
     def test_startup_check_uses_worker_and_remembers_result_across_settings(self):
         release = updater.Release("9.9.9", "演示说明", "setup.exe", "url", 100, "sums")

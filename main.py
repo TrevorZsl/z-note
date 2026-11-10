@@ -4036,7 +4036,7 @@ class SettingsWindow(tk.Toplevel):
             try:
                 self.app.install_update(path, self._update_release, checksum)
             except Exception as exc:
-                self._update_status.configure(text=f"无法安装更新：{exc}")
+                self._set_update_status(f"无法安装更新：{exc}")
             return
         downloading = self._update_state == "found"
         cancel = self._update_cancel = threading.Event()
@@ -4044,7 +4044,7 @@ class SettingsWindow(tk.Toplevel):
         self._update_button.configure(state="disabled")
         self._update_cancel_button.pack(side="left")
         self._update_cancel_button.configure(state="normal")
-        self._update_status.configure(text="正在下载更新…" if downloading else "正在检查更新…")
+        self._set_update_status("正在下载更新…" if downloading else "正在检查更新…")
         if not downloading:
             self._waiting_for_update_check = True
             self.app._check_for_update(manual=True)
@@ -4072,7 +4072,7 @@ class SettingsWindow(tk.Toplevel):
             if self._waiting_for_update_check:
                 self._receive_update(self._update_cancel, "cancelled", "已取消更新。")
                 return
-            self._update_status.configure(text="正在取消…")
+            self._set_update_status("正在取消…")
             self._update_cancel_button.configure(state="disabled")
 
     def _destroy_update(self, event):
@@ -4083,10 +4083,23 @@ class SettingsWindow(tk.Toplevel):
         if self._update_download is not None:
             updater.remove_download(self._update_download[0])
 
+    def _set_update_status(self, text, *, beside_button=False):
+        status = self._update_status
+        actions = self._update_button.master
+        container = actions if beside_button else status.master
+        if status.pack_info()["in"] != container:
+            status.pack_forget()
+            if beside_button:
+                status.pack(in_=actions, side="left")
+            else:
+                status.pack(after=actions, fill="x", pady=(8, 0))
+        status.configure(text=text)
+
     def _show_available_update(self, release):
         self._update_release = release
         self._update_state = "found" if release else "idle"
-        self._update_status.configure(text=f"可更新至 v{release.version}" if release else "已是最新版本。")
+        self._set_update_status(f"可更新至 v{release.version}" if release else "已是最新版本。",
+                                beside_button=not release)
         self._update_button.configure(text="下载并安装" if release else "检查更新")
 
     def _receive_update_check(self, kind, value):
@@ -4104,7 +4117,7 @@ class SettingsWindow(tk.Toplevel):
             kind, value = "cancelled", "已取消更新。"
         if kind == "progress":
             done, total = value
-            self._update_status.configure(text=f"正在下载：{done / total:.0%}（{done / 1048576:.1f} / {total / 1048576:.1f} MB）")
+            self._set_update_status(f"正在下载：{done / total:.0%}（{done / 1048576:.1f} / {total / 1048576:.1f} MB）")
             return
         self._update_busy = False
         self._waiting_for_update_check = False
@@ -4115,13 +4128,13 @@ class SettingsWindow(tk.Toplevel):
         elif kind == "downloaded":
             self._update_download = value
             self._update_state = "ready"
-            self._update_status.configure(text="下载并校验完成。安装将保存数据并退出 z-note，无需卸载。")
+            self._set_update_status("下载并校验完成。安装将保存数据并退出 z-note，无需卸载。")
             self._update_button.configure(text="立即安装")
             self._update_action()
         else:
             if self._update_state == "found" and self._update_release != self.app._available_update:
                 self._show_available_update(self.app._available_update)
-            self._update_status.configure(text=value)
+            self._set_update_status(value)
 
     def _lock_size(self, width, height):
         self.minsize(width, height)
