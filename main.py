@@ -4561,7 +4561,8 @@ class SideDockTooltip(Tooltip):
 
     def _show(self):
         self._aid = None
-        self.show_at(self._w, self._gt())
+        if self._w.master.dock._sorting_bookmark is None:
+            self.show_at(self._w, self._gt())
 
     @staticmethod
     def show_at(widget, text, *, beside=False):
@@ -4592,11 +4593,12 @@ class DockBookmark(tk.Toplevel):
     """主入口和便签书签共用的贴边圆角窗口。"""
     NOTE_TITLE_X = 30
     NOTE_RIGHT_PADDING = 12
+    HOVER_EXTENSION = 12
 
-    def __init__(self, dock, height, command=None):
+    def __init__(self, dock, height, note_id=None):
         super().__init__(dock.app.root)
         self.withdraw()
-        self.dock, self.command, self.height = dock, command, height
+        self.dock, self.note_id, self.height = dock, note_id, height
         self.base_width = dock.bar_width if self is dock else dock.bookmark_width
         self.full_label = ""
         self._note_visible = False
@@ -4610,7 +4612,7 @@ class DockBookmark(tk.Toplevel):
         self.attributes("-topmost", True)
         self.configure(bg=NOTE_BG)
         self.bar = tk.Canvas(self, bg=NOTE_BG, bd=0, highlightthickness=0,
-                             cursor="hand2" if command or self is dock else "arrow")
+                             cursor="hand2")
         if self is dock:
             self.disclosure_icons = (load_icon(self.bar, "disclosure-right", 9),
                                      load_icon(self.bar, "disclosure-down", 9))
@@ -4635,7 +4637,8 @@ class DockBookmark(tk.Toplevel):
         hwnd = user32.GetParent(self.winfo_id()) or self.winfo_id()
         style = user32.GetWindowLongPtrW(hwnd, -20)
         user32.SetWindowLongPtrW(hwnd, -20, style & ~0x40000 | 0x80)
-        preference = ctypes.c_int(NOTE_CORNER_PREFERENCE)
+        # 小圆角保留抗锯齿，并缩小密集书签之间叠加的 DWM 阴影。
+        preference = ctypes.c_int(3)  # DWMWCP_ROUNDSMALL
         dwmapi.DwmSetWindowAttribute(hwnd, 33, ctypes.byref(preference), ctypes.sizeof(preference))
 
     def update_label(self, label, visible=False):
@@ -4645,7 +4648,7 @@ class DockBookmark(tk.Toplevel):
     def _draw(self):
         width = self.base_width + self._extension
         text = self.full_label
-        is_note = self.command is not None
+        is_note = self.note_id is not None
         if self is self.dock:
             if self.dock.expanded:
                 text = "收起"
@@ -4717,6 +4720,8 @@ class DockBookmark(tk.Toplevel):
         self._draw()
 
     def _animate(self, target):
+        if self.dock._sorting_bookmark is self:
+            return
         self._cancel_animation()
         origin, started = self._extension, time.monotonic()
 
@@ -4740,7 +4745,7 @@ class DockBookmark(tk.Toplevel):
         if self is self.dock:
             self._draw()
         else:
-            self._animate(12)
+            self._animate(self.HOVER_EXTENSION)
 
     def _leave(self, event=None):
         self._hovered = False
@@ -4753,22 +4758,32 @@ class DockBookmark(tk.Toplevel):
         if self is self.dock:
             self.dock._start_drag(event)
         else:
-            self._press = (event.x_root, event.y_root)
+            self._press = (event.x_root, event.y_root, event.y)
 
     def _drag_move(self, event):
         if self is self.dock:
             self.dock._move_drag(event)
+        elif self.dock._sorting_bookmark is self:
+            self.dock._preview_sort(self, event)
         elif self._press and max(abs(event.x_root-self._press[0]),
                                  abs(event.y_root-self._press[1])) >= 5:
-            self._press = None
+            if self.dock.expanded and self.dock._transition_job is None:
+                self._cancel_animation()
+                self.tip._leave(None)
+                self.dock._sorting_bookmark = self
+                self.lift()
+                self.dock._preview_sort(self, event)
+            else:
+                self._press = None
 
     def _drag_release(self, event):
         if self is self.dock:
             self.dock._end_drag(event)
+        elif self.dock._sorting_bookmark is self:
+            self.dock._finish_sort(self, event)
         elif self._press is not None:
             self._press = None
-            if self.command:
-                self.command()
+            self.dock.app.toggle_docked_note(self.note_id)
 
     def hide_bookmark(self):
         self._cancel_animation()
@@ -4787,6 +4802,10 @@ class DockBookmark(tk.Toplevel):
 
 class SideDock(DockBookmark):
     """主入口和有限数量的独立书签，不使用共同的弹出面板。"""
+    ENTRY_GAP = 10
+    ROW_GAP = 4
+    MAX_BOOKMARKS = 15
+
     def __init__(self, app):
         self.app = app
         label_size = 10
@@ -4808,6 +4827,7 @@ class SideDock(DockBookmark):
         self._dragged = False
         self._drag_anchor = None
         self._transition_job = None
+        self._sorting_bookmark = None
         super().__init__(self, self.bar_height)
         self.update_label("z-note")
 
@@ -4830,9 +4850,18 @@ class SideDock(DockBookmark):
         return "无标题便签"
 
     def refresh(self):
-        self._rows = [self.app.notes[n["id"]] for n in self.app.data["notes"]
-                      if n["id"] in self.app.notes]
-        if not self.app.data["settings"].get("sideDock", True):
+        settings = self.app.data["settings"]
+        remaining = {n["id"]: self.app.notes[n["id"]] for n in self.app.data["notes"]
+                     if n["id"] in self.app.notes}
+        order = settings.get("sideDockOrder", [])
+        keys = order if isinstance(order, list) else ()
+        ordered = [remaining.pop(key) for key in keys if isinstance(key, str) and key in remaining]
+        active_order = [note.d["id"] for note in ordered]
+        if active_order != order:
+            settings["sideDockOrder"] = active_order
+            self.app.schedule_save()
+        self._rows = ordered + list(remaining.values())
+        if not settings.get("sideDock", True):
             self._hide_empty_tip()
             self._cancel_transition()
             self.expanded = False
@@ -4849,6 +4878,7 @@ class SideDock(DockBookmark):
             self._layout(self._drag_anchor if self._dragged and self._press else None)
 
     def _clear_bookmarks(self):
+        self._sorting_bookmark = None
         for window in self.bookmarks.values():
             window.destroy()
         self.bookmarks.clear()
@@ -4871,9 +4901,14 @@ class SideDock(DockBookmark):
         super()._leave(event)
 
     def _layout(self, y=None, *, animate=False):
+        if self._sorting_bookmark is not None:
+            bookmark = self._sorting_bookmark
+            bookmark._press = None
+            bookmark._extension = bookmark.HOVER_EXTENSION if bookmark._hovered else 0
+        self._sorting_bookmark = None
         self._cancel_transition()
         work = self.work_area()
-        entry_gap, row_gap = 10, 4
+        entry_gap, row_gap = self.ENTRY_GAP, self.ROW_GAP
         row_step = self.bookmark_height+row_gap
         travel = max(1, work.bottom-work.top-self.bar_height-16)
         ratio = min(1, max(0, self.app.data["settings"].get("sideDockY", 0.5)))
@@ -4888,7 +4923,7 @@ class SideDock(DockBookmark):
             self.place_at(self._bar_y)
             return
         room = work.bottom-work.top-16-self.bar_height-entry_gap
-        self._capacity = max(1, min(6, (room+row_gap)//row_step))
+        self._capacity = max(1, min(self.MAX_BOOKMARKS, (room+row_gap)//row_step))
         self._offset = min(max(0, self._offset), max(0, len(self._rows)-self._capacity))
         page = self._rows[self._offset:self._offset+self._capacity]
         group_height = self.bar_height+entry_gap+len(page)*row_step-row_gap
@@ -4904,8 +4939,7 @@ class SideDock(DockBookmark):
         for note in page:
             identity = note.d["id"]
             if identity not in self.bookmarks:
-                self.bookmarks[identity] = DockBookmark(self, self.bookmark_height,
-                    lambda key=identity: self.app.toggle_docked_note(key))
+                self.bookmarks[identity] = DockBookmark(self, self.bookmark_height, identity)
             window = self.bookmarks[identity]
             window.update_label(self.note_label(note.d), note.d.get("visible", True))
             slots.append((window, next_y))
@@ -4955,11 +4989,46 @@ class SideDock(DockBookmark):
         self._transition_job = self.after(VISIBILITY_TICK_MS, frame)
 
     def _wheel(self, event):
-        if self.expanded and event.delta:
+        if self.expanded and event.delta and self._sorting_bookmark is None:
             steps = -int(event.delta/120) or (-1 if event.delta > 0 else 1)
             self._offset += steps
             self._layout()
         return "break"
+
+    def _page_at_drop(self, bookmark, event):
+        page = self._rows[self._offset:self._offset+self._capacity]
+        first_y = self._bar_y+self.bar_height+self.ENTRY_GAP
+        step = self.bookmark_height+self.ROW_GAP
+        y = event.y_root-first_y
+        edge = user32.GetSystemMetrics(0)
+        left = edge-self.bookmark_width-self.HOVER_EXTENSION
+        if left <= event.x_root < edge and 0 <= y < len(page)*step-self.ROW_GAP:
+            source = next(i for i, note in enumerate(page) if note.d["id"] == bookmark.note_id)
+            page.insert(y//step, page.pop(source))
+        return page
+
+    def _preview_sort(self, bookmark, event):
+        first_y = self._bar_y+self.bar_height+self.ENTRY_GAP
+        step = self.bookmark_height+self.ROW_GAP
+        for i, note in enumerate(self._page_at_drop(bookmark, event)):
+            window = self.bookmarks[note.d["id"]]
+            y = first_y+i*step
+            if window is not bookmark and window._position_y != y:
+                window.move_to(y)
+        _, _, offset_y = bookmark._press
+        bookmark.move_to(max(0, event.y_root-offset_y))
+
+    def _finish_sort(self, bookmark, event):
+        page = self._page_at_drop(bookmark, event)
+        visible = slice(self._offset, self._offset+len(page))
+        if page == self._rows[visible]:
+            self._layout()
+            return
+        rows = self._rows.copy()
+        rows[visible] = page
+        self.app.data["settings"]["sideDockOrder"] = [note.d["id"] for note in rows]
+        self.refresh()
+        self.app.schedule_save()
 
     def _start_drag(self, event):
         self._press = (event.x_root, event.y_root, self._position_y)
@@ -5408,13 +5477,20 @@ class App:
     def remove_note(self, w):
         self._note_motion.finish(w)
         w._sync_lines_from_text()
+        identity = w.d["id"]
+        order = self.data["settings"].get("sideDockOrder", [])
+        new_order = [key for key in order if key != identity] if isinstance(order, list) else order
         def change(data):
-            note = next(n for n in data["notes"] if n["id"] == w.d["id"])
+            note = next(n for n in data["notes"] if n["id"] == identity)
             note["deletedAt"] = datetime.now().isoformat(timespec="seconds")
             data["deletedNotes"].append(note)
             data["notes"].remove(note)
+            if new_order != order:
+                data["settings"]["sideDockOrder"] = new_order
         if self._store_history(change):
-            self.notes.pop(w.d["id"], None)
+            if new_order != order:
+                self.data["settings"]["sideDockOrder"] = new_order
+            self.notes.pop(identity, None)
             w.destroy()
             self.request_dock_refresh()
 

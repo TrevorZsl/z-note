@@ -637,20 +637,122 @@ class SideDockTests(unittest.TestCase):
         self.assertEqual(label({"lines": [], "lines2": [{"text": "第二栏"}]}), "第二栏")
         self.assertEqual(label({}), "无标题便签")
 
-    def test_scroll_creates_only_six_and_reuses_overlapping_bookmarks(self):
-        self.add_many()
-        self.click_bar()
-        self.assertEqual(list(self.dock.bookmarks), [str(i) for i in range(6)])
-        keep = self.dock.bookmarks["1"]
-        self.dock._wheel(SimpleNamespace(delta=-120))
+    def bookmark_order(self):
+        return sorted(self.dock.bookmarks, key=lambda key: self.dock.bookmarks[key]._position_y)
+
+    def drag_bookmark(self, source, target, *, cancel=None):
+        window = self.dock.bookmarks[source]
+        x = window.bar.winfo_rootx()+30
+        start_y = window._position_y+window.height//2
+        target_y = self.dock.bookmarks[target]._position_y+window.height//2
+        window.bar.event_generate("<ButtonPress-1>", x=30, y=window.height//2,
+                                  rootx=x, rooty=start_y)
+        window.bar.event_generate("<B1-Motion>", rootx=x, rooty=target_y)
+        preview = self.bookmark_order()
+        if cancel is None:
+            window.bar.event_generate("<ButtonRelease-1>", rootx=x, rooty=target_y)
+        else:
+            cancel(window, x, target_y)
         self.root.update()
-        self.assertEqual(set(self.dock.bookmarks), {str(i) for i in range(1, 7)})
-        self.assertIs(self.dock.bookmarks["1"], keep)
-        self.assertEqual(len(self.dock.bookmarks), 6)
+        return preview
+
+    def test_drag_reorders_bookmarks_and_persists_only_dock_order(self):
+        self.app.notes["0"].d["title"] = "办公计划"
+        self.app.notes["1"].d["title"] = "1109"
+        self.click_bar()
+        original_notes = deepcopy(self.app.data["notes"])
+        self.assertEqual(self.drag_bookmark("1", "0"), ["1", "0", "2"])
+        self.assertEqual(self.bookmark_order(), ["1", "0", "2"])
+        self.assertEqual(self.drag_bookmark("1", "2"), ["0", "2", "1"])
+        self.assertEqual(self.app.data["notes"], original_notes)
+        self.app.save_now()
+        self.assertEqual(self.saved.call_args.args[0]["settings"]["sideDockOrder"], ["0", "2", "1"])
+
         self.click_bar()
         self.click_bar()
-        self.assertEqual(self.dock._offset, 0)
-        self.assertEqual(list(self.dock.bookmarks), [str(i) for i in range(6)])
+        self.assertEqual(self.bookmark_order(), ["0", "2", "1"])
+        self.restart()
+        self.click_bar()
+        self.assertEqual(self.bookmark_order(), ["0", "2", "1"])
+        new_note = self.app.new_note()
+        self.app.remove_note(self.app.notes["0"])
+        self.assertTrue(self.app.recover_note("0"))
+        self.root.update()
+        expected = ["2", "1", new_note.d["id"], "0"]
+        self.assertEqual(self.bookmark_order(), expected)
+        self.app.toggle_side_dock()
+        self.root.update()
+        self.assertFalse(self.dock.bookmarks)
+        self.app.toggle_side_dock()
+        self.root.update()
+        self.click_bar()
+        self.assertEqual(self.bookmark_order(), expected)
+
+    def test_bookmark_drag_cancels_outside_or_on_refresh(self):
+        self.click_bar()
+        visible = self.app.notes["1"].d["visible"]
+
+        def release_outside(window, x, y):
+            window.bar.event_generate("<ButtonRelease-1>", rootx=x-300, rooty=y)
+
+        def refresh_and_release(window, x, y):
+            self.dock.refresh()
+            window.bar.event_generate("<ButtonRelease-1>", rootx=x, rooty=y)
+
+        for cancel in (release_outside, refresh_and_release):
+            with self.subTest(cancel=cancel.__name__):
+                self.assertEqual(self.drag_bookmark("1", "0", cancel=cancel), ["1", "0", "2"])
+                self.assertEqual(self.bookmark_order(), ["0", "1", "2"])
+                self.assertNotIn("sideDockOrder", self.app.data["settings"])
+                self.assertEqual(self.app.notes["1"].d["visible"], visible)
+        self.click(self.dock.bookmarks["1"])
+        self.assertNotEqual(self.app.notes["1"].d["visible"], visible)
+
+    def test_dragged_bookmark_follows_pointer_vertically_while_staying_docked(self):
+        self.click_bar()
+        first, dragged = (self.dock.bookmarks[key] for key in ("0", "1"))
+        left, top = dragged.winfo_rootx(), dragged.winfo_rooty()
+        first_top = first.winfo_rooty()
+        x, y = left+30, top+10
+        dragged.bar.event_generate("<ButtonPress-1>", x=30, y=10, rootx=x, rooty=y)
+        dragged.bar.event_generate("<B1-Motion>", rootx=x-20, rooty=y+8)
+        self.root.update()
+        self.assertEqual((dragged.winfo_rootx(), dragged.winfo_rooty()), (left, top+8))
+        self.assertEqual(first.winfo_rooty(), first_top)
+
+        target_y = first_top+first.height//2
+        dragged.bar.event_generate("<B1-Motion>", rootx=x-20, rooty=target_y)
+        self.root.update()
+        self.assertEqual((dragged.winfo_rootx(), dragged.winfo_rooty()), (left, target_y-10))
+        self.assertEqual(first.winfo_rooty(), top)
+
+        dragged.bar.event_generate("<ButtonRelease-1>", rootx=x-20, rooty=target_y)
+        self.root.update()
+        self.assertEqual(self.bookmark_order(), ["1", "0", "2"])
+        self.assertEqual(dragged.winfo_rooty(), first_top)
+        self.assertEqual(dragged.winfo_rootx()+dragged.bar.winfo_width(), main.user32.GetSystemMetrics(0))
+
+    def test_scroll_caps_at_fifteen_and_reorders_only_visible_bookmarks(self):
+        self.add_many()
+        work = self.dock.work_area()
+        work.bottom = work.top+16+self.dock.bar_height+10+16*(self.dock.bookmark_height+4)
+        with patch.object(self.dock, "work_area", return_value=work):
+            self.click_bar()
+            self.assertEqual(self.bookmark_order(), [str(i) for i in range(15)])
+            keep = self.dock.bookmarks["1"]
+            self.dock._wheel(SimpleNamespace(delta=-120))
+            self.root.update()
+            self.assertEqual(self.bookmark_order(), [str(i) for i in range(1, 16)])
+            self.assertIs(self.dock.bookmarks["1"], keep)
+            visible = ["15", *(str(i) for i in range(1, 15))]
+            self.assertEqual(self.drag_bookmark("15", "1"), visible)
+            self.assertEqual(self.bookmark_order(), visible)
+            self.assertEqual(self.app.data["settings"]["sideDockOrder"],
+                             ["0", *visible, *(str(i) for i in range(16, 24))])
+            self.click_bar()
+            self.click_bar()
+            self.assertEqual(self.dock._offset, 0)
+            self.assertEqual(self.bookmark_order(), ["0", *visible[:-1]])
 
     def test_bottom_expansion_moves_up_temporarily_and_stays_inside_work_area(self):
         self.add_many()
@@ -661,7 +763,7 @@ class SideDockTests(unittest.TestCase):
         self.click_bar()
         work = self.dock.work_area()
         self.assertLess(self.dock.winfo_y(), original_y)
-        last = self.dock.bookmarks["5"]
+        last = self.dock.bookmarks[self.bookmark_order()[-1]]
         self.assertLessEqual(last.winfo_y()+last.winfo_height(), work.bottom-8)
         self.assertEqual(self.app.data["settings"]["sideDockY"], 1.0)
         preview = os.environ.get("ZNOTE_DOCK_PREVIEW")
@@ -841,11 +943,13 @@ class SideDockTests(unittest.TestCase):
             target = str(Path(folder) / "notes.json")
             with patch.object(storage, "DATA_DIR", folder), patch.object(storage, "DATA_FILE", target), \
                     patch.object(storage, "BACKUP_DIR", str(Path(folder) / "backup")):
-                self.app.data["settings"].update(sideDock=False, sideDockY=0.8)
+                self.app.data["settings"].update(sideDock=False, sideDockY=0.8,
+                                                 sideDockOrder=["1", "0", "2"])
                 storage.save_data(self.app.data)
                 restored = storage.load_data()
         self.assertFalse(restored["settings"]["sideDock"])
         self.assertEqual(restored["settings"]["sideDockY"], 0.8)
+        self.assertEqual(restored["settings"]["sideDockOrder"], ["1", "0", "2"])
 
     def test_long_tooltip_stays_on_screen_and_destruction_cancels_it(self):
         self.app.notes["0"].d["title"] = "很长的中文标题，需要完整显示。" * 12
@@ -869,7 +973,7 @@ class SideDockTests(unittest.TestCase):
             hwnd = main.user32.GetParent(window.winfo_id()) or window.winfo_id()
             preference = ctypes.c_int()
             self.assertEqual(main.dwmapi.DwmGetWindowAttribute(hwnd, 33, ctypes.byref(preference), ctypes.sizeof(preference)), 0)
-            self.assertEqual(preference.value, main.NOTE_CORNER_PREFERENCE)
+            self.assertEqual(preference.value, 3)  # DWMWCP_ROUNDSMALL
             self.assertTrue(main.user32.GetWindowLongPtrW(hwnd, -20) & 0x80)
             self.assertTrue(window.attributes("-topmost"))
             self.assertEqual(window.winfo_x()+window.bar.winfo_width(), main.user32.GetSystemMetrics(0))
