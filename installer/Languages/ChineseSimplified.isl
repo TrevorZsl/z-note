@@ -118,7 +118,7 @@ SelectLanguageLabel=选择安装时使用的语言。
 ClickNext=点击“下一步”继续，或点击“取消”退出安装程序。
 BeveledLabel=
 BrowseDialogTitle=浏览文件夹
-BrowseDialogLabel=在下面的列表中选择一个文件夹，然后点击“确定”。
+BrowseDialogLabel=选择现有文件夹，或在选中的文件夹下新建并命名，然后点击“确定”。
 NewFolderName=新建文件夹
 
 ; *** "Welcome" wizard page

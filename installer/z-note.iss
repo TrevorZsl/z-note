@@ -12,11 +12,14 @@ AppVersion={#AppVersion}
 AppMutex=z-note-singleton-mutex
 UninstallDisplayName=z-note 便签
 DefaultDirName={localappdata}\Programs\z-note
+AppendDefaultDirName=no
 PrivilegesRequired=lowest
 UsePreviousAppDir=yes
+AlwaysShowDirOnReadyPage=yes
 CloseApplications=no
 RestartApplications=no
 DisableProgramGroupPage=yes
+WizardSizePercent=110,100
 OutputDir=..\dist
 OutputBaseFilename=z-note-setup-{#AppVersion}
 SetupIconFile=..\assets\icons\app.ico
@@ -39,6 +42,15 @@ Name: "{autodesktop}\z-note"; Filename: "{app}\z-note.exe"; Tasks: desktopicon
 Filename: "{app}\z-note.exe"; Description: "{cm:LaunchProgram,z-note}"; Flags: nowait postinstall skipifsilent runascurrentuser; BeforeInstall: PrepareAppLaunch
 
 [Code]
+procedure InitializeWizard;
+begin
+  // Leave room for themed checkboxes when the monitors use different scaling.
+  WizardForm.TasksList.Offset := WizardForm.TasksList.Offset + ScaleX(8);
+  WizardForm.RunList.Offset := WizardForm.RunList.Offset + ScaleX(8);
+  WizardForm.ReadyMemo.WordWrap := True;
+  WizardForm.ReadyMemo.ScrollBars := ssVertical;
+end;
+
 function SetEnvironmentVariable(lpName, lpValue: String): BOOL;
   external 'SetEnvironmentVariableW@kernel32.dll stdcall';
 
