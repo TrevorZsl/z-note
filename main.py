@@ -4419,8 +4419,7 @@ class HistoryWindow(tk.Toplevel):
         self.ids = ids
         self._source_names = names
         for key, tab in self.tabs.items():
-            tab.configure(fg="#1F2328" if key == self.mode else QUIET,
-                          relief="sunken" if key == self.mode else "flat")
+            tab.configure(fg="#1F2328" if key == self.mode else QUIET)
         self.hint.configure(text="清除的已完成待办会保存在这里，按便签整理。" if self.mode == "archives"
                             else "彻底删除便签不会删除已清除待办的记录。")
         self.checked.intersection_update(self.ids)
