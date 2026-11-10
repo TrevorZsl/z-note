@@ -4561,7 +4561,8 @@ class SideDockTooltip(Tooltip):
 
     def _show(self):
         self._aid = None
-        if self._w.master.dock._sorting_bookmark is None:
+        dock = self._w.master.dock
+        if dock._sorting_bookmark is None and dock._scroll_job is None:
             self.show_at(self._w, self._gt())
 
     @staticmethod
@@ -4606,6 +4607,7 @@ class DockBookmark(tk.Toplevel):
         self._extension = 0
         self._animation_job = None
         self._position_y = 0
+        self._canvas_y = 0
         self._press = None
         self._drawn = None
         self.overrideredirect(True)
@@ -4692,9 +4694,9 @@ class DockBookmark(tk.Toplevel):
         if not self.winfo_ismapped():
             self.deiconify()
 
-    def move_to(self, y):
+    def move_to(self, y, *, viewport=None):
         self._position_y = round(y)
-        self._position()
+        self._position(viewport)
 
     def set_motion_opacity(self, opacity):
         previous = self.attributes("-alpha")
@@ -4712,18 +4714,28 @@ class DockBookmark(tk.Toplevel):
             style = user32.GetWindowLongPtrW(hwnd, -20)
             user32.SetWindowLongPtrW(hwnd, -20, style & ~0x00080000)
 
-    def _position(self):
+    def _position(self, viewport=None):
         width = self.base_width + self._extension
         edge = user32.GetSystemMetrics(0)
+        top, bottom = self._position_y, self._position_y+self.height
+        if viewport is not None:
+            top, bottom = max(top, viewport[0]), min(bottom, viewport[1])
+        canvas_y = self._position_y-top
+        if canvas_y != self._canvas_y:
+            self._canvas_y = canvas_y
+            self.bar.place_configure(y=canvas_y)
         # 原生窗口右端伸出屏幕，让可见部分只保留 DWM 抗锯齿左圆角。
-        self.geometry(f"{width+24}x{self.height}+{edge-width}+{self._position_y}")
-        self._draw()
+        self.geometry(f"{width+24}x{bottom-top}+{edge-width}+{top}")
+        if viewport is None:
+            self._draw()
 
     def _animate(self, target):
-        if self.dock._sorting_bookmark is self:
+        if self.dock._sorting_bookmark is self or self.dock._scroll_job is not None:
             return
         self._cancel_animation()
         origin, started = self._extension, time.monotonic()
+        if target == origin:
+            return
 
         def frame():
             self._animation_job = None
@@ -4757,7 +4769,7 @@ class DockBookmark(tk.Toplevel):
     def _drag_press(self, event):
         if self is self.dock:
             self.dock._start_drag(event)
-        else:
+        elif self.dock._scroll_job is None:
             self._press = (event.x_root, event.y_root, event.y)
 
     def _drag_move(self, event):
@@ -4805,6 +4817,7 @@ class SideDock(DockBookmark):
     ENTRY_GAP = 10
     ROW_GAP = 4
     MAX_BOOKMARKS = 15
+    SCROLL_DURATION = 0.12
 
     def __init__(self, app):
         self.app = app
@@ -4828,6 +4841,8 @@ class SideDock(DockBookmark):
         self._drag_anchor = None
         self._transition_job = None
         self._sorting_bookmark = None
+        self._scroll_job = None
+        self._scroll_position = 0.0
         super().__init__(self, self.bar_height)
         self.update_label("z-note")
 
@@ -4878,6 +4893,7 @@ class SideDock(DockBookmark):
             self._layout(self._drag_anchor if self._dragged and self._press else None)
 
     def _clear_bookmarks(self):
+        self._cancel_scroll()
         self._sorting_bookmark = None
         for window in self.bookmarks.values():
             window.destroy()
@@ -4901,6 +4917,7 @@ class SideDock(DockBookmark):
         super()._leave(event)
 
     def _layout(self, y=None, *, animate=False):
+        self._cancel_scroll()
         if self._sorting_bookmark is not None:
             bookmark = self._sorting_bookmark
             bookmark._press = None
@@ -4937,12 +4954,7 @@ class SideDock(DockBookmark):
         next_y = self._bar_y+self.bar_height+entry_gap
         slots = []
         for note in page:
-            identity = note.d["id"]
-            if identity not in self.bookmarks:
-                self.bookmarks[identity] = DockBookmark(self, self.bookmark_height, identity)
-            window = self.bookmarks[identity]
-            window.update_label(self.note_label(note.d), note.d.get("visible", True))
-            slots.append((window, next_y))
+            slots.append((self._bookmark_for(note), next_y))
             next_y += row_step
         if animate:
             self._animate_layout(slots)
@@ -4951,6 +4963,14 @@ class SideDock(DockBookmark):
             for window, target in slots:
                 window.set_motion_opacity(1)
                 window.place_at(target)
+
+    def _bookmark_for(self, note):
+        identity = note.d["id"]
+        if identity not in self.bookmarks:
+            self.bookmarks[identity] = DockBookmark(self, self.bookmark_height, identity)
+        window = self.bookmarks[identity]
+        window.update_label(self.note_label(note.d), note.d.get("visible", True))
+        return window
 
     def _cancel_transition(self):
         if self._transition_job is not None:
@@ -4989,11 +5009,92 @@ class SideDock(DockBookmark):
         self._transition_job = self.after(VISIBILITY_TICK_MS, frame)
 
     def _wheel(self, event):
-        if self.expanded and event.delta and self._sorting_bookmark is None:
-            steps = -int(event.delta/120) or (-1 if event.delta > 0 else 1)
-            self._offset += steps
-            self._layout()
+        if (not self.expanded or not event.delta or self._press or self._sorting_bookmark
+                or any(window._press for window in self.bookmarks.values())):
+            return "break"
+        steps = -int(event.delta/120) or (-1 if event.delta > 0 else 1)
+        target = min(max(0, self._offset+steps), max(0, len(self._rows)-self._capacity))
+        if target == self._offset:
+            return "break"
+        if self._scroll_job is None:
+            if self._transition_job is not None:
+                self._layout()
+            for window in self.bookmarks.values():
+                window._cancel_animation()
+                window.tip._leave(None)
+            self._scroll_position = self._offset
+            self._scroll_pixels = self._offset*(self.bookmark_height+self.ROW_GAP)
+            self._scroll_job = self.after(VISIBILITY_TICK_MS, self._scroll_frame)
+        self._scroll_origin = self._scroll_position
+        self._scroll_started = time.perf_counter()
+        self._offset = target
         return "break"
+
+    def _scroll_frame(self):
+        def continue_scroll():
+            if self._scroll_position == self._offset:
+                self._scroll_job = None
+                self._restore_scroll_hover()
+            else:
+                self._scroll_job = self.after(VISIBILITY_TICK_MS, self._scroll_frame)
+
+        elapsed = min(1.0, (time.perf_counter()-self._scroll_started)/self.SCROLL_DURATION)
+        progress = 1-(1-elapsed)**3
+        self._scroll_position = self._scroll_origin+(self._offset-self._scroll_origin)*progress
+        if elapsed == 1:
+            self._scroll_position = self._offset
+        step = self.bookmark_height+self.ROW_GAP
+        shift = round(self._scroll_position*step)
+        if shift == self._scroll_pixels:
+            continue_scroll()
+            return
+        self._scroll_pixels = shift
+        first = shift//step
+        top = self._bar_y+self.bar_height+self.ENTRY_GAP
+        bottom = top+self._capacity*step-self.ROW_GAP
+        viewport = top, bottom
+        visible = set()
+        entering = []
+        for i, note in enumerate(self._rows[first:first+self._capacity+1], start=first):
+            y = top+i*step-shift
+            if y >= bottom or y+self.bookmark_height <= top:
+                continue
+            identity = note.d["id"]
+            visible.add(identity)
+            window = self.bookmarks.get(identity)
+            if window is None:
+                entering.append((note, y))
+            else:
+                window.move_to(y, viewport=viewport)
+
+        def commit():
+            for identity in self.bookmarks.keys()-visible:
+                self.bookmarks.pop(identity).destroy()
+            for note, y in entering:
+                window = self._bookmark_for(note)
+                window.lift()
+                window.move_to(y, viewport=viewport)
+                window.deiconify()
+            continue_scroll()
+
+        # 先让 Tk 提交已映射窗口的几何位置，再显示新滑入的窗口。
+        self._scroll_job = self.after_idle(commit)
+
+    def _cancel_scroll(self):
+        if self._scroll_job is not None:
+            self.after_cancel(self._scroll_job)
+            self._scroll_job = None
+            for window in self.bookmarks.values():
+                window._extension = window.HOVER_EXTENSION if window._hovered else 0
+
+    def _restore_scroll_hover(self):
+        under_pointer = self.winfo_containing(*self.winfo_pointerxy())
+        for window in self.bookmarks.values():
+            window.tip._cancel()
+            window._hovered = under_pointer is window.bar
+            window._animate(window.HOVER_EXTENSION if window._hovered else 0)
+            if window._hovered:
+                window.tip._enter(None)
 
     def _page_at_drop(self, bookmark, event):
         page = self._rows[self._offset:self._offset+self._capacity]
@@ -5031,6 +5132,8 @@ class SideDock(DockBookmark):
         self.app.schedule_save()
 
     def _start_drag(self, event):
+        if self._scroll_job is not None:
+            self._layout()
         self._press = (event.x_root, event.y_root, self._position_y)
         self._dragged = False
         self._drag_anchor = None

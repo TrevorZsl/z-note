@@ -741,9 +741,12 @@ class SideDockTests(unittest.TestCase):
             self.assertEqual(self.bookmark_order(), [str(i) for i in range(15)])
             keep = self.dock.bookmarks["1"]
             self.dock._wheel(SimpleNamespace(delta=-120))
-            self.root.update()
+            self.wait(0.16)
             self.assertEqual(self.bookmark_order(), [str(i) for i in range(1, 16)])
             self.assertIs(self.dock.bookmarks["1"], keep)
+            before = self.app.notes["1"].d["visible"]
+            self.click(keep)
+            self.assertNotEqual(self.app.notes["1"].d["visible"], before)
             visible = ["15", *(str(i) for i in range(1, 15))]
             self.assertEqual(self.drag_bookmark("15", "1"), visible)
             self.assertEqual(self.bookmark_order(), visible)
@@ -753,6 +756,115 @@ class SideDockTests(unittest.TestCase):
             self.click_bar()
             self.assertEqual(self.dock._offset, 0)
             self.assertEqual(self.bookmark_order(), ["0", *visible[:-1]])
+
+    def test_scroll_moves_real_windows_and_clips_rows_at_the_edges(self):
+        self.add_many()
+        self.click_bar()
+        dock = self.dock
+        top = dock.bookmarks["0"].winfo_rooty()
+        height = dock.bookmark_height
+        step = height+dock.ROW_GAP
+        bottom = top+(dock._capacity-1)*step+height
+        keep = dock.bookmarks["1"]
+        bar_y = dock.winfo_rooty()
+        native_maps = []
+        deiconify = main.DockBookmark.deiconify
+
+        def map_bookmark(window):
+            deiconify(window)
+            hwnd = main.user32.GetParent(window.winfo_id()) or window.winfo_id()
+            native_maps.append((window.note_id, keep.winfo_rooty(), keep._position_y,
+                                bool(main.user32.IsWindowVisible(hwnd))))
+
+        with patch.object(main.time, "perf_counter", return_value=100.0) as clock, \
+                patch.object(dock, "lift", wraps=dock.lift) as lift, \
+                patch.object(dock, "winfo_containing", return_value=keep.bar):
+            dock._wheel(SimpleNamespace(delta=120))
+            self.assertIsNone(dock._scroll_job)
+            dock._wheel(SimpleNamespace(delta=-120))
+            clock.return_value += 0.04
+            with patch.object(main.DockBookmark, "deiconify", map_bookmark):
+                self.wait(0.03)
+            self.assertEqual(native_maps, [(str(dock._capacity), keep._position_y, keep._position_y, True)])
+            self.assertLess(top, keep.winfo_rooty())
+            self.assertLess(keep.winfo_rooty(), top+step)
+            self.assertEqual(dock.winfo_rooty(), bar_y)
+            self.assertEqual(len(dock.bookmarks), dock._capacity+1)
+            spans = sorted((w.winfo_rooty(), w.winfo_rooty()+w.winfo_height())
+                           for w in dock.bookmarks.values())
+            self.assertEqual((spans[0][0], spans[-1][1]), (top, bottom))
+            self.assertLess(spans[0][1]-top, height)
+            self.assertLess(bottom-spans[-1][0], height)
+            self.assertTrue(all(next_top-prev_bottom == dock.ROW_GAP
+                                for (_, prev_bottom), (next_top, _) in zip(spans, spans[1:])))
+            self.click(keep)
+            self.assertTrue(keep._note_visible)
+            self.assertIsNone(main.Tooltip._cur)
+
+            clock.return_value += 0.13
+            self.wait(0.03)
+            self.assertIsNone(dock._scroll_job)
+            self.assertIs(dock.bookmarks["1"], keep)
+            self.assertEqual(keep.winfo_rooty(), top)
+            self.assertEqual(keep.winfo_height(), height)
+            self.assertEqual(keep.bar.winfo_y(), 0)
+            self.assertTrue(keep._hovered)
+            self.assertIsNotNone(keep.tip._aid)
+            self.assertNotIn("0", dock.bookmarks)
+            keep.tip._cancel()
+            keep.tip._show()
+            canvas, = main.Tooltip._cur.winfo_children()
+            label = next(item for item in canvas.find_all() if canvas.type(item) == "text")
+            self.assertEqual(canvas.itemcget(label, "text"), keep.full_label)
+
+            dock._wheel(SimpleNamespace(delta=-24*120))
+            clock.return_value += 0.13
+            self.wait(0.03)
+            self.assertEqual(dock._offset, 24-dock._capacity)
+            dock._wheel(SimpleNamespace(delta=-120))
+            self.assertIsNone(dock._scroll_job)
+            lift.assert_not_called()
+
+    def test_scroll_retargets_and_cancels_cleanly_on_refresh_and_close(self):
+        self.add_many()
+        self.click_bar()
+        dock = self.dock
+        keep = dock.bookmarks["1"]
+        original_y = keep.winfo_rooty()
+        with patch.object(main.time, "perf_counter", return_value=100.0) as clock:
+            dock._wheel(SimpleNamespace(delta=-120))
+            dock._wheel(SimpleNamespace(delta=-120))
+            self.assertEqual(dock._offset, 2)
+            clock.return_value += 0.02
+            self.wait(0.03)
+            midway_y = keep.winfo_rooty()
+            self.assertLess(midway_y, original_y)
+            dock._wheel(SimpleNamespace(delta=240))
+            self.assertEqual(dock._offset, 0)
+            self.assertEqual(keep.winfo_rooty(), midway_y)
+            clock.return_value += 0.02
+            self.wait(0.03)
+            self.assertLess(midway_y, keep.winfo_rooty())
+            self.assertLess(keep.winfo_rooty(), original_y)
+
+            dock.refresh()
+            self.root.update()
+            self.assertIsNone(dock._scroll_job)
+            self.assertEqual(keep.winfo_rooty(), original_y)
+            self.assertEqual(len(dock.bookmarks), dock._capacity)
+
+        dock._wheel(SimpleNamespace(delta=-120))
+        self.click_bar()
+        self.assertIsNone(dock._scroll_job)
+        self.assertFalse(dock.expanded)
+        self.assertFalse(dock.bookmarks)
+
+        self.click_bar()
+        dock._wheel(SimpleNamespace(delta=-120))
+        self.app.toggle_side_dock()
+        self.root.update()
+        self.assertIsNone(dock._scroll_job)
+        self.assertFalse(dock.bookmarks)
 
     def test_bottom_expansion_moves_up_temporarily_and_stays_inside_work_area(self):
         self.add_many()
@@ -785,7 +897,7 @@ class SideDockTests(unittest.TestCase):
             self.assertEqual(self.dock.bookmarks["1"].winfo_y()+self.dock.bookmark_height,
                              work.bottom-8)
             self.dock._wheel(SimpleNamespace(delta=-120))
-            self.root.update()
+            self.wait(0.16)
             self.assertEqual(list(self.dock.bookmarks), ["1", "2"])
             self.assertEqual(self.dock.bookmarks["2"].winfo_y()+self.dock.bookmark_height,
                              work.bottom-8)
