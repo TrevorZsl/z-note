@@ -55,8 +55,9 @@ _dwmapi.DwmSetWindowAttribute.argtypes = [wintypes.HWND, wintypes.DWORD, ctypes.
 class ResizeSurface:
     """One reusable presentation window and DIB; never reads desktop pixels."""
 
-    def __init__(self, note, client_hwnd, rect):
+    def __init__(self, note, client_hwnd, rect, *, restore_bottom=True):
         self.note, self.client_hwnd = note, client_hwnd
+        self._restore_bottom = restore_bottom
         self.hwnd = self.dc = self.bitmap = self.old_bitmap = None
         self._old_proc = self._proc = None
         self._hidden = False
@@ -171,7 +172,7 @@ class ResizeSurface:
             if above != self.hwnd:
                 _user32.SetWindowPos(self.hwnd, above, 0, 0, 0, 0, 0x0010 | 0x0001 | 0x0002)
         _user32.SetWindowPos(self.hwnd, None, 0, 0, 0, 0, 0x0010 | 0x0040 | 0x0004 | 0x0001 | 0x0002)
-        if self.note.d["z"] == "bottom":
+        if self._restore_bottom and self.note.d["z"] == "bottom":
             # Showing an owned popup can raise its owner group. Move the group
             # back together so a bottom note never covers a normal window.
             _user32.SetWindowPos(self.note.hwnd, 1, 0, 0, 0, 0, 0x0010 | 0x0001 | 0x0002)

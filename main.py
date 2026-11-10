@@ -2865,6 +2865,7 @@ class NoteWindow(tk.Toplevel):
             return
         for editor in self.editors:
             editor._cancel_row_drag()
+        expanded_geometry = None
         self._columns_editing = True
         if self.d.get("twoColumn"):
             for editor in self.editors:
@@ -2902,17 +2903,37 @@ class NoteWindow(tk.Toplevel):
                 x, y = origin if origin is not None else (self.winfo_x(), self.winfo_y())
                 self.d["w"] = new_w
                 self.d["x"] = min(x, max(0, sw - new_w))
-                self.geometry(f"{new_w}x{self.winfo_height()}+{self.d['x']}+{y}")
-        self._columns_editing = False
-        self._columns_history, self._columns_redo = [], []
-        for editor in self.editors:
-            editor.__dict__.pop("_edit_history", None)
-            editor.__dict__.pop("_edit_redo", None)
-            editor._remember_edit()
-        self._last_sz = None
-        self.update_idletasks()
-        self._relayout()
-        self._restyle()
+                expanded_geometry = f"{new_w}x{self.winfo_height()}+{self.d['x']}+{y}"
+        preview = None
+        if expanded_geometry and self.winfo_viewable() and self._resize_surface is None:
+            # 扩宽时先保留当前画面，等 Tk 子窗口完成布局和绘制再交还。
+            rect = wintypes.RECT()
+            if user32.GetWindowRect(self.hwnd, ctypes.byref(rect)):
+                try:
+                    preview = ResizeSurface(self, self._resize_client_hwnd, (
+                        rect.left, rect.top, rect.right - rect.left, rect.bottom - rect.top),
+                        restore_bottom=not self._temporarily_raised)
+                except OSError:
+                    pass  # 预览面不可用时仍允许切换栏数。
+        try:
+            if expanded_geometry:
+                self.geometry(expanded_geometry)
+            self._columns_editing = False
+            self._columns_history, self._columns_redo = [], []
+            for editor in self.editors:
+                editor.__dict__.pop("_edit_history", None)
+                editor.__dict__.pop("_edit_redo", None)
+                editor._remember_edit()
+            self._last_sz = None
+            self.update_idletasks()
+            self._relayout()
+            self._restyle()
+            if preview:
+                self.update_idletasks()
+                dwmapi.DwmFlush()
+        finally:
+            if preview:
+                preview.close()
         self.d["editedAt"] = datetime.now().isoformat(timespec="microseconds")
         self.app.schedule_save()
 
