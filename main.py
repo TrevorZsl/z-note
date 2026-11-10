@@ -4323,15 +4323,27 @@ class HistoryWindow(tk.Toplevel):
         self.batch_mode = False
         self.checked = set()
         self._check_images = check_images(self, 22)
+        self._button_font = tkfont.Font(root=self, family=UI_FONT, size=10)
         tabs = tk.Frame(shell, bg=NOTE_BG)
         tabs.pack(fill="x", pady=(18, 12))
+        tabs.columnconfigure(1, weight=1)
+        tab_buttons = tk.Frame(tabs, bg=NOTE_BG)
+        tab_buttons.grid(row=0, column=0, sticky="w")
         self.tabs = {}
         for key, label in (("archives", "已清除待办"), ("deletedNotes", "已删除便签")):
-            self.tabs[key] = self.button(tabs, label, lambda key=key: self.switch(key))
+            self.tabs[key] = self.button(tab_buttons, label, lambda key=key: self.switch(key))
             self.tabs[key].pack(side="left", padx=(0, 12))
-        self.batch_button = self.button(tabs, "批量删除", self.toggle_batch)
-        self.batch_button.pack(side="right")
-        self.delete_button = self.button(tabs, "删除", self.delete_selected)
+        self._batch_actions = tk.Frame(tabs, bg=NOTE_BG)
+        self._batch_actions.grid(row=0, column=1, sticky="e")
+        self.select_all_button = self.button(self._batch_actions, "取消全选", self.toggle_all)
+        self._select_all_image = self._button_image("全选")
+        self.select_all_button.grid(row=0, column=0, padx=(0, 8))
+        self.select_all_button.grid_remove()
+        self.delete_button = self.button(self._batch_actions, "删除", self.delete_selected)
+        self.delete_button.grid(row=0, column=1, padx=(0, 8))
+        self.delete_button.grid_remove()
+        self.batch_button = self.button(self._batch_actions, "批量管理", self.toggle_batch)
+        self.batch_button.grid(row=0, column=2)
         self.hint = tk.Label(shell, bg=NOTE_BG, fg=QUIET, font=(UI_FONT, 10), anchor="w")
         self.hint.pack(fill="x", pady=(0, 12))
         panes = tk.Frame(shell, bg=NOTE_BG)
@@ -4356,20 +4368,27 @@ class HistoryWindow(tk.Toplevel):
         SettingsWindow._lock_size(self, width, height)
         self.geometry(f"{width}x{height}+{work.left+(work.right-work.left-width)//2}+{work.top+(work.bottom-work.top-height)//2}")
         self.update_idletasks()
+        # Reserve room for the delete button so checking a row cannot move the toolbar.
+        self._batch_min_width = tab_buttons.winfo_reqwidth() + 16 + sum(
+            button.winfo_reqwidth() for button in self._batch_actions.winfo_children())
+        tabs.bind("<Configure>", lambda e: self._layout_batch_actions(e.width))
         self.hint.bind("<Configure>", lambda e: self.hint.configure(wraplength=max(1, e.width), justify="left"))
         self.refresh()
         _show_after_layout(self)
 
-    def button(self, parent, text, command):
-        font = tkfont.Font(root=self, family=UI_FONT, size=10)
+    def _button_image(self, text):
+        font = self._button_font
         width, height = font.measure(text) + 24, font.metrics("linespace") + 12
         image = Image.new("RGBA", (width * 4, height * 4))
         ImageDraw.Draw(image).rounded_rectangle((2, 2, width*4-3, height*4-3), radius=28,
                                                 fill=NOTE_BG, outline=NOTE_BORDER, width=4)
-        photo = ImageTk.PhotoImage(image.resize((width, height), Image.Resampling.LANCZOS), master=self)
+        return ImageTk.PhotoImage(image.resize((width, height), Image.Resampling.LANCZOS), master=self)
+
+    def button(self, parent, text, command):
+        photo = self._button_image(text)
         button = tk.Button(parent, text=text, command=command, image=photo, compound="center",
             bg=NOTE_BG, fg="#475569", activebackground=NOTE_BG, activeforeground="#1F2328",
-            font=font, relief="flat", bd=0, padx=0, pady=0, cursor="hand2", highlightthickness=0)
+            font=self._button_font, relief="flat", bd=0, padx=0, pady=0, cursor="hand2", highlightthickness=0)
         button._image = photo
         return button
 
@@ -4407,8 +4426,10 @@ class HistoryWindow(tk.Toplevel):
         self.checked.intersection_update(self.ids)
         for child in self.left.content.winfo_children():
             child.destroy()
+        self._row_highlight = None
         self.names = []
         self.rows = {}
+        self._check_vars = {}
         recycled = self.mode == "deletedNotes"
         for key in self.ids:
             name, edited_at = names[key]
@@ -4417,16 +4438,16 @@ class HistoryWindow(tk.Toplevel):
                 timestamp = (edited_at or "").split(".")[0].replace("T", " ") or "编辑时间未知"
                 suffix = ("\n" if recycled else " · ") + timestamp
             self.names.append(name + suffix)
-            row = tk.Frame(self.left.content, bg=NOTE_BG)
+            row = tk.Frame(self.left.content, bg=NOTE_BG, padx=5 if recycled else 6,
+                           pady=2 if recycled else 0)
             row.pack(fill="x", pady=4)
             row.bind("<Button-1>", lambda e,k=key: self.choose(k))
             self.rows[key] = row
             if self.batch_mode:
-                value = tk.BooleanVar(value=key in self.checked)
+                value = self._check_vars[key] = tk.BooleanVar(value=key in self.checked)
                 box = tk.Checkbutton(row, variable=value, bg=NOTE_BG, activebackground=NOTE_BG,
                     indicatoron=False, image=self._check_images[False], selectimage=self._check_images[True],
                     command=lambda k=key, v=value: self.check(k,v.get()), bd=0, highlightthickness=0)
-                box._value = value
                 if recycled:
                     box.grid(row=0, column=0, rowspan=2, padx=(0, 6))
                 else:
@@ -4434,7 +4455,6 @@ class HistoryWindow(tk.Toplevel):
             label = tk.Label(row, text=name, bg=NOTE_BG, fg="#2B2F36", anchor="w",
                              justify="left", font=(UI_FONT,10), cursor="hand2")
             if recycled:
-                row.configure(padx=5, pady=2)
                 row.columnconfigure(1, weight=1)
                 label.grid(row=0, column=1, sticky="ew")
             else:
@@ -4455,10 +4475,9 @@ class HistoryWindow(tk.Toplevel):
             label.bind("<Button-1>", lambda e,k=key: self.choose(k))
         if self.selected_id not in self.ids:
             self.selected_id = self.ids[0] if self.ids else None
-        self.batch_button.configure(text="取消批量" if self.batch_mode else "批量删除")
-        self.delete_button.pack_forget()
-        if self.batch_mode and self.checked:
-            self.delete_button.pack(side="right",padx=8)
+        self.batch_button.configure(text="取消批量" if self.batch_mode else "批量管理")
+        self._layout_batch_actions(self._batch_actions.master.winfo_width())
+        self._update_batch_controls()
         self.left.content.update_idletasks()
         self.left.update_region()
         self.highlight_selection()
@@ -4474,17 +4493,64 @@ class HistoryWindow(tk.Toplevel):
         self.select()
 
     def highlight_selection(self):
+        if self._row_highlight is not None:
+            self._row_highlight.destroy()
+            self._row_highlight = None
         for key, row in self.rows.items():
             color = "#E9EDF2" if key == self.selected_id else NOTE_BG
             row.configure(bg=color)
             for child in row.winfo_children():
                 child.configure(bg=color)
+                if isinstance(child, tk.Checkbutton):
+                    child.configure(selectcolor=color, activebackground=color)
+        if self.selected_id is not None:
+            row = self.rows[self.selected_id]
+            background = self._row_highlight = tk.Canvas(row, bg=NOTE_BG, bd=0, highlightthickness=0)
+            background.bind("<Button-1>", lambda e, key=self.selected_id: self.choose(key))
+            background.bind("<Configure>", self._draw_row_highlight)
+            background.place(x=0, y=0, relwidth=1, relheight=1, bordermode="ignore")
+            tk.Misc.lower(background)
+
+    def _draw_row_highlight(self, event):
+        canvas = event.widget
+        canvas.delete("all")
+        round_rect(canvas, 0, 0, event.width, event.height, min(6, event.width/2, event.height/2),
+                   fill=canvas.master.cget("bg"), outline="")
+
+    def _layout_batch_actions(self, width):
+        stacked = self.batch_mode and width < self._batch_min_width
+        self._batch_actions.grid_configure(row=1 if stacked else 0, column=0 if stacked else 1,
+                                           columnspan=2 if stacked else 1, pady=(8, 0) if stacked else 0)
+
+    def _update_batch_controls(self):
+        if self.batch_mode:
+            all_selected = self.ids and len(self.checked) == len(self.ids)
+            self.select_all_button.configure(
+                text="取消全选" if all_selected else "全选",
+                image=self.select_all_button._image if all_selected else self._select_all_image,
+                state="normal" if self.ids else "disabled")
+            self.select_all_button.grid()
+        else:
+            self.select_all_button.grid_remove()
+        if self.batch_mode and self.checked:
+            self.delete_button.grid()
+        else:
+            self.delete_button.grid_remove()
 
     def check(self, key, selected):
         self.checked.add(key) if selected else self.checked.discard(key)
-        self.delete_button.pack_forget()
-        if self.checked:
-            self.delete_button.pack(side="right",padx=8)
+        self._check_vars[key].set(selected)
+        self._update_batch_controls()
+
+    def toggle_all(self):
+        selected = len(self.checked) < len(self.ids)
+        if selected:
+            self.checked.update(self.ids)
+        else:
+            self.checked.clear()
+        for value in self._check_vars.values():
+            value.set(selected)
+        self._update_batch_controls()
 
     def toggle_batch(self):
         self.batch_mode = not self.batch_mode

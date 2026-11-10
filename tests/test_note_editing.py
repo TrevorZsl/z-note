@@ -2605,6 +2605,112 @@ class NoteEditingTests(unittest.TestCase):
         self.assertFalse(self.app.data["deletedNotes"])
         win.destroy()
 
+    def test_history_select_all_includes_offscreen_rows_and_stays_in_current_tab(self):
+        from copy import deepcopy
+        self.note.toggle_done(1)
+        self.note.clear_done()
+        archive = self.app.data["archives"][0]
+        self.app.data["archives"].extend(
+            dict(archive, id=f"archive-{i}", noteId=f"note-{i}", title=f"便签 {i}")
+            for i in range(40)
+        )
+        self.app.data["archives"][-1]["items"] = archive["items"] * 40
+        self.app.data["deletedNotes"] = [
+            dict(deepcopy(self.note.d), id=f"note-{i}", deletedAt="2026-11-10T12:00:00")
+            for i in range(2)
+        ]
+        win = main.HistoryWindow(self.app)
+        self.app.history_win = win
+        select_all = win.select_all_button
+        self.assertEqual(win.batch_button.cget("text"), "批量管理")
+        self.assertFalse(select_all.winfo_manager())
+        win.batch_button.invoke()
+        self.app.root.update()
+        self.assertEqual(select_all.cget("text"), "全选")
+        narrow_width = select_all.winfo_width()
+        self.assertFalse(win.delete_button.winfo_manager())
+        win.left.viewport.yview_moveto(.5)
+        win.right.viewport.yview_moveto(.5)
+        self.app.root.update()
+        self.assertGreater(win.left.viewport.yview()[0], 0)
+        self.assertGreater(win.right.viewport.yview()[0], 0)
+        scroll = win.left.viewport.yview(), win.right.viewport.yview()
+        preview = win.selected_id, win.content.winfo_children()
+
+        select_all.invoke()
+        self.app.root.update()
+        self.assertEqual(win.checked, set(win.ids))
+        self.assertEqual(select_all.cget("text"), "取消全选")
+        self.assertGreater(select_all.winfo_width(), narrow_width)
+        self.assertTrue(win.delete_button.winfo_ismapped())
+        for row in win.rows.values():
+            box = row.pack_slaves()[0]
+            self.assertEqual(win.getvar(box.cget("variable")), 1)
+            for option in ("bg", "selectcolor", "activebackground"):
+                self.assertEqual(box.cget(option), row.cget("bg"))
+        win.rows[win.ids[0]].pack_slaves()[0].invoke()
+        self.assertEqual(select_all.cget("text"), "全选")
+        select_all.invoke()
+        select_all.invoke()
+        self.app.root.update()
+        self.assertFalse(win.checked)
+        self.assertEqual(select_all.winfo_width(), narrow_width)
+        self.assertFalse(win.delete_button.winfo_manager())
+        self.assertEqual(win.getvar(win.rows[win.ids[-1]].winfo_children()[0].cget("variable")), 0)
+        self.assertEqual((win.left.viewport.yview(), win.right.viewport.yview()), scroll)
+        self.assertEqual((win.selected_id, win.content.winfo_children()), preview)
+
+        select_all.invoke()
+        win.tabs["deletedNotes"].invoke()
+        self.assertEqual(win.batch_button.cget("text"), "批量管理")
+        self.assertFalse(win.checked)
+        self.assertFalse(select_all.winfo_manager())
+        win.batch_button.invoke()
+        select_all.invoke()
+        self.assertEqual(win.checked, {"note-0", "note-1"})
+        with patch.object(main.messagebox, "askyesno", side_effect=[False, True]) as confirm:
+            win.delete_button.invoke()
+            self.assertEqual(len(self.app.data["deletedNotes"]), 2)
+            self.assertEqual(select_all.cget("text"), "取消全选")
+            win.delete_button.invoke()
+        self.assertEqual(confirm.call_count, 2)
+        self.assertFalse(self.app.data["deletedNotes"])
+        self.assertEqual(len(self.app.data["archives"]), 41)
+        self.assertFalse(win.checked)
+        self.assertEqual(select_all.cget("state"), "disabled")
+        self.assertEqual(select_all.cget("text"), "全选")
+        self.assertFalse(win.delete_button.winfo_manager())
+        win.destroy()
+
+    def test_history_batch_toolbar_wraps_on_narrow_screen_at_high_scaling(self):
+        self.note.toggle_done(1)
+        self.note.clear_done()
+        original = self.app.root.tk.call("tk", "scaling")
+        self.app.root.tk.call("tk", "scaling", 240 / 72)
+        work = main.wintypes.RECT(0, 0, 800, 600)
+        try:
+            with patch.object(main.SettingsWindow, "_work_area", return_value=work):
+                win = main.HistoryWindow(self.app)
+            win.batch_button.invoke()
+            win.select_all_button.invoke()
+            self.app.root.update()
+            buttons = (win.select_all_button, win.delete_button, win.batch_button)
+            tab = win.tabs["deletedNotes"]
+            self.assertGreater(buttons[0].winfo_rooty(), tab.winfo_rooty() + tab.winfo_height())
+            for button in buttons:
+                self.assertTrue(button.winfo_ismapped())
+                self.assertEqual(button.winfo_width(), button.winfo_reqwidth())
+                self.assertEqual(button.winfo_rooty(), buttons[0].winfo_rooty())
+            self.assertLess(buttons[0].winfo_rootx(), buttons[1].winfo_rootx())
+            self.assertLess(buttons[1].winfo_rootx(), buttons[2].winfo_rootx())
+            win.batch_button.invoke()
+            self.app.root.update()
+            self.assertFalse(win.checked)
+            self.assertEqual(win.batch_button.winfo_rooty(), tab.winfo_rooty())
+            win.destroy()
+        finally:
+            self.app.root.tk.call("tk", "scaling", original)
+
     def test_history_drag_ignores_controls_and_thumb_matches_view(self):
         win = main.HistoryWindow(self.app)
         self.app.root.update()
@@ -2666,7 +2772,7 @@ class NoteEditingTests(unittest.TestCase):
         win.toggle_batch()
         self.app.root.update()
         row = win.rows["note2"]
-        checkbox, label = row.winfo_children()
+        checkbox, label = row.pack_slaves()
         self.assertGreater(label.winfo_height(), checkbox.winfo_height()*2)
         self.assertAlmostEqual(checkbox.winfo_y()+checkbox.winfo_height()/2,
                                label.winfo_y()+label.winfo_height()/2, delta=2)
@@ -2929,12 +3035,12 @@ class NoteEditingTests(unittest.TestCase):
                 ("unique", unique["title"], "2026-10-28 10:20:30"),
                 ("old", "无标题", "编辑时间未知")):
             with self.subTest(key=key):
-                title, detail = win.rows[key].winfo_children()
+                detail, title = win.rows[key].grid_slaves()
                 self.assertEqual((title.cget("text"), detail.cget("text")), (name, timestamp))
                 self.assertEqual(title.winfo_x(), detail.winfo_x())
                 self.assertGreaterEqual(detail.winfo_y(), title.winfo_y() + title.winfo_height())
         row = win.rows["second"]
-        title, detail = row.winfo_children()
+        detail, title = row.grid_slaves()
         detail.event_generate("<Button-1>")
         self.assertEqual(win.selected_id, "second")
         for widget in (row, title, detail):
@@ -2942,8 +3048,8 @@ class NoteEditingTests(unittest.TestCase):
         win.toggle_batch()
         self.app.root.update()
         row = win.rows["unique"]
-        box, title, detail = row.winfo_children()
-        self.assertGreater(title.winfo_height(), win.rows["second"].winfo_children()[1].winfo_height())
+        detail, title, box = row.grid_slaves()
+        self.assertGreater(title.winfo_height(), win.rows["second"].grid_slaves(row=0, column=1)[0].winfo_height())
         self.assertAlmostEqual(box.winfo_y() + box.winfo_height() / 2, row.winfo_height() / 2, delta=2)
         box.invoke()
         self.assertEqual(win.checked, {"unique"})
