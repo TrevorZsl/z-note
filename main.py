@@ -82,6 +82,10 @@ user32.GetWindowLongPtrW.argtypes = [wintypes.HWND, ctypes.c_int]
 user32.GetWindowLongPtrW.restype = ctypes.c_ssize_t
 user32.GetParent.argtypes = [wintypes.HWND]
 user32.GetParent.restype = wintypes.HWND
+user32.SendMessageW.argtypes = [wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM]
+user32.SendMessageW.restype = ctypes.c_ssize_t
+user32.RedrawWindow.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.RECT), wintypes.HRGN, wintypes.UINT]
+user32.RedrawWindow.restype = wintypes.BOOL
 user32.CreateWindowExW.argtypes = [wintypes.DWORD, wintypes.LPCWSTR, wintypes.LPCWSTR,
     wintypes.DWORD, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int,
     wintypes.HWND, wintypes.HMENU, wintypes.HINSTANCE, wintypes.LPVOID]
@@ -4468,6 +4472,8 @@ class HistoryWindow(tk.Toplevel):
         self.names = []
         self.rows = {}
         self._check_vars = {}
+        self._check_boxes = {}
+        self._recycle_labels = {}
         recycled = self.mode == "deletedNotes"
         for key in self.ids:
             name, edited_at = names[key]
@@ -4481,15 +4487,10 @@ class HistoryWindow(tk.Toplevel):
             row.pack(fill="x", pady=4)
             row.bind("<Button-1>", lambda e,k=key: self.choose(k))
             self.rows[key] = row
-            if self.batch_mode:
-                value = self._check_vars[key] = tk.BooleanVar(value=key in self.checked)
-                box = tk.Checkbutton(row, variable=value, bg=NOTE_BG, activebackground=NOTE_BG,
-                    indicatoron=False, image=self._check_images[False], selectimage=self._check_images[True],
-                    command=lambda k=key, v=value: self.check(k,v.get()), bd=0, highlightthickness=0)
-                if recycled:
-                    box.grid(row=0, column=0, rowspan=2, padx=(0, 6))
-                else:
-                    box.pack(side="left", anchor="center", padx=(0, 6))
+            value = self._check_vars[key] = tk.BooleanVar(master=self, value=key in self.checked)
+            self._check_boxes[key] = tk.Checkbutton(row, variable=value, bg=NOTE_BG, activebackground=NOTE_BG,
+                indicatoron=False, image=self._check_images[False], selectimage=self._check_images[True],
+                command=lambda k=key, v=value: self.check(k,v.get()), bd=0, highlightthickness=0)
             label = tk.Label(row, text=name, bg=NOTE_BG, fg="#2B2F36", anchor="w",
                              justify="left", font=(UI_FONT,10), cursor="hand2")
             if recycled:
@@ -4503,23 +4504,54 @@ class HistoryWindow(tk.Toplevel):
                                   cursor="hand2")
                 if recycled:
                     detail.grid(row=1, column=1, sticky="ew")
+                    self._recycle_labels[key] = (label, detail)
                 else:
                     row.bind("<Configure>", lambda e, l=label: l.configure(wraplength=max(1, e.width // 2)))
                     detail.pack(side="left", fill="x", expand=True)
-                detail.bind("<Configure>", lambda e, l=detail: l.configure(wraplength=max(1, e.width-8)))
+                detail.bind("<Configure>", self._wrap_recycle_label if recycled else
+                            lambda e, l=detail: l.configure(wraplength=max(1, e.width-8)))
                 detail.bind("<Button-1>", lambda e,k=key: self.choose(k))
-            if recycled or not suffix:
+            if recycled:
+                label.bind("<Configure>", self._wrap_recycle_label)
+            elif not suffix:
                 label.bind("<Configure>", lambda e, l=label: l.configure(wraplength=max(1,e.width-8)))
             label.bind("<Button-1>", lambda e,k=key: self.choose(k))
         if self.selected_id not in self.ids:
             self.selected_id = self.ids[0] if self.ids else None
-        self.batch_button.configure(text="取消批量" if self.batch_mode else "批量管理")
-        self._layout_batch_actions(self._batch_actions.master.winfo_width())
-        self._update_batch_controls()
+        self._show_batch_controls()
         self.left.content.update_idletasks()
         self.left.update_region()
         self.highlight_selection()
         self.select()
+
+    def _show_batch_controls(self):
+        recycled = self.mode == "deletedNotes"
+        for key, box in self._check_boxes.items():
+            if recycled:
+                self._layout_recycle_check(key, box)
+            elif self.batch_mode:
+                row = self.rows[key]
+                box.pack(side="left", anchor="center", padx=(0, 6), before=row.pack_slaves()[0])
+            else:
+                box.pack_forget()
+        self.batch_button.configure(text="取消批量" if self.batch_mode else "批量管理")
+        self._layout_batch_actions(self._batch_actions.master.winfo_width())
+        self._update_batch_controls()
+
+    def _layout_recycle_check(self, key, box):
+        # Keep the label HWNDs in place so Tk cannot copy old text pixels when the inset changes.
+        inset = box.winfo_reqwidth() + 6 if self.batch_mode else 0
+        for label in self._recycle_labels[key]:
+            label.configure(padx=1 + inset, wraplength=max(1, label.winfo_width() - inset - 8))
+        if self.batch_mode:
+            box.place(x=0, rely=.5, anchor="w")
+            box.lift()
+        else:
+            box.place_forget()
+
+    def _wrap_recycle_label(self, event):
+        label = event.widget
+        label.configure(wraplength=max(1, event.width - int(label.cget("padx")) - 7))
 
     def wheel(self, event):
         pane = self.left if event.x_root < self.right.winfo_rootx() else self.right
@@ -4592,8 +4624,23 @@ class HistoryWindow(tk.Toplevel):
 
     def toggle_batch(self):
         self.batch_mode = not self.batch_mode
+        for key in self.checked:
+            self._check_vars[key].set(False)
         self.checked.clear()
-        self.refresh()
+        content = self.left.content
+        if self.mode != "deletedNotes" or not content.winfo_ismapped():
+            self._show_batch_controls()
+            return
+        hwnd = content.winfo_id()
+        user32.SendMessageW(hwnd, 0x000B, 0, 0)  # WM_SETREDRAW
+        try:
+            self._show_batch_controls()
+            content.update_idletasks()
+        finally:
+            if user32.IsWindow(hwnd):
+                user32.SendMessageW(hwnd, 0x000B, 1, 0)
+                # RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN | RDW_UPDATENOW
+                user32.RedrawWindow(hwnd, None, None, 0x0185)
 
     def delete_selected(self):
         keys = set(self.checked)

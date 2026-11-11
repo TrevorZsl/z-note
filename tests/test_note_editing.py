@@ -2605,6 +2605,54 @@ class NoteEditingTests(unittest.TestCase):
         self.assertFalse(self.app.data["deletedNotes"])
         win.destroy()
 
+    def test_history_batch_toggle_reuses_rows_and_preview_in_both_tabs(self):
+        self.note.toggle_done(1)
+        self.note.clear_done()
+        archive = self.app.data["archives"][0]
+        self.app.data["archives"] = [
+            dict(archive, id=f"archive-{i}", noteId=f"note-{i}", title=f"便签 {i}",
+                 items=archive["items"] * 30)
+            for i in range(40)
+        ]
+        self.app.data["deletedNotes"] = [
+            dict(self.note.d, id=f"note-{i}", title=f"便签 {i}", lines=self.note.d["lines"] * 30)
+            for i in range(40)
+        ]
+        win = main.HistoryWindow(self.app)
+        for mode in ("archives", "deletedNotes"):
+            with self.subTest(mode=mode):
+                win.switch(mode)
+                win.choose(win.ids[20])
+                self.app.root.update()
+                panes = (win.left.viewport, win.right.viewport)
+                for pane in panes:
+                    pane.yview_moveto(.4)
+                self.app.root.update()
+                scroll = tuple(pane.canvasy(0) for pane in panes)
+                self.assertTrue(all(offset > 0 for offset in scroll))
+                rows = win.rows.copy()
+                preview = win.content.winfo_children()
+                selected = win.selected_id
+                box = win._check_boxes[selected]
+                for _ in range(2):
+                    win.batch_button.invoke()
+                    self.app.root.update()
+                    self.assertTrue(box.winfo_manager())
+                    self.assertEqual(box.cget("selectcolor"), rows[selected].cget("bg"))
+                    box.invoke()
+                    self.assertEqual(win.checked, {selected})
+                    self.assertEqual(tuple(pane.canvasy(0) for pane in panes), scroll)
+                    win.batch_button.invoke()
+                    self.app.root.update()
+                    self.assertFalse(box.winfo_manager())
+                    self.assertFalse(win.checked)
+                    self.assertFalse(win._check_vars[selected].get())
+                    self.assertEqual(win.rows, rows)
+                    self.assertEqual(win.content.winfo_children(), preview)
+                    self.assertEqual(win.selected_id, selected)
+                    self.assertEqual(tuple(pane.canvasy(0) for pane in panes), scroll)
+        win.destroy()
+
     def test_history_select_all_includes_offscreen_rows_and_stays_in_current_tab(self):
         from copy import deepcopy
         self.note.toggle_done(1)
@@ -3045,10 +3093,15 @@ class NoteEditingTests(unittest.TestCase):
         self.assertEqual(win.selected_id, "second")
         for widget in (row, title, detail):
             self.assertEqual(widget.cget("bg"), "#E9EDF2")
+        label_positions = title.winfo_x(), detail.winfo_x()
+        title_padding = int(title.cget("padx"))
         win.toggle_batch()
         self.app.root.update()
+        self.assertEqual((title.winfo_x(), detail.winfo_x()), label_positions)
+        self.assertGreater(int(title.cget("padx")), title_padding)
         row = win.rows["unique"]
-        detail, title, box = row.grid_slaves()
+        title = row.grid_slaves(row=0, column=1)[0]
+        box = win._check_boxes["unique"]
         self.assertGreater(title.winfo_height(), win.rows["second"].grid_slaves(row=0, column=1)[0].winfo_height())
         self.assertAlmostEqual(box.winfo_y() + box.winfo_height() / 2, row.winfo_height() / 2, delta=2)
         box.invoke()
