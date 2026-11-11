@@ -582,23 +582,82 @@ class ToolButton(tk.Canvas):
 
 # ---------- 便签窗口 ----------
 class VerticalThumb(tk.Canvas):
-    def __init__(self, parent, target, bg):
+    def __init__(self, parent, target, bg, *, auto_hide=False):
         super().__init__(parent, bg=bg, highlightthickness=0, bd=0, cursor="arrow")
         self.target = target
         self._thumb_image = None
         self._drag_offset = None
+        self._auto_hide = auto_hide
+        self._shown = False
+        self._hovered = False
+        self._hide_job = None
         self.bind("<Configure>", lambda e: self.set(*target.yview()))
         self.bind("<Button-1>", self.move)
         self.bind("<B1-Motion>", self.move)
-        self.bind("<ButtonRelease-1>", lambda e: setattr(self, "_drag_offset", None))
+        self.bind("<ButtonRelease-1>", self._release)
+        if auto_hide:
+            self.bind("<Enter>", self._enter)
+            self.bind("<Leave>", self._leave)
+            self.bind("<Unmap>", self._unmap)
+            self.bind("<Destroy>", lambda _e: self._cancel_hide())
+
+    def _cancel_hide(self):
+        if self._hide_job is not None:
+            self.after_cancel(self._hide_job)
+            self._hide_job = None
+
+    def _hide(self):
+        self._cancel_hide()
+        self._shown = False
+        self.delete("thumb")
+        self._thumb_image = None
+
+    def _unmap(self, _event):
+        self._hovered = False
+        self._drag_offset = None
+        self._hide()
+
+    def _schedule_hide(self):
+        self._cancel_hide()
+        if self._shown and not self._hovered and self._drag_offset is None:
+            self._hide_job = self.after(1000, self._hide)
+
+    def reveal(self):
+        first, last = self.target.yview()
+        if last - first >= .999:
+            return
+        if not self._shown:
+            self._shown = True
+            self.set(first, last)
+        self._schedule_hide()
+
+    def _enter(self, _event):
+        self._hovered = True
+        self.reveal()
+
+    def _leave(self, _event):
+        self._hovered = False
+        self._schedule_hide()
+
+    def _release(self, _event):
+        self._drag_offset = None
+        if self._auto_hide:
+            self._schedule_hide()
 
     def set(self, first, last):
         first, last = float(first), float(last)
         self.delete("all")
         self._thumb_image = None
         length = self.winfo_height()-8
-        if last-first >= .999 or length < 1:
+        if last-first >= .999:
+            if self._auto_hide:
+                self._cancel_hide()
+                self._shown = False
+                self._drag_offset = None
             return
+        if length < 1 or (self._auto_hide and not (self._shown or self._hovered)):
+            return
+        self._shown = True
         height = max(6, round((last-first)*length) + 6)
         scale = 4
         image = Image.new("RGBA", (8*scale, (height+2)*scale), (0, 0, 0, 0))
@@ -616,6 +675,8 @@ class VerticalThumb(tk.Canvas):
         position = (event.y-4)/max(1,self.winfo_height()-8)
         if self._drag_offset is None:
             self._drag_offset = position-first if first <= position <= last else (last-first)/2
+        if self._auto_hide:
+            self.reveal()
         self.target.yview_moveto(position-self._drag_offset)
 
 
@@ -739,7 +800,7 @@ class NoteEditor:
                             selectforeground="#2B2F36", selectborderwidth=0,
                             font=win.app.base_font, insertbackground="#2B2F36", cursor="xterm")
         self.text.place(x=0, y=0, relwidth=1)
-        self.scroll_thumb = VerticalThumb(win, self.body, self._bg)
+        self.scroll_thumb = VerticalThumb(win, self.body, self._bg, auto_hide=True)
         self._make_check_images()
         self.text.tag_config("done", font=self.done_font)  # 只加删除线，不改字色
         self.text.tag_config("selection_fill", background="#DCE7F3", foreground="#2B2F36")
@@ -916,6 +977,7 @@ class NoteEditor:
     def _text_wheel(self, event):
         first, last = self.body.yview()
         if last-first < .999:
+            self.scroll_thumb.reveal()
             # 每格移动 36 个逻辑像素，随界面缩放，不随字体大小改变。
             distance = -event.delta / 120 * self.text.winfo_fpixels("27p")
             if distance * self._wheel_remaining < 0:
@@ -942,6 +1004,7 @@ class NoteEditor:
         step = min(int(abs(remaining)), max(1, round(abs(remaining) * progress)))
         step *= 1 if remaining > 0 else -1
         self.body.yview_scroll(step, "units")
+        self.scroll_thumb.reveal()
         self._wheel_remaining -= step
         self._wheel_job = self.win.after(16, self._step_wheel)
         self.body.update_idletasks()
@@ -1090,7 +1153,10 @@ class NoteEditor:
             edge = min(36, height//4)
             step = -8 if y < edge else (8 if y > height-edge else 0)
             if step:
+                before = editor.body.yview()
                 editor.body.yview_scroll(step, "units")
+                if editor.body.yview() != before:
+                    editor.scroll_thumb.reveal()
         self._paint_row_drag()
         self._row_drag_job = self.win.after(30, self._row_drag_tick)
 
@@ -1353,6 +1419,8 @@ class NoteEditor:
                 self._scroll_to(y - pad)
             elif y + box[3] > top + self.body.winfo_height() - pad:
                 self._scroll_to(y + box[3] + pad - self.body.winfo_height())
+            if self.body.canvasy(0) != top:
+                self.scroll_thumb.reveal()
             self._draw_strikes()
 
     def _stop_selection_scroll(self, _event=None):
@@ -1369,6 +1437,7 @@ class NoteEditor:
         direction = 1 if event.keysym == "Next" else -1
         distance = direction * max(1, self.body.winfo_height() - self.app.base_font.metrics("linespace"))
         self.body.yview_scroll(distance, "units")
+        self.scroll_thumb.reveal()
         self.body.update_idletasks()
         target = (self._body_index(box[0], round(cursor_y)) if box else
                   self._body_index(self.body.winfo_height() // 2, 0))
@@ -1394,6 +1463,7 @@ class NoteEditor:
         self.text.tk.call("tk::TextSelectTo", self.text, self._selection_x, round(y))
         self._clamp_todo_cursor()
         if self.body.yview() != before:
+            self.scroll_thumb.reveal()
             self._selection_scroll_job = self.win.after(30, self._selection_scroll)
         return "break"
 
@@ -2953,11 +3023,20 @@ class NoteWindow(tk.Toplevel):
         if c is None:
             return
         c.delete("all")
+        c._line_image = None
         h = c.winfo_height()
-        if h > 48:  # 圆头细灰线，上下各留一段不顶满
-            margin = 16
-            c.create_line(7, margin, 7, h - margin, fill="#C9CED5",
-                          width=4, capstyle="round")
+        if h <= 48:
+            return
+        # 先放大绘制圆头，缩回后保留边缘的半透明像素。
+        scale = 4
+        width, height = 6, h - 26
+        image = Image.new("RGBA", (width * scale, height * scale))
+        ImageDraw.Draw(image).rounded_rectangle(
+            (scale, scale, 5 * scale - 1, (height - 1) * scale - 1),
+            radius=2 * scale, fill="#C9CED5")
+        c._line_image = ImageTk.PhotoImage(
+            image.resize((width, height), Image.Resampling.LANCZOS), master=c)
+        c.create_image(4, 13, anchor="nw", image=c._line_image)
 
     # ---- 编辑事件 ----
     def _show_context_menu(self, x, y, actions, shortcuts=None):

@@ -3112,6 +3112,7 @@ class NoteEditingTests(unittest.TestCase):
 
     def test_scroll_thumb_has_smooth_round_caps_even_for_short_ranges(self):
         thumb = self.note.scroll_thumb
+        thumb.event_generate("<Enter>")
         for first, last in ((0, .5), (.5, 1), (.5, .501)):
             with self.subTest(first=first, last=last):
                 thumb.set(first, last)
@@ -3172,7 +3173,7 @@ class NoteEditingTests(unittest.TestCase):
         self.assertTrue(thumb.find_withtag("thumb"))
         win.destroy()
 
-    def test_note_scroll_thumb_only_shows_for_overflow_and_tracks_drag(self):
+    def test_note_scroll_thumb_reveals_on_scroll_hover_and_drag_then_hides(self):
         self.note.d["lines"] = [{"type":"text", "text":"短内容", "checked":False}]
         self.note.render()
         self.app.root.update()
@@ -3184,19 +3185,66 @@ class NoteEditingTests(unittest.TestCase):
         self.note.d["lines"] = [{"type":"todo", "text":f"待办 {i}", "checked":i%2==0} for i in range(50)]
         self.note.render()
         self.app.root.update()
+        self.assertFalse(thumb.find_withtag("thumb"))
+        self.text.event_generate("<MouseWheel>", delta=120)
+        self.app.root.update()
+        self.assertEqual(self.note.body.yview()[0], 0)
         self.assertTrue(thumb.find_withtag("thumb"))
+        self.note._stop_wheel()
         self.text.event_generate("<MouseWheel>", delta=-120)
         self.app.root.update()
         self.assertGreater(self.note.body.yview()[0],0)
-        event = type("Event", (), {"y":thumb.winfo_height()//2})()
-        thumb.move(event)
+        self.note._stop_wheel()
+        settled = main.tk.BooleanVar(master=self.app.root)
+
+        def wait_for_idle_hide():
+            self.app.root.after(1050, settled.set, True)
+            self.app.root.wait_variable(settled)
+
+        wait_for_idle_hide()
+        self.assertFalse(thumb.find_withtag("thumb"))
+        layout = (self.note.body.winfo_geometry(), self.text.winfo_geometry(), self.note.body.yview())
+        thumb.event_generate("<Enter>")
+        self.app.root.update_idletasks()
+        self.assertTrue(thumb.find_withtag("thumb"))
+        self.assertIsNone(thumb._hide_job)
+        self.assertEqual(layout, (self.note.body.winfo_geometry(), self.text.winfo_geometry(), self.note.body.yview()))
+        thumb.event_generate("<Button-1>", x=4, y=thumb.winfo_height()//2)
+        thumb.event_generate("<Leave>")
+        thumb.event_generate("<B1-Motion>", x=4, y=thumb.winfo_height()-6)
         self.app.root.update()
         self.assertGreater(self.note.body.yview()[0],.2)
+        self.assertIsNone(thumb._hide_job)
+        thumb.event_generate("<ButtonRelease-1>", x=4, y=thumb.winfo_height()-6)
+        wait_for_idle_hide()
+        self.assertFalse(thumb.find_withtag("thumb"))
+        thumb.event_generate("<Enter>")
+        self.assertTrue(thumb.find_withtag("thumb"))
         self.note.d["lines"] = [{"type":"text", "text":"短内容", "checked":False}]
         self.note.render()
         self.app.root.update()
         self.assertFalse(thumb.find_withtag("thumb"))
         self.assertEqual(self.note.body.yview(), (0.0,1.0))
+
+    def test_split_note_scroll_thumb_activity_is_independent(self):
+        note = self.note
+        note.toggle_columns()
+        for editor in note.editors:
+            editor.lines = [{"type": "todo", "text": f"任务 {i}", "checked": False} for i in range(50)]
+        note.render()
+        self.app.root.update()
+        left, right = note.editors
+        self.assertFalse(left.scroll_thumb.find_withtag("thumb"))
+        self.assertFalse(right.scroll_thumb.find_withtag("thumb"))
+        left.text.event_generate("<MouseWheel>", delta=120)
+        self.assertTrue(left.scroll_thumb.find_withtag("thumb"))
+        self.assertFalse(right.scroll_thumb.find_withtag("thumb"))
+        right._page_key(type("Event", (), {"keysym": "Next", "state": 0})())
+        self.assertTrue(right.scroll_thumb.find_withtag("thumb"))
+        right_job = right.scroll_thumb._hide_job
+        self.assertIsNotNone(right_job)
+        note.toggle_columns()
+        self.assertNotIn(right_job, self.app.root.tk.call("after", "info"))
 
     def test_history_persists_and_readding_keeps_record(self):
         import json
@@ -5072,9 +5120,18 @@ class NoteEditingTests(unittest.TestCase):
         self.assertEqual(e0.body.winfo_width(), e1.body.winfo_width())
         self.assertIsNotNone(note.divider)
         (line,) = note.divider.find_all()
-        _, line_top, _, line_bottom = note.divider.coords(line)
+        self.assertEqual(note.divider.winfo_width(), 14)
+        _, line_top, _, line_bottom = note.divider.bbox(line)
         self.assertGreater(line_top, 8)
         self.assertLess(line_bottom, note.divider.winfo_height() - 8)
+        alpha = main.ImageTk.getimage(note.divider._line_image).getchannel("A")
+        middle = alpha.height // 2
+        self.assertEqual(sum(alpha.getpixel((x, middle)) > 127 for x in range(alpha.width)), 4)
+        self.assertGreater(alpha.getpixel((1, 1)), 0)
+        self.assertLess(alpha.getpixel((1, 1)), alpha.getpixel((3, 1)))
+        self.assertEqual(alpha.crop((0, 0, 6, 4)).tobytes(),
+                         alpha.transpose(main.Image.Transpose.FLIP_TOP_BOTTOM)
+                              .crop((0, 0, 6, 4)).tobytes())
         # 右栏独立编辑
         e1.text.insert("end", "右栏内容")
         e1._on_keyrelease(None)
@@ -5310,7 +5367,9 @@ class NoteEditingTests(unittest.TestCase):
         self.app.root.update()
         width = note.winfo_width()
         surface = self._begin_resize_session(x=width - 2, width=width, height=400)
+        thumb = note.editors[0].scroll_thumb
         for target_width in (650, 600, 560, 520, 560, 704):
+            thumb.reveal()
             self._resize_to_pointer(180 + target_width - 2, 400)
             right = note.editors[1].body
             frame = main.Image.frombytes("RGB", surface.capacity,
@@ -5331,7 +5390,7 @@ class NoteEditingTests(unittest.TestCase):
                               divider.winfo_y() + divider.winfo_height()))
             main.ImageDraw.Draw(gap).rectangle((4, 0, 10, gap.height - 1), fill="white")
             self.assertEqual(gap.getextrema(), ((255, 255),) * 3, target_width)
-            thumb = note.editors[0].scroll_thumb
+            self.assertTrue(thumb.find_withtag("thumb"))
             self.assertLessEqual(thumb.winfo_x() + thumb.winfo_width(), note.divider.winfo_x() - 2)
         note._finish_resize(cancel=True)
 
