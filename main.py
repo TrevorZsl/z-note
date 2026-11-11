@@ -3923,20 +3923,34 @@ class SettingsWindow(tk.Toplevel):
                                bg=NOTE_BG, activebackground=NOTE_BG, fg="#475569", font=font,
                                relief="flat", bd=0, highlightthickness=0, cursor="hand2")
             button._image = image
-            button.pack(side="left", padx=(0, 8))
             return button
 
         # Reserve enough width for every state without changing the window width.
-        self._update_button = update_button("下载并安装", self._update_action)
+        self._update_button = update_button("立即更新", self._update_action)
         self._update_button.configure(text="检查更新")
+        self._update_button.grid(row=0, column=0, sticky="nw", padx=(0, 8))
         self._update_cancel_button = update_button("取消", self._cancel_update)
-        self._update_cancel_button.pack_forget()
-        self._update_status = tk.Label(f, text="点击检查正式版本更新。", bg=NOTE_BG, fg=QUIET,
-                                       font=(UI_FONT, 9), justify="left", anchor="w")
-        self._update_status.pack(fill="x", pady=(8, 0))
+        self._update_cancel_button.grid(row=0, column=1, sticky="nw", padx=(0, 8))
+        self._update_cancel_button.grid_remove()
+        self._update_status_choices = ("点击检查正式版本更新。",)
+        self._update_error = None
+        self._update_status_font = tkfont.Font(root=self, family=UI_FONT, size=9)
+        self._update_status = tk.Label(actions, text=self._update_status_choices[0], bg=NOTE_BG,
+                                       fg=QUIET, font=self._update_status_font, bd=0, padx=0)
+        self._update_status.grid(row=0, column=2, sticky="w")
+        self._update_details = tk.Button(actions, text="详情", command=self._show_update_error,
+                                         bg=NOTE_BG, activebackground=NOTE_BG, fg="#475569",
+                                         font=self._update_status_font, relief="flat", bd=0,
+                                         highlightthickness=1, highlightbackground=NOTE_BG,
+                                         padx=2, pady=0, cursor="hand2", takefocus=True)
+        self._update_details.bind("<Return>", lambda _event: self._update_details.invoke())
+        self._update_details.grid(row=0, column=3, sticky="w", padx=(6, 0))
+        self._update_details.grid_remove()
+        actions.grid_columnconfigure(4, weight=1)
+        actions.bind("<Configure>", lambda event: self._layout_update_status(event.width))
         release_link = tk.Label(f, text="查看发布页面 ↗", bg=NOTE_BG, fg=QUIET,
                                 font=(UI_FONT, 9), cursor="hand2")
-        release_link.pack(anchor="w", pady=(4, 0))
+        release_link.pack(anchor="w", pady=(8, 0))
         release_link.bind("<Button-1>", lambda _e: webbrowser.open(updater.RELEASES_URL))
         self.bind("<Destroy>", self._destroy_update, add="+")
 
@@ -3962,7 +3976,6 @@ class SettingsWindow(tk.Toplevel):
         startup.configure(wraplength=max(1, content_width - self._check_images[False].width() - 16))
         hotkey_hint.configure(wraplength=max(1, content_width - 16))
         path.configure(wraplength=max(1, content_width - 16))
-        self._update_status.configure(wraplength=max(1, content_width - 16))
         layout_hotkeys(content_width)
         body.itemconfigure(content, width=content_width)
         for appearance_row in (font_row, row, row3):
@@ -3992,7 +4005,6 @@ class SettingsWindow(tk.Toplevel):
             startup.configure(wraplength=max(1, content_width - self._check_images[False].width() - 16))
             hotkey_hint.configure(wraplength=max(1, content_width - 16))
             path.configure(wraplength=max(1, content_width - 16))
-            self._update_status.configure(wraplength=max(1, content_width - 16))
             layout_hotkeys(content_width)
             for appearance_row in (row, row3):
                 label = appearance_row.winfo_children()[0]
@@ -4027,6 +4039,8 @@ class SettingsWindow(tk.Toplevel):
         if self._update_busy or self._update_installing:
             return
         if self._update_state == "ready":
+            if self._update_error is not None:
+                self._show_update_ready()
             if not messagebox.askyesno("安装更新",
                     f"新版 {self._update_release.version} 已下载并校验完成。\n\n"
                     "现在安装吗？将保存并备份便签，退出 z-note 后打开覆盖安装程序，无需卸载。",
@@ -4036,13 +4050,13 @@ class SettingsWindow(tk.Toplevel):
             try:
                 self.app.install_update(path, self._update_release, checksum)
             except Exception as exc:
-                self._set_update_status(f"无法安装更新：{exc}")
+                self._set_update_status("安装启动失败。", "安装失败", error=str(exc))
             return
         downloading = self._update_state == "found"
         cancel = self._update_cancel = threading.Event()
         self._update_busy = True
         self._update_button.configure(state="disabled")
-        self._update_cancel_button.pack(side="left")
+        self._update_cancel_button.grid()
         self._update_cancel_button.configure(state="normal")
         self._set_update_status("正在下载更新…" if downloading else "正在检查更新…")
         if not downloading:
@@ -4083,24 +4097,42 @@ class SettingsWindow(tk.Toplevel):
         if self._update_download is not None:
             updater.remove_download(self._update_download[0])
 
-    def _set_update_status(self, text, *, beside_button=False):
-        status = self._update_status
-        actions = self._update_button.master
-        container = actions if beside_button else status.master
-        if status.pack_info()["in"] != container:
-            status.pack_forget()
-            if beside_button:
-                status.pack(in_=actions, side="left")
-            else:
-                status.pack(after=actions, fill="x", pady=(8, 0))
-        status.configure(text=text)
+    def _layout_update_status(self, content_width):
+        width = content_width - self._update_button.winfo_reqwidth() - 8
+        if self._update_cancel_button.winfo_manager():
+            width -= self._update_cancel_button.winfo_reqwidth() + 8
+        if self._update_error is not None:
+            width -= self._update_details.winfo_reqwidth() + 6
+        measure = self._update_status_font.measure
+        text = next((choice for choice in self._update_status_choices if measure(choice) <= width), "")
+        if not text and measure("…") <= width:
+            prefix = self._update_status_choices[-1]
+            while measure(prefix + "…") > width:
+                prefix = prefix[:-1]
+            text = prefix + "…"
+        self._update_status.configure(text=text)
+
+    def _set_update_status(self, text, *shorter, error=None):
+        self._update_status_choices = (text, *shorter)
+        self._update_error = error
+        if error is None:
+            self._update_details.grid_remove()
+        else:
+            self._update_details.grid()
+        self._layout_update_status(self._update_button.master.winfo_width())
+
+    def _show_update_error(self):
+        if self._update_error is not None:
+            messagebox.showerror("更新详情", self._update_error, parent=self)
+
+    def _show_update_ready(self):
+        self._set_update_status("下载校验完成，可立即安装。", "可立即安装")
 
     def _show_available_update(self, release):
         self._update_release = release
         self._update_state = "found" if release else "idle"
-        self._set_update_status(f"可更新至 v{release.version}" if release else "已是最新版本。",
-                                beside_button=not release)
-        self._update_button.configure(text="下载并安装" if release else "检查更新")
+        self._set_update_status(f"可更新至 v{release.version}" if release else "已是最新版本。")
+        self._update_button.configure(text="立即更新" if release else "检查更新")
 
     def _receive_update_check(self, kind, value):
         if self._waiting_for_update_check:
@@ -4117,24 +4149,31 @@ class SettingsWindow(tk.Toplevel):
             kind, value = "cancelled", "已取消更新。"
         if kind == "progress":
             done, total = value
-            self._set_update_status(f"正在下载：{done / total:.0%}（{done / 1048576:.1f} / {total / 1048576:.1f} MB）")
+            percent = f"{done / total:.0%}"
+            sizes = f"{percent}（{done / 1048576:.1f} / {total / 1048576:.1f} MB）"
+            self._set_update_status(f"正在下载 {sizes}", sizes, percent)
             return
+        checking = self._waiting_for_update_check or self._update_state == "idle"
         self._update_busy = False
         self._waiting_for_update_check = False
-        self._update_cancel_button.pack_forget()
+        self._update_cancel_button.grid_remove()
         self._update_button.configure(state="normal")
         if kind == "checked":
             self._show_available_update(value)
         elif kind == "downloaded":
             self._update_download = value
             self._update_state = "ready"
-            self._set_update_status("下载并校验完成。安装将保存数据并退出 z-note，无需卸载。")
+            self._show_update_ready()
             self._update_button.configure(text="立即安装")
             self._update_action()
         else:
             if self._update_state == "found" and self._update_release != self.app._available_update:
                 self._show_available_update(self.app._available_update)
-            self._set_update_status(value)
+            if kind == "error":
+                phase = "检查失败" if checking else "下载失败"
+                self._set_update_status(f"{phase}，请重试。", phase, error=value)
+            else:
+                self._set_update_status(value)
 
     def _lock_size(self, width, height):
         self.minsize(width, height)

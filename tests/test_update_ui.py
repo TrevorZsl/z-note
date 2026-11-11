@@ -22,7 +22,10 @@ class UpdateStateTests(unittest.TestCase):
         self.window._update_button = Mock()
         self.window._update_cancel_button = Mock()
         self.window._update_status = Mock()
-        self.window._update_status.pack_info.return_value = {"in": self.window._update_status.master}
+        self.window._update_details = Mock()
+        self.window._update_error = None
+        self.window._layout_update_status = Mock(side_effect=lambda _width:
+            self.window._update_status.configure(text=self.window._update_status_choices[0]))
         self.release = updater.Release("2.2.0", "更新说明", "setup.exe", "url", 100, "sums")
         self.confirm = self.enterContext(patch.object(main.messagebox, "askyesno", return_value=False))
 
@@ -34,7 +37,7 @@ class UpdateStateTests(unittest.TestCase):
     def test_release_download_and_ready_states(self):
         self.receive("checked", self.release)
         self.assertEqual(self.window._update_state, "found")
-        self.window._update_button.configure.assert_called_with(text="下载并安装")
+        self.window._update_button.configure.assert_called_with(text="立即更新")
         self.window._update_status.configure.assert_called_with(text="可更新至 v2.2.0")
         self.receive("progress", (50, 100))
         self.assertIn("50%", self.window._update_status.configure.call_args.kwargs["text"])
@@ -59,7 +62,8 @@ class UpdateStateTests(unittest.TestCase):
         self.window.app.install_update.side_effect = OSError("启动失败")
         self.receive("downloaded", (Path("setup.exe"), "hash"))
         self.assertEqual(self.window._update_state, "ready")
-        self.window._update_status.configure.assert_called_with(text="无法安装更新：启动失败")
+        self.window._update_status.configure.assert_called_with(text="安装启动失败。")
+        self.assertEqual(self.window._update_error, "启动失败")
 
     def test_no_update_and_error_allow_retry(self):
         self.receive("checked", None)
@@ -67,7 +71,8 @@ class UpdateStateTests(unittest.TestCase):
         self.window._update_status.configure.assert_called_with(text="已是最新版本。")
         self.receive("error", "网络错误")
         self.assertFalse(self.window._update_busy)
-        self.window._update_status.configure.assert_called_with(text="网络错误")
+        self.window._update_status.configure.assert_called_with(text="检查失败，请重试。")
+        self.assertEqual(self.window._update_error, "网络错误")
 
     def test_manual_check_can_cancel_waiting_without_cancelling_app_check(self):
         self.window._update_action()
@@ -84,7 +89,8 @@ class UpdateStateTests(unittest.TestCase):
         self.window._update_status.configure.assert_not_called()
         self.window._update_action()
         self.window._receive_update_check("error", "连接失败")
-        self.window._update_status.configure.assert_called_with(text="连接失败")
+        self.window._update_status.configure.assert_called_with(text="检查失败，请重试。")
+        self.assertEqual(self.window._update_error, "连接失败")
         self.assertFalse(self.window._update_busy)
 
     def test_background_result_leaves_download_and_ready_state_intact(self):
@@ -174,7 +180,7 @@ class UpdateLayoutTests(unittest.TestCase):
         self.app.root.destroy()
         self.assertFalse(self.errors, self.errors)
 
-    def test_update_section_omits_release_notes_and_wraps_status(self):
+    def test_long_update_error_stays_on_one_line_and_keeps_full_details(self):
         window = self.window
         cancel = window._update_cancel = threading.Event()
         release = updater.Release("9.9.9", "改进更新体验。" * 100, "setup.exe", "url", 100, "sums")
@@ -182,37 +188,117 @@ class UpdateLayoutTests(unittest.TestCase):
         self.app.root.update()
         status = window._update_status
         self.assertEqual(status.cget("text"), "可更新至 v9.9.9")
-        self.assertEqual(window._update_button.cget("text"), "下载并安装")
-        siblings = status.master.winfo_children()
-        link = siblings[siblings.index(status) + 1]
+        self.assertEqual(window._update_button.cget("text"), "立即更新")
+        link = status.master.master.pack_slaves()[-1]
         self.assertEqual(link.cget("text"), "查看发布页面 ↗")
-        self.assertEqual(link.winfo_manager(), "pack")
+        initial_link_y = link.winfo_rooty()
         initial_height = status.winfo_height()
-        window._receive_update(cancel, "error", "连接失败，请重试。" * 20)
+        error = ("Gitee：下载连接中断，请检查网络后重试。\n"
+                 "GitHub：如果问题仍然存在，可以从下方的发布页面手动下载安装包。")
+        window._receive_update(cancel, "error", error)
         self.app.root.update()
-        self.assertGreater(status.winfo_height(), initial_height)
-        self.assertLessEqual(status.winfo_width(), window.winfo_width())
+        details = window._update_details
+        self.assertEqual(status.cget("text"), "下载失败，请重试。")
+        self.assertEqual(status.winfo_height(), initial_height)
+        self.assertLessEqual(status.winfo_x() + status.winfo_width(), status.master.winfo_width())
+        self.assertGreater(details.winfo_x(), status.winfo_x() + status.winfo_width())
+        self.assertEqual(link.winfo_rooty(), initial_link_y)
+        self.assertGreater(link.winfo_rooty(), status.winfo_rooty() + status.winfo_height())
         self.assertEqual(window._update_button.cget("state"), "normal")
+        status.master.master.master.yview_moveto(1)
+        self.app.root.update()
+        self.assertEqual(str(window._update_button.tk_focusNext()), str(details))
+        details.focus_force()
+        self.app.root.update()
+        with patch.object(main.messagebox, "showerror") as show:
+            details.event_generate("<KeyPress-Return>")
+            show.assert_called_once_with("更新详情", error, parent=window)
+        with patch.object(main.threading, "Thread"):
+            window._update_button.invoke()
+        self.assertEqual(details.winfo_manager(), "")
+        self.assertIsNone(window._update_error)
 
-    def test_up_to_date_status_sits_beside_check_button(self):
+    def test_update_states_share_right_side_and_keep_release_link_in_place(self):
         window = self.window
         button, status = window._update_button, window._update_status
-        with patch.object(self.app, "_check_for_update"):
-            button.invoke()
-            window._receive_update_check("checked", None)
+        cancel = window._update_cancel_button
+        link = status.master.master.pack_slaves()[-1]
+        initial_link_y = link.winfo_rooty()
+        self.assertEqual(initial_link_y - (button.winfo_rooty() + button.winfo_height()), 8)
+        release = updater.Release("9.9.9", "演示说明", "setup.exe", "url", 100, "sums")
+        self.app._available_update = release
+
+        def check_layout(text, left_widget=button):
             self.app.root.update()
-            self.assertEqual(status.cget("text"), "已是最新版本。")
-            self.assertGreater(status.winfo_rootx(), button.winfo_rootx() + button.winfo_width())
+            self.assertIn(text, status.cget("text"))
+            self.assertGreater(status.winfo_rootx(), left_widget.winfo_rootx() + left_widget.winfo_width())
             button_center = button.winfo_rooty() + button.winfo_height() / 2
             status_center = status.winfo_rooty() + status.winfo_height() / 2
             self.assertAlmostEqual(status_center, button_center, delta=1)
-            self.assertEqual(status.winfo_width(), status.winfo_reqwidth())
+            self.assertEqual(link.winfo_rooty(), initial_link_y)
+
+        with patch.object(self.app, "_check_for_update"), \
+             patch.object(main.threading, "Thread"), \
+             patch.object(main.messagebox, "askyesno", return_value=False) as confirm, \
+             patch.object(updater, "remove_download"):
+            check_layout("点击检查正式版本更新")
+            button.invoke()
+            check_layout("正在检查更新", cancel)
+            cancel.invoke()
+            check_layout("已取消更新")
+            button.invoke()
+            window._receive_update_check("checked", None)
+            check_layout("已是最新版本")
 
             button.invoke()
             window._receive_update_check("error", "网络错误")
+            check_layout("检查失败，请重试。")
+
+            window._receive_update_check("checked", release)
+            self.assertEqual(button.cget("text"), "立即更新")
+            check_layout("可更新至 v9.9.9")
+            button.invoke()
+            check_layout("正在下载更新", cancel)
+            window._receive_update(window._update_cancel, "progress", (5 * 1048576, 10 * 1048576))
+            check_layout("50%（5.0 / 10.0 MB）", cancel)
+            window._receive_update(window._update_cancel, "downloaded", (Path("setup.exe"), "hash"))
+            self.assertEqual(button.cget("text"), "立即安装")
+            check_layout("下载校验完成，可立即安装。")
+            confirm.assert_called_once()
+            confirm.return_value = True
+            with patch.object(self.app, "install_update", side_effect=OSError("启动失败")):
+                button.invoke()
+            check_layout("安装启动失败。")
+            confirm.return_value = False
+            button.invoke()
+            check_layout("下载校验完成，可立即安装。")
+            self.assertEqual(window._update_details.winfo_manager(), "")
+            window._update_download = None
+
+        with patch.object(main.webbrowser, "open") as browser:
+            link.event_generate("<Button-1>", x=1, y=1)
+            browser.assert_called_once_with(updater.RELEASES_URL)
+
+    def test_progress_keeps_most_useful_text_that_fits_narrow_windows(self):
+        window = self.window
+        button, status = window._update_button, window._update_status
+        cancel = window._update_cancel_button
+        release = updater.Release("9.9.9", "", "setup.exe", "url", 100, "sums")
+        window._receive_update_check("checked", release)
+        with patch.object(main.threading, "Thread"):
+            button.invoke()
+        window._receive_update(window._update_cancel, "progress", (5 * 1048576, 10 * 1048576))
+        fixed_width = button.winfo_reqwidth() + cancel.winfo_reqwidth() + 16
+        fixed_width += window.winfo_width() - status.master.winfo_width()
+        measure = window._update_status_font.measure
+        height = window.winfo_height()
+        for expected in ("50%（5.0 / 10.0 MB）", "50%"):
+            width = fixed_width + measure(expected) + 2
+            window._lock_size(width, height)
+            window.geometry(f"{width}x{height}")
             self.app.root.update()
-            self.assertEqual(status.cget("text"), "网络错误")
-            self.assertGreater(status.winfo_rooty(), button.winfo_rooty() + button.winfo_height())
+            self.assertEqual(status.cget("text"), expected)
+            self.assertLessEqual(status.winfo_x() + status.winfo_width(), status.master.winfo_width())
 
     def test_startup_check_uses_worker_and_remembers_result_across_settings(self):
         release = updater.Release("9.9.9", "演示说明", "setup.exe", "url", 100, "sums")
@@ -237,7 +323,7 @@ class UpdateLayoutTests(unittest.TestCase):
             self.app._pump()
             self.window = self.app.settings_win
             self.assertEqual(self.window._update_status.cget("text"), "可更新至 v9.9.9")
-            self.assertEqual(self.window._update_button.cget("text"), "下载并安装")
+            self.assertEqual(self.window._update_button.cget("text"), "立即更新")
             thread.assert_called_once()
 
     def test_settings_refresh_is_throttled_and_errors_keep_known_release(self):
