@@ -56,6 +56,13 @@ class UpdateStateTests(unittest.TestCase):
         self.receive("downloaded", (Path("setup.exe"), "hash"))
         self.window.app.install_update.assert_called_once_with(Path("setup.exe"), self.release, "hash")
 
+    def test_packaged_update_installs_on_download_completion_without_confirmation(self):
+        self.receive("checked", self.release)
+        with patch.object(main.sys, "frozen", True, create=True):
+            self.receive("downloaded", (Path("setup.exe"), "hash"))
+        self.confirm.assert_not_called()
+        self.window.app.install_update.assert_called_once_with(Path("setup.exe"), self.release, "hash")
+
     def test_install_launch_failure_keeps_download_for_retry(self):
         self.receive("checked", self.release)
         self.confirm.return_value = True

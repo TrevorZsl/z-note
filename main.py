@@ -4152,7 +4152,7 @@ class SettingsWindow(tk.Toplevel):
         if self._update_state == "ready":
             if self._update_error is not None:
                 self._show_update_ready()
-            if not messagebox.askyesno("安装更新",
+            if not getattr(sys, "frozen", False) and not messagebox.askyesno("安装更新",
                     f"新版 {self._update_release.version} 已下载并校验完成。\n\n"
                     "现在安装吗？将保存并备份便签，退出 z-note 后打开覆盖安装程序，无需卸载。",
                     parent=self):
@@ -6646,10 +6646,10 @@ class App:
         self._save_positions()
         save_data(self.data)
         backup_before_update()
-        # AppMutex keeps Setup from replacing files until this process exits.
         command = [str(path)]
         if getattr(sys, "frozen", False):
-            command.append(f"/DIR={Path(sys.executable).parent}")
+            command.extend(("/SP-", "/SILENT", "/NORESTART", "/ZNOTEUPDATE=1",
+                            f"/DIR={Path(sys.executable).parent}"))
         # Setup's post-install launch must not reuse this process's _MEI directory.
         install_env = dict(os.environ, PYINSTALLER_RESET_ENVIRONMENT="1")
         subprocess.Popen(command, cwd=str(path.parent), env=install_env)

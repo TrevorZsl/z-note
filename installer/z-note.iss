@@ -40,8 +40,31 @@ Name: "{autodesktop}\z-note"; Filename: "{app}\z-note.exe"; Tasks: desktopicon
 
 [Run]
 Filename: "{app}\z-note.exe"; Description: "{cm:LaunchProgram,z-note}"; Flags: nowait postinstall skipifsilent runascurrentuser; BeforeInstall: PrepareAppLaunch
+Filename: "{app}\z-note.exe"; Flags: nowait skipifnotsilent runascurrentuser; Check: IsAppUpdate; BeforeInstall: PrepareAppLaunch
 
 [Code]
+function IsAppUpdate: Boolean;
+begin
+  Result := WizardSilent and (ExpandConstant('{param:ZNOTEUPDATE|0}') = '1');
+end;
+
+function InitializeSetup: Boolean;
+var
+  Attempt: Integer;
+begin
+  if IsAppUpdate then
+  begin
+    // The old app saves its data before starting Setup, then releases AppMutex on exit.
+    for Attempt := 1 to 150 do
+    begin
+      if not CheckForMutexes('z-note-singleton-mutex') then
+        Break;
+      Sleep(100);
+    end;
+  end;
+  Result := True;
+end;
+
 procedure InitializeWizard;
 begin
   // Leave room for themed checkboxes when the monitors use different scaling.

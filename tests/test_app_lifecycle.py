@@ -114,7 +114,8 @@ class AppLifecycleTests(unittest.TestCase):
              patch.object(main, "backup_before_update"), \
              patch.object(main.subprocess, "Popen") as start, patch.object(app, "quit"):
             app.install_update(Path("setup.exe"), "release", "hash")
-        start.assert_called_once_with(["setup.exe", f"/DIR={Path('D:/便签工具')}"], cwd=".",
+        start.assert_called_once_with(["setup.exe", "/SP-", "/SILENT", "/NORESTART", "/ZNOTEUPDATE=1",
+                                       f"/DIR={Path('D:/便签工具')}"], cwd=".",
                                       env=dict(main.os.environ, PYINSTALLER_RESET_ENVIRONMENT="1"))
 
     def test_installer_gets_fresh_runtime_without_changing_parent_environment(self):
