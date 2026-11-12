@@ -108,7 +108,7 @@ jobs:
     needs: build
     if: ${{ !cancelled() && ((needs.build.result == 'success' && needs.build.outputs.gitee_repo != '') || github.event_name == 'workflow_dispatch') }}
     runs-on: ${{ inputs.gitee_runner || vars.GITEE_RELEASE_RUNNER || 'ubuntu-latest' }}
-    timeout-minutes: 45
+    timeout-minutes: 15
     permissions:
       actions: read
       contents: read
