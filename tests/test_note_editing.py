@@ -2653,6 +2653,86 @@ class NoteEditingTests(unittest.TestCase):
                     self.assertEqual(tuple(pane.canvasy(0) for pane in panes), scroll)
         win.destroy()
 
+    def test_history_tab_switch_reuses_row_widgets(self):
+        from copy import deepcopy
+        self.note.toggle_done(1)
+        self.note.clear_done()
+        self.app.data["deletedNotes"] = [
+            dict(deepcopy(self.note.d), id=f"note-{i}", deletedAt="2026-11-10T12:00:00")
+            for i in range(5)
+        ]
+        win = main.HistoryWindow(self.app)
+        self.app.root.update()
+        win.switch("deletedNotes")
+        self.app.root.update()
+        rows = {key: id(row) for key, row in win.rows.items()}
+        names = list(win.names)
+        win.switch("archives")
+        self.app.root.update()
+        win.switch("deletedNotes")
+        self.app.root.update()
+        self.assertEqual(win.names, names)
+        self.assertEqual({key: id(row) for key, row in win.rows.items()}, rows)
+        win.destroy()
+
+    def test_history_delete_only_rebuilds_the_removed_row(self):
+        from copy import deepcopy
+        self.note.toggle_done(1)
+        self.note.clear_done()
+        self.app.data["deletedNotes"] = [
+            dict(deepcopy(self.note.d), id=f"note-{i}", deletedAt="2026-11-10T12:00:00")
+            for i in range(5)
+        ]
+        win = main.HistoryWindow(self.app)
+        self.app.history_win = win
+        win.switch("deletedNotes")
+        self.app.root.update()
+        kept = {key: row for key, row in win.rows.items() if key != "note-2"}
+        removed = win.rows["note-2"]
+        with patch.object(main.messagebox, "askyesno", return_value=True):
+            win._delete_records("id", {"note-2"})
+        self.app.root.update()
+        self.assertNotIn("note-2", win.rows)
+        self.assertFalse(removed.winfo_exists())
+        for key, row in kept.items():
+            self.assertIs(win.rows[key], row)
+        win.destroy()
+
+    def test_history_switch_keeps_only_one_row_highlighted(self):
+        from copy import deepcopy
+        self.app.data["archives"] = [
+            {"id": f"archive-{i}", "noteId": f"note-{i}", "title": f"便签 {i}",
+             "editedAt": "2026-11-10T12:00:00", "clearedAt": f"2026-11-1{i}T12:00:00",
+             "items": [{"col": 0, "index": 0,
+                        "line": {"type": "todo", "text": "完成", "checked": True}}]}
+            for i in range(3)
+        ]
+        self.app.data["deletedNotes"] = [
+            dict(deepcopy(self.note.d), id=f"note-{i}", deletedAt="2026-11-10T12:00:00")
+            for i in range(3)
+        ]
+        win = main.HistoryWindow(self.app)
+        self.app.root.update()
+        win.choose(win.ids[-1])
+        win.switch("deletedNotes")
+        self.app.root.update()
+        win.choose(win.ids[-1])
+        win.switch("archives")
+        self.app.root.update()
+        highlighted = [key for key, row in win.rows.items() if row.cget("bg") == "#E9EDF2"]
+        self.assertEqual(highlighted, [win.selected_id])
+        win.destroy()
+
+    def test_history_close_hides_window_for_reuse(self):
+        win = main.HistoryWindow(self.app)
+        self.app.root.update()
+        self.assertTrue(win.winfo_viewable())
+        win._close_button.event_generate("<Button-1>")
+        self.app.root.update()
+        self.assertTrue(win.winfo_exists())
+        self.assertFalse(win.winfo_viewable())
+        win.destroy()
+
     def test_history_select_all_includes_offscreen_rows_and_stays_in_current_tab(self):
         from copy import deepcopy
         self.note.toggle_done(1)

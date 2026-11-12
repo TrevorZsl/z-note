@@ -3,6 +3,7 @@
 运行: python main.py   依赖安装: python -m pip install -r requirements.txt
 """
 import atexit, ctypes, math, os, queue, struct, sys, time, uuid, winreg
+from collections import Counter
 from copy import deepcopy
 from dataclasses import dataclass
 from datetime import datetime
@@ -602,6 +603,8 @@ class VerticalThumb(tk.Canvas):
         self._shown = False
         self._hovered = False
         self._hide_job = None
+        self._thumb_key = None
+        self._thumb_cache = {}
         self.bind("<Configure>", lambda e: self.set(*target.yview()))
         self.bind("<Button-1>", self.move)
         self.bind("<B1-Motion>", self.move)
@@ -622,6 +625,7 @@ class VerticalThumb(tk.Canvas):
         self._shown = False
         self.delete("thumb")
         self._thumb_image = None
+        self._thumb_key = None
 
     def _unmap(self, _event):
         self._hovered = False
@@ -657,6 +661,10 @@ class VerticalThumb(tk.Canvas):
 
     def set(self, first, last):
         first, last = float(first), float(last)
+        key = (first, last, self.winfo_height())
+        if key == self._thumb_key:
+            return
+        self._thumb_key = key
         self.delete("all")
         self._thumb_image = None
         length = self.winfo_height()-8
@@ -667,16 +675,23 @@ class VerticalThumb(tk.Canvas):
                 self._drag_offset = None
             return
         if length < 1 or (self._auto_hide and not (self._shown or self._hovered)):
+            self._thumb_key = None
             return
         self._shown = True
         height = max(6, round((last-first)*length) + 6)
-        scale = 4
-        image = Image.new("RGBA", (8*scale, (height+2)*scale), (0, 0, 0, 0))
-        ImageDraw.Draw(image).rounded_rectangle(
-            (scale, scale, 7*scale-1, (height+1)*scale-1),
-            radius=3*scale, fill="#A7B0BE")
-        self._thumb_image = ImageTk.PhotoImage(
-            image.resize((8, height+2), Image.Resampling.LANCZOS), master=self)
+        image = self._thumb_cache.get(height)
+        if image is None:
+            scale = 4
+            image = Image.new("RGBA", (8*scale, (height+2)*scale), (0, 0, 0, 0))
+            ImageDraw.Draw(image).rounded_rectangle(
+                (scale, scale, 7*scale-1, (height+1)*scale-1),
+                radius=3*scale, fill="#A7B0BE")
+            image = ImageTk.PhotoImage(
+                image.resize((8, height+2), Image.Resampling.LANCZOS), master=self)
+            self._thumb_cache[height] = image
+            if len(self._thumb_cache) > 8:
+                self._thumb_cache.pop(next(iter(self._thumb_cache)))
+        self._thumb_image = image
         self.create_image(0, round(first*length), anchor="nw", image=self._thumb_image, tags="thumb")
 
     def move(self, event):
@@ -4403,10 +4418,19 @@ class HistoryPane(tk.Canvas):
         self.window = self.viewport.create_window(0, 0, window=self.content, anchor="nw")
         self.bars = {"y": VerticalThumb(self, self.viewport, NOTE_BG)}
         self.viewport.configure(yscrollcommand=self.bars["y"].set)
+        self._region_suspended = 0
         self.bind("<Configure>", self.layout)
         self.content.bind("<Configure>", self.update_region)
         self.viewport.bind("<Configure>", self.update_region)
         self.viewport.bind("<MouseWheel>", self.wheel)
+
+    def suspend_region(self):
+        self._region_suspended += 1
+
+    def resume_region(self):
+        self._region_suspended = max(0, self._region_suspended - 1)
+        if not self._region_suspended:
+            self.update_region()
 
     def wheel(self, event):
         if self.content.winfo_reqheight() > self.viewport.winfo_height():
@@ -4428,6 +4452,8 @@ class HistoryPane(tk.Canvas):
         self.update_region()
 
     def update_region(self, _event=None):
+        if self._region_suspended:
+            return
         self.viewport.itemconfigure(self.window, width=max(1,self.viewport.winfo_width()))
         self.viewport.configure(scrollregion=(0, 0, self.viewport.winfo_width(),
             max(self.content.winfo_reqheight(), self.viewport.winfo_height())))
@@ -4459,7 +4485,7 @@ class HistoryWindow(tk.Toplevel):
         self._close_button = tk.Label(header, text="×", bg=NOTE_BG, fg=INK,
                                       font=(UI_FONT, 17), cursor="hand2")
         self._close_button.pack(side="right", padx=(8, 2))
-        self._close_button.bind("<Button-1>", lambda e: self.destroy())
+        self._close_button.bind("<Button-1>", lambda e: self.withdraw())
         self._minimize_button = tk.Label(header, text="−", bg=NOTE_BG, fg=INK,
                                          font=(UI_FONT, 17), cursor="hand2")
         self._minimize_button.pack(side="right", padx=(8, 2))
@@ -4499,15 +4525,23 @@ class HistoryWindow(tk.Toplevel):
         panes.columnconfigure(0, weight=1, uniform="panes")
         panes.columnconfigure(1, weight=2, uniform="panes")
         panes.rowconfigure(0, weight=1)
-        self.left = HistoryPane(panes)
-        self.left.grid(row=0,column=0,sticky="nsew",padx=(0,10))
+        # 每个标签一份独立列表：切换只换显示，不销毁重建行控件。
+        self._states = {}
+        for key in ("archives", "deletedNotes"):
+            pane = HistoryPane(panes)
+            pane.grid(row=0,column=0,sticky="nsew",padx=(0,10))
+            self._states[key] = {
+                "pane": pane, "built": False, "ids": [], "groups": {}, "info": {},
+                "names": [], "rows": {}, "check_vars": {}, "check_boxes": {},
+                "recycle_labels": {}, "labels": {}, "batch_layout": None,
+                "row_highlight": None, "highlighted_key": None}
         self.right = HistoryPane(panes)
         self.right.grid(row=0,column=1,sticky="nsew",padx=(10,0))
-        self._hotkey_borders = list(self.left.bars.values()) + list(self.right.bars.values())
+        self._activate(self.mode)
         self.canvas = self.right.viewport
         self.content = self.right.content
         self.bind("<MouseWheel>", self.wheel)
-        self.bind("<Escape>", lambda e: self.destroy())
+        self.bind("<Escape>", lambda e: self.withdraw())
         work = SettingsWindow._work_area(self)
         scale = max(1, round(self.winfo_fpixels("1i")) / 96)
         margin = max(8, round(16 * scale))
@@ -4521,8 +4555,10 @@ class HistoryWindow(tk.Toplevel):
             button.winfo_reqwidth() for button in self._batch_actions.winfo_children())
         tabs.bind("<Configure>", lambda e: self._layout_batch_actions(e.width))
         self.hint.bind("<Configure>", lambda e: self.hint.configure(wraplength=max(1, e.width), justify="left"))
-        self.refresh()
+        self._sync_pane(self.mode)
+        self._render_view()
         _show_after_layout(self)
+        self.after(400, self._warm_inactive)
 
     def _button_image(self, text):
         font = self._button_font
@@ -4540,120 +4576,290 @@ class HistoryWindow(tk.Toplevel):
         button._image = photo
         return button
 
-    def switch(self, mode):
+    def _activate(self, mode):
         self.mode = mode
-        self.selected_id = None
-        self.batch_mode = False
-        self.checked.clear()
-        self.refresh()
+        state = self._states[mode]
+        self.left = state["pane"]
+        tk.Misc.tkraise(self.left)
+        self.ids = state["ids"]
+        self.groups = state["groups"]
+        self.names = state["names"]
+        self.rows = state["rows"]
+        self._check_vars = state["check_vars"]
+        self._check_boxes = state["check_boxes"]
+        self._recycle_labels = state["recycle_labels"]
+        self._hotkey_borders = list(self.left.bars.values()) + list(self.right.bars.values())
 
-    def refresh(self, *, if_changed=False):
+    def _compute_model(self, mode):
         sources = {n["id"]: n for n in self.app.data["deletedNotes"] + self.app.data["notes"]}
-        groups = {}
-        stamp = "clearedAt" if self.mode == "archives" else "deletedAt"
-        records = sorted(reversed(self.app.data[self.mode]),
+        stamp = "clearedAt" if mode == "archives" else "deletedAt"
+        records = sorted(reversed(self.app.data[mode]),
                          key=lambda record: record.get(stamp, ""), reverse=True)
+        groups = {}
         for record in records:
-            key = record["noteId"] if self.mode == "archives" else record["id"]
+            key = record["noteId"] if mode == "archives" else record["id"]
             groups.setdefault(key, []).append(record)
         names = {}
-        for key, records in groups.items():
-            source = sources.get(key, records[0])
+        for key, group in groups.items():
+            source = sources.get(key, group[0])
             names[key] = (source.get("title") or "无标题", source.get("editedAt", ""))
-        ids = list(groups)
-        if if_changed and ids == self.ids and groups == self.groups and names == self._source_names:
+        titles = Counter(name for name, _ in names.values())
+        recycled = mode == "deletedNotes"
+        info = {}
+        for key, (name, edited_at) in names.items():
+            detail = suffix = ""
+            if recycled or titles[name] > 1:
+                timestamp = (edited_at or "").split(".")[0].replace("T", " ") or "编辑时间未知"
+                if recycled:
+                    detail = timestamp
+                    suffix = "\n" + timestamp
+                else:
+                    detail = suffix = " · " + timestamp
+            info[key] = (name, detail or None, suffix)
+        return list(groups), groups, info
+
+    def _sync_pane(self, mode):
+        state = self._states[mode]
+        ids, groups, info = self._compute_model(mode)
+        unchanged = (state["built"] and ids == state["ids"]
+                     and info == state["info"] and groups == state["groups"])
+        state["groups"] = groups
+        if unchanged:
+            if mode == self.mode:
+                self.groups = groups
+            return False
+        if not state["built"]:
+            state["ids"] = ids
+            self._build_rows(mode, info)
+        else:
+            self._diff_rows(mode, ids, info)
+        state["info"] = info
+        state["names"] = [info[key][0] + info[key][2] for key in ids]
+        state["built"] = True
+        if mode == self.mode:
+            self.ids = ids
+            self.groups = groups
+            self.names = state["names"]
+            self.checked.intersection_update(self.ids)
+            self.left.update_region()
+        return True
+
+    def _build_rows(self, mode, info):
+        state = self._states[mode]
+        pane = state["pane"]
+        for child in pane.content.winfo_children():
+            child.destroy()
+        for cache in ("rows", "check_vars", "check_boxes", "recycle_labels", "labels", "info"):
+            state[cache].clear()
+        state["row_highlight"] = None
+        state["highlighted_key"] = None
+        # Lock the pane so the rebuild never shows a blank or half-erased list;
+        # the final RedrawWindow paints the new state once.
+        hwnds = [pane.viewport.winfo_id(), pane.content.winfo_id()]
+        pane.suspend_region()
+        for hwnd in hwnds:
+            user32.SendMessageW(hwnd, 0x000B, 0, 0)  # WM_SETREDRAW
+        try:
+            for key in state["ids"]:
+                self._create_row(mode, key, info[key]).pack(fill="x", pady=4)
+            pane.content.update_idletasks()
+        finally:
+            for hwnd in hwnds:
+                if user32.IsWindow(hwnd):
+                    user32.SendMessageW(hwnd, 0x000B, 1, 0)
+            pane.resume_region()
+            if user32.IsWindow(pane.viewport.winfo_id()):
+                # RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN | RDW_UPDATENOW
+                user32.RedrawWindow(pane.viewport.winfo_id(), None, None, 0x0185)
+
+    def _diff_rows(self, mode, ids, info):
+        state = self._states[mode]
+        old_ids = state["ids"]
+        old_set, new_set = set(old_ids), set(ids)
+        state["ids"] = ids
+        for key in old_ids:
+            if key not in new_set:
+                self._destroy_row(mode, key)
+        pane = state["pane"]
+        pane.suspend_region()
+        try:
+            for index, key in enumerate(ids):
+                if key not in old_set:
+                    self._create_row(mode, key, info[key])
+                    self._pack_row_at(mode, key, index)
+                elif state["info"].get(key) != info[key]:
+                    old_info = state["info"][key]
+                    if (old_info[1] is None) != (info[key][1] is None):
+                        self._destroy_row(mode, key)
+                        self._create_row(mode, key, info[key])
+                        self._pack_row_at(mode, key, index)
+                    else:
+                        self._update_row_text(mode, key, info[key])
+        finally:
+            pane.resume_region()
+        packed = [key for key in ids if state["rows"][key].winfo_manager()]
+        if packed != ids:
+            for key in ids:
+                state["rows"][key].pack_forget()
+            for key in ids:
+                state["rows"][key].pack(fill="x", pady=4)
+
+    def _create_row(self, mode, key, info):
+        state = self._states[mode]
+        recycled = mode == "deletedNotes"
+        name, detail, _suffix = info
+        row = tk.Frame(state["pane"].content, bg=NOTE_BG, padx=5 if recycled else 6,
+                       pady=2 if recycled else 0)
+        row.bind("<Button-1>", lambda e,k=key: self.choose(k))
+        state["rows"][key] = row
+        value = state["check_vars"][key] = tk.BooleanVar(master=self, value=key in self.checked)
+        state["check_boxes"][key] = tk.Checkbutton(row, variable=value, bg=NOTE_BG,
+            activebackground=NOTE_BG, selectcolor=NOTE_BG, indicatoron=False,
+            image=self._check_images[False], selectimage=self._check_images[True],
+            command=lambda k=key, v=value: self.check(k,v.get()), bd=0, highlightthickness=0)
+        label = tk.Label(row, text=name, bg=NOTE_BG, fg="#2B2F36", anchor="w",
+                         justify="left", font=(UI_FONT,10), cursor="hand2",
+                         padx=1 if recycled else 0)
+        detail_label = None
+        if recycled:
+            row.columnconfigure(1, weight=1)
+            label.grid(row=0, column=1, sticky="ew")
+            detail_label = tk.Label(row, text=detail, bg=NOTE_BG, fg=INK,
+                                    anchor="w", justify="left", font=(UI_FONT, 9), cursor="hand2")
+            detail_label.grid(row=1, column=1, sticky="ew")
+            state["recycle_labels"][key] = (label, detail_label)
+            detail_label.bind("<Configure>", self._wrap_recycle_label)
+            detail_label.bind("<Button-1>", lambda e,k=key: self.choose(k))
+            label.bind("<Configure>", self._wrap_recycle_label)
+        else:
+            label.pack(side="left", fill="x", expand=detail is None)
+            if detail is None:
+                label.bind("<Configure>", lambda e, l=label: l.configure(wraplength=max(1,e.width-8)))
+            else:
+                row.bind("<Configure>", lambda e, l=label: l.configure(wraplength=max(1, e.width // 2)))
+                detail_label = tk.Label(row, text=detail, bg=NOTE_BG, fg=INK,
+                                        anchor="w", justify="left", font=(UI_FONT, 10), cursor="hand2")
+                detail_label.pack(side="left", fill="x", expand=True)
+                detail_label.bind("<Configure>", lambda e, l=detail_label: l.configure(wraplength=max(1, e.width-8)))
+                detail_label.bind("<Button-1>", lambda e,k=key: self.choose(k))
+        label.bind("<Button-1>", lambda e,k=key: self.choose(k))
+        state["labels"][key] = (label, detail_label)
+        return row
+
+    def _pack_row_at(self, mode, key, index):
+        state = self._states[mode]
+        following = None
+        for other in state["ids"][index+1:]:
+            candidate = state["rows"].get(other)
+            if candidate is not None and candidate.winfo_manager():
+                following = candidate
+                break
+        if following is not None:
+            state["rows"][key].pack(fill="x", pady=4, before=following)
+        else:
+            state["rows"][key].pack(fill="x", pady=4)
+
+    def _destroy_row(self, mode, key):
+        state = self._states[mode]
+        row = state["rows"].pop(key, None)
+        for cache in ("check_vars", "check_boxes", "recycle_labels", "labels", "info"):
+            state[cache].pop(key, None)
+        if key == state["highlighted_key"]:
+            state["row_highlight"] = None
+            state["highlighted_key"] = None
+        if row is not None:
+            row.destroy()
+
+    def _update_row_text(self, mode, key, info):
+        label, detail_label = self._states[mode]["labels"][key]
+        name, detail, _suffix = info
+        if str(label.cget("text")) != name:
+            label.configure(text=name)
+        if detail_label is not None and str(detail_label.cget("text")) != detail:
+            detail_label.configure(text=detail)
+
+    def _warm_inactive(self):
+        if not self.winfo_exists():
             return
-        self.groups = groups
-        self.ids = ids
-        self._source_names = names
+        # 窗口还不可见时不预热，避免把构造期间的时间算进打开耗时。
+        if not self.winfo_viewable() or float(self.attributes("-alpha")) < 1.0:
+            return
+        other = "deletedNotes" if self.mode == "archives" else "archives"
+        if self._states[other]["built"]:
+            return
+        records = self.app.data[other]
+        keys = {r["noteId"] if other == "archives" else r["id"] for r in records}
+        if len(keys) > 300:
+            return
+        # 预热时冻结整窗重绘，避免逐行布局把可见窗口重画多次。
+        hwnd = user32.GetParent(self.winfo_id()) or self.winfo_id()
+        user32.SendMessageW(hwnd, 0x000B, 0, 0)  # WM_SETREDRAW
+        try:
+            self._sync_pane(other)
+        finally:
+            if user32.IsWindow(hwnd):
+                user32.SendMessageW(hwnd, 0x000B, 1, 0)
+                # RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN | RDW_UPDATENOW
+                user32.RedrawWindow(hwnd, None, None, 0x0185)
+
+    def _render_view(self):
         for key, tab in self.tabs.items():
             tab.configure(fg="#1F2328" if key == self.mode else QUIET)
         self.hint.configure(text="清除的已完成待办会保存在这里，按便签整理。" if self.mode == "archives"
                             else "彻底删除便签不会删除已清除待办的记录。")
         self.checked.intersection_update(self.ids)
-        # Lock both panes' viewport and content so the rebuild never shows a blank or
-        # half-erased pane on screen; the final RedrawWindow paints the new state once.
-        hwnds = [pane.viewport.winfo_id() for pane in (self.left, self.right)]
-        hwnds += [pane.content.winfo_id() for pane in (self.left, self.right)]
-        for hwnd in hwnds:
-            user32.SendMessageW(hwnd, 0x000B, 0, 0)  # WM_SETREDRAW
-        try:
-            for child in self.left.content.winfo_children():
-                child.destroy()
-            self._row_highlight = None
-            self.names = []
-            self.rows = {}
-            self._check_vars = {}
-            self._check_boxes = {}
-            self._recycle_labels = {}
-            recycled = self.mode == "deletedNotes"
-            for key in self.ids:
-                name, edited_at = names[key]
-                suffix = ""
-                if recycled or sum(value[0] == name for value in names.values()) > 1:
-                    timestamp = (edited_at or "").split(".")[0].replace("T", " ") or "编辑时间未知"
-                    suffix = ("\n" if recycled else " · ") + timestamp
-                self.names.append(name + suffix)
-                row = tk.Frame(self.left.content, bg=NOTE_BG, padx=5 if recycled else 6,
-                               pady=2 if recycled else 0)
-                row.pack(fill="x", pady=4)
-                row.bind("<Button-1>", lambda e,k=key: self.choose(k))
-                self.rows[key] = row
-                value = self._check_vars[key] = tk.BooleanVar(master=self, value=key in self.checked)
-                self._check_boxes[key] = tk.Checkbutton(row, variable=value, bg=NOTE_BG, activebackground=NOTE_BG,
-                    indicatoron=False, image=self._check_images[False], selectimage=self._check_images[True],
-                    command=lambda k=key, v=value: self.check(k,v.get()), bd=0, highlightthickness=0)
-                label = tk.Label(row, text=name, bg=NOTE_BG, fg="#2B2F36", anchor="w",
-                                 justify="left", font=(UI_FONT,10), cursor="hand2")
-                if recycled:
-                    row.columnconfigure(1, weight=1)
-                    label.grid(row=0, column=1, sticky="ew")
-                else:
-                    label.pack(side="left", fill="x", expand=not suffix)
-                if suffix:
-                    detail = tk.Label(row, text=timestamp if recycled else suffix, bg=NOTE_BG, fg=INK,
-                                      anchor="w", justify="left", font=(UI_FONT, 9 if recycled else 10),
-                                      cursor="hand2")
-                    if recycled:
-                        detail.grid(row=1, column=1, sticky="ew")
-                        self._recycle_labels[key] = (label, detail)
-                    else:
-                        row.bind("<Configure>", lambda e, l=label: l.configure(wraplength=max(1, e.width // 2)))
-                        detail.pack(side="left", fill="x", expand=True)
-                    detail.bind("<Configure>", self._wrap_recycle_label if recycled else
-                                lambda e, l=detail: l.configure(wraplength=max(1, e.width-8)))
-                    detail.bind("<Button-1>", lambda e,k=key: self.choose(k))
-                if recycled:
-                    label.bind("<Configure>", self._wrap_recycle_label)
-                elif not suffix:
-                    label.bind("<Configure>", lambda e, l=label: l.configure(wraplength=max(1,e.width-8)))
-                label.bind("<Button-1>", lambda e,k=key: self.choose(k))
-            if self.selected_id not in self.ids:
-                self.selected_id = self.ids[0] if self.ids else None
-            self._show_batch_controls()
-            self.highlight_selection()
-            self.left.content.update_idletasks()
-            self.left.update_region()
-            self.select()
-        finally:
-            for hwnd in hwnds:
-                if user32.IsWindow(hwnd):
-                    user32.SendMessageW(hwnd, 0x000B, 1, 0)
-            for pane in (self.left, self.right):
-                if user32.IsWindow(pane.viewport.winfo_id()):
-                    # RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN | RDW_UPDATENOW
-                    user32.RedrawWindow(pane.viewport.winfo_id(), None, None, 0x0185)
+        if self.selected_id not in self.ids:
+            self.selected_id = self.ids[0] if self.ids else None
+        self._show_batch_controls()
+        self.highlight_selection()
+        self.left.content.update_idletasks()
+        self.left.update_region()
+        self.select()
+
+    def switch(self, mode):
+        self.selected_id = None
+        self.batch_mode = False
+        self.checked.clear()
+        state = self._states[mode]
+        for value in state["check_vars"].values():
+            if value.get():
+                value.set(False)
+        # Only relayout insets when the pane was left in batch mode; a normal list
+        # keeps its labels untouched across switches.
+        if state["batch_layout"]:
+            state["batch_layout"] = None
+        # Build/diff while the pane is still behind, then reveal it in one step.
+        self._sync_pane(mode)
+        self._activate(mode)
+        self.left.viewport.yview_moveto(0)
+        self._render_view()
+
+    def refresh(self, *, if_changed=False):
+        changed = self._sync_pane(self.mode)
+        if if_changed and not changed:
+            return
+        self._render_view()
 
     def _show_batch_controls(self):
         recycled = self.mode == "deletedNotes"
-        for key, box in self._check_boxes.items():
-            if recycled:
-                self._layout_recycle_check(key, box)
+        state = self._states[self.mode]
+        if recycled:
+            if state["batch_layout"] != self.batch_mode:
+                for key, box in self._check_boxes.items():
+                    self._layout_recycle_check(key, box)
+                state["batch_layout"] = self.batch_mode
             elif self.batch_mode:
-                row = self.rows[key]
-                box.pack(side="left", anchor="center", padx=(0, 6), before=row.pack_slaves()[0])
-            else:
-                box.pack_forget()
+                for key, box in self._check_boxes.items():
+                    if box.winfo_manager() != "place":
+                        self._layout_recycle_check(key, box)
+        else:
+            for key, box in self._check_boxes.items():
+                if self.batch_mode:
+                    if not box.winfo_manager():
+                        row = self.rows[key]
+                        box.pack(side="left", anchor="center", padx=(0, 6), before=row.pack_slaves()[0])
+                elif box.winfo_manager():
+                    box.pack_forget()
         self.batch_button.configure(text="取消批量" if self.batch_mode else "批量管理")
         self._layout_batch_actions(self._batch_actions.master.winfo_width())
         self._update_batch_controls()
@@ -4661,15 +4867,21 @@ class HistoryWindow(tk.Toplevel):
     def _layout_recycle_check(self, key, box):
         # Keep the label HWNDs in place so Tk cannot copy old text pixels when the inset changes.
         inset = box.winfo_reqwidth() + 6 if self.batch_mode else 0
+        padx = 1 + inset
         for label in self._recycle_labels[key]:
             width = label.winfo_width()
             if width <= 1:
                 width = self.left.viewport.winfo_width() - 2 * int(label.master.cget("padx"))
-            label.configure(padx=1 + inset, wraplength=max(1, width - inset - 8))
+            wraplength = max(1, width - inset - 8)
+            if int(label.cget("padx")) != padx:
+                label.configure(padx=padx)
+            if int(label.cget("wraplength")) != wraplength:
+                label.configure(wraplength=wraplength)
         if self.batch_mode:
-            box.place(x=0, rely=.5, anchor="w")
-            box.lift()
-        else:
+            if box.winfo_manager() != "place":
+                box.place(x=0, rely=.5, anchor="w")
+                box.lift()
+        elif box.winfo_manager():
             box.place_forget()
 
     def _wrap_recycle_label(self, event):
@@ -4685,24 +4897,33 @@ class HistoryWindow(tk.Toplevel):
         self.highlight_selection()
         self.select()
 
+    def _paint_row(self, key, color):
+        row = self.rows[key]
+        row.configure(bg=color)
+        for child in row.winfo_children():
+            child.configure(bg=color)
+            if isinstance(child, tk.Checkbutton):
+                child.configure(selectcolor=color, activebackground=color)
+
     def highlight_selection(self):
-        if self._row_highlight is not None:
-            self._row_highlight.destroy()
-            self._row_highlight = None
-        for key, row in self.rows.items():
-            color = "#E9EDF2" if key == self.selected_id else NOTE_BG
-            row.configure(bg=color)
-            for child in row.winfo_children():
-                child.configure(bg=color)
-                if isinstance(child, tk.Checkbutton):
-                    child.configure(selectcolor=color, activebackground=color)
-        if self.selected_id is not None:
-            row = self.rows[self.selected_id]
-            background = self._row_highlight = tk.Canvas(row, bg=NOTE_BG, bd=0, highlightthickness=0)
-            background.bind("<Button-1>", lambda e, key=self.selected_id: self.choose(key))
-            background.bind("<Configure>", self._draw_row_highlight)
-            background.place(x=0, y=0, relwidth=1, relheight=1, bordermode="ignore")
-            tk.Misc.lower(background)
+        state = self._states[self.mode]
+        if state["row_highlight"] is not None:
+            state["row_highlight"].destroy()
+            state["row_highlight"] = None
+        previous = state["highlighted_key"]
+        state["highlighted_key"] = None
+        if previous is not None and previous in self.rows:
+            self._paint_row(previous, NOTE_BG)
+        if self.selected_id is None or self.selected_id not in self.rows:
+            return
+        self._paint_row(self.selected_id, "#E9EDF2")
+        row = self.rows[self.selected_id]
+        background = state["row_highlight"] = tk.Canvas(row, bg=NOTE_BG, bd=0, highlightthickness=0)
+        background.bind("<Button-1>", lambda e, key=self.selected_id: self.choose(key))
+        background.bind("<Configure>", self._draw_row_highlight)
+        background.place(x=0, y=0, relwidth=1, relheight=1, bordermode="ignore")
+        tk.Misc.lower(background)
+        state["highlighted_key"] = self.selected_id
 
     def _draw_row_highlight(self, event):
         canvas = event.widget
