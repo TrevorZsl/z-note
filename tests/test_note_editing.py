@@ -2488,6 +2488,7 @@ class NoteEditingTests(unittest.TestCase):
         self.app._pump()
         win = self.app.history_win
         self.app.root.update()
+        win.rows[note_id].event_generate("<Button-1>")
         preview = win.content.winfo_children()[0]
         win._minimize_button.event_generate("<Button-1>")
         hwnd = main.user32.GetParent(win.winfo_id()) or win.winfo_id()
@@ -2510,6 +2511,7 @@ class NoteEditingTests(unittest.TestCase):
         win = main.HistoryWindow(self.app)
         self.app.history_win = win
         win.switch("deletedNotes")
+        win.choose(note_id)
         actions = win.content.winfo_children()[0]
         delete, restore = actions.winfo_children()
         self.assertEqual([delete.cget("text"), restore.cget("text")], ["彻底删除", "还原"])
@@ -2593,6 +2595,7 @@ class NoteEditingTests(unittest.TestCase):
         win = main.HistoryWindow(self.app)
         self.app.history_win = win
         self.app.root.update()
+        win.choose(note_id)
         self.assertFalse(any(isinstance(c, main.tk.Button) for c in win.content.winfo_children()))
         win.toggle_batch()
         win.check(note_id, True)
@@ -2601,6 +2604,7 @@ class NoteEditingTests(unittest.TestCase):
         self.assertFalse(self.app.data["archives"])
         self.assertEqual(len(self.app.data["deletedNotes"]), 1)
         win.switch("deletedNotes")
+        win.choose(note_id)
         actions = win.content.winfo_children()[0]
         buttons = [c.cget("text") for c in actions.winfo_children()]
         self.assertEqual(buttons, ["彻底删除", "还原"])
@@ -2693,6 +2697,7 @@ class NoteEditingTests(unittest.TestCase):
         self.app.history_win = win
         win.switch("deletedNotes")
         self.app.root.update()
+        win.choose("note-2")
         kept = {key: row for key, row in win.rows.items() if key != "note-2"}
         removed = win.rows["note-2"]
         with patch.object(main.messagebox, "askyesno", return_value=True):
@@ -2700,11 +2705,12 @@ class NoteEditingTests(unittest.TestCase):
         self.app.root.update()
         self.assertNotIn("note-2", win.rows)
         self.assertFalse(removed.winfo_exists())
+        self.assertIsNone(win.selected_id)
         for key, row in kept.items():
             self.assertIs(win.rows[key], row)
         win.destroy()
 
-    def test_history_switch_keeps_only_one_row_highlighted(self):
+    def test_history_selection_requires_click_after_open_or_switch(self):
         from copy import deepcopy
         self.app.data["archives"] = [
             {"id": f"archive-{i}", "noteId": f"note-{i}", "title": f"便签 {i}",
@@ -2717,16 +2723,35 @@ class NoteEditingTests(unittest.TestCase):
             dict(deepcopy(self.note.d), id=f"note-{i}", deletedAt="2026-11-10T12:00:00")
             for i in range(3)
         ]
-        win = main.HistoryWindow(self.app)
-        self.app.root.update()
-        win.choose(win.ids[-1])
-        win.switch("deletedNotes")
-        self.app.root.update()
-        win.choose(win.ids[-1])
-        win.switch("archives")
-        self.app.root.update()
-        highlighted = [key for key, row in win.rows.items() if row.cget("bg") == "#E9EDF2"]
-        self.assertEqual(highlighted, [win.selected_id])
+        self.app.q.put("history")
+        self.app._pump()
+        win = self.app.history_win
+
+        def assert_unselected():
+            self.app.root.update()
+            self.assertIsNone(win.selected_id)
+            self.assertFalse(win.checked)
+            self.assertTrue(all(row.cget("bg") == main.NOTE_BG for row in win.rows.values()))
+            self.assertEqual(win.content.winfo_children()[0].cget("text"), "请选择一条记录")
+
+        self.assertEqual(win.mode, "archives")
+        for mode in (None, "deletedNotes", "archives"):
+            if mode is not None:
+                win.switch(mode)
+            assert_unselected()
+            key = win.ids[-1]
+            win.rows[key].event_generate("<Button-1>")
+            self.assertEqual(win.selected_id, key)
+            highlighted = [key for key, row in win.rows.items() if row.cget("bg") == "#E9EDF2"]
+            self.assertEqual(highlighted, [key])
+            win.refresh()
+            self.assertEqual(win.selected_id, key)
+
+        win._close_button.event_generate("<Button-1>")
+        self.app.q.put("history")
+        self.app._pump()
+        self.assertIs(self.app.history_win, win)
+        assert_unselected()
         win.destroy()
 
     def test_history_close_hides_window_for_reuse(self):
@@ -2756,6 +2781,7 @@ class NoteEditingTests(unittest.TestCase):
         win = main.HistoryWindow(self.app)
         self.app.history_win = win
         select_all = win.select_all_button
+        win.choose(win.ids[0])
         self.assertEqual(win.batch_button.cget("text"), "批量管理")
         self.assertFalse(select_all.winfo_manager())
         win.batch_button.invoke()
@@ -2950,6 +2976,7 @@ class NoteEditingTests(unittest.TestCase):
         win = main.HistoryWindow(self.app)
         size = win.winfo_width(), win.winfo_height()
         win.switch("deletedNotes")
+        win.choose(note["id"])
         self.app.root.update()
         self.assertEqual((win.winfo_width(), win.winfo_height()), size)
         self.assertAlmostEqual(win.right.winfo_width() / win.left.winfo_width(), 2, delta=.15)
@@ -2984,6 +3011,7 @@ class NoteEditingTests(unittest.TestCase):
         self.app.data["deletedNotes"] = [deepcopy(note)]
         win = main.HistoryWindow(self.app)
         win.switch("deletedNotes")
+        win.choose(note["id"])
         self.app.root.update()
         sections = [child for child in win.content.winfo_children()
                     if isinstance(child, main.tk.Frame)][1:]
@@ -3163,14 +3191,14 @@ class NoteEditingTests(unittest.TestCase):
         def capture_initial_layout():
             show_controls()
             for label in win._recycle_labels["deleted"]:
-                initial.append((int(label.cget("wraplength")), label.winfo_reqheight()))
+                initial.append((label.winfo_pixels(label.cget("wraplength")), label.winfo_reqheight()))
 
         with patch.object(win, "_show_batch_controls", side_effect=capture_initial_layout):
             win.switch("deletedNotes")
         self.app.root.update()
         for (width, height), label in zip(initial, win._recycle_labels["deleted"]):
             self.assertGreater(width, 1)
-            self.assertEqual(width, int(label.cget("wraplength")))
+            self.assertEqual(width, label.winfo_pixels(label.cget("wraplength")))
             self.assertEqual(height, label.winfo_reqheight())
 
     def test_recycle_bin_stacks_edit_time_under_every_title(self):
@@ -3202,11 +3230,11 @@ class NoteEditingTests(unittest.TestCase):
         for widget in (row, title, detail):
             self.assertEqual(widget.cget("bg"), "#E9EDF2")
         label_positions = title.winfo_x(), detail.winfo_x()
-        title_padding = int(title.cget("padx"))
+        title_padding = title.winfo_pixels(title.cget("padx"))
         win.toggle_batch()
         self.app.root.update()
         self.assertEqual((title.winfo_x(), detail.winfo_x()), label_positions)
-        self.assertGreater(int(title.cget("padx")), title_padding)
+        self.assertGreater(title.winfo_pixels(title.cget("padx")), title_padding)
         row = win.rows["unique"]
         title = row.grid_slaves(row=0, column=1)[0]
         box = win._check_boxes["unique"]

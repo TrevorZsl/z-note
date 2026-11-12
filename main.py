@@ -4489,7 +4489,7 @@ class HistoryWindow(tk.Toplevel):
         self._close_button = tk.Label(header, text="×", bg=NOTE_BG, fg=INK,
                                       font=(UI_FONT, 17), cursor="hand2")
         self._close_button.pack(side="right", padx=(8, 2))
-        self._close_button.bind("<Button-1>", lambda e: self.withdraw())
+        self._close_button.bind("<Button-1>", self._close)
         self._minimize_button = tk.Label(header, text="−", bg=NOTE_BG, fg=INK,
                                          font=(UI_FONT, 17), cursor="hand2")
         self._minimize_button.pack(side="right", padx=(8, 2))
@@ -4813,7 +4813,7 @@ class HistoryWindow(tk.Toplevel):
                             else "彻底删除便签不会删除已清除待办的记录。")
         self.checked.intersection_update(self.ids)
         if self.selected_id not in self.ids:
-            self.selected_id = self.ids[0] if self.ids else None
+            self.selected_id = None
         self._show_batch_controls()
         self.highlight_selection()
         self.left.content.update_idletasks()
@@ -4875,11 +4875,11 @@ class HistoryWindow(tk.Toplevel):
         for label in self._recycle_labels[key]:
             width = label.winfo_width()
             if width <= 1:
-                width = self.left.viewport.winfo_width() - 2 * int(label.master.cget("padx"))
+                width = self.left.viewport.winfo_width() - 2 * label.master.winfo_pixels(label.master.cget("padx"))
             wraplength = max(1, width - inset - 8)
-            if int(label.cget("padx")) != padx:
+            if label.winfo_pixels(label.cget("padx")) != padx:
                 label.configure(padx=padx)
-            if int(label.cget("wraplength")) != wraplength:
+            if label.winfo_pixels(label.cget("wraplength")) != wraplength:
                 label.configure(wraplength=wraplength)
         if self.batch_mode:
             if box.winfo_manager() != "place":
@@ -4890,7 +4890,7 @@ class HistoryWindow(tk.Toplevel):
 
     def _wrap_recycle_label(self, event):
         label = event.widget
-        label.configure(wraplength=max(1, event.width - int(label.cget("padx")) - 7))
+        label.configure(wraplength=max(1, event.width - label.winfo_pixels(label.cget("padx")) - 7))
 
     def wheel(self, event):
         pane = self.left if event.x_root < self.right.winfo_rootx() else self.right
@@ -4900,6 +4900,11 @@ class HistoryWindow(tk.Toplevel):
         self.selected_id = key
         self.highlight_selection()
         self.select()
+
+    def _close(self, _event):
+        self.withdraw()
+        if self.selected_id is not None:
+            self.choose(None)
 
     def _paint_row(self, key, color):
         row = self.rows[key]
@@ -5031,7 +5036,7 @@ class HistoryWindow(tk.Toplevel):
         for child in self.content.winfo_children():
             child.destroy()
         if self.selected_id is None:
-            self.label("暂无记录")
+            self.label("请选择一条记录" if self.ids else "暂无记录")
             self.content.update_idletasks()
             self.right.update_region()
             return
