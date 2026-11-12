@@ -3899,7 +3899,7 @@ class SettingsWindow(tk.Toplevel):
                        image=self._check_images[False], selectimage=self._check_images[True],
                        compound="left", indicatoron=False, relief="flat", offrelief="flat",
                        bd=0, highlightthickness=0, cursor="hand2",
-                       command=self._save, justify="left", anchor="w")
+                       command=self._toggle_startup_display, justify="left", anchor="w")
         startup.pack(anchor="w", pady=4)
 
         section("外观")
@@ -4376,6 +4376,10 @@ class SettingsWindow(tk.Toplevel):
             messagebox.showwarning("z-note", f"更新开机自启失败。\n{exc}", parent=self)
             return
         settings["autostart"] = enabled
+        self._save()
+
+    def _toggle_startup_display(self):
+        self.app.data["settings"]["showOnStartup"] = self.v_show.get()
         self._save()
 
     def _op(self, v):

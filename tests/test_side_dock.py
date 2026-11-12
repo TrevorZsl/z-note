@@ -1155,6 +1155,42 @@ class SideDockTests(unittest.TestCase):
         self.assertEqual(len(self.dock.bookmarks), 3)
         self.assertTrue(all(not n._note_visible for n in self.dock.bookmarks.values()))
 
+    def test_startup_checkbox_persists_and_restores_note_visibility(self):
+        with tempfile.TemporaryDirectory(dir=Path(__file__).parent) as folder:
+            target = str(Path(folder) / "notes.json")
+            with patch.object(storage, "DATA_DIR", folder), patch.object(storage, "DATA_FILE", target), \
+                    patch.object(storage, "BACKUP_DIR", str(Path(folder) / "backup")), \
+                    patch.object(main, "save_data", storage.save_data), \
+                    patch.object(main, "load_data", storage.load_data):
+                self.app.data["settings"]["showOnStartup"] = True
+                self.click_bar()
+                self.click(self.dock.bookmarks["0"])
+                self.assertFalse(self.app.notes["0"].d["visible"])
+                for enabled in (False, True):
+                    settings = main.SettingsWindow(self.app)
+                    self.root.update()
+                    self.assertEqual(settings.v_show.get(), not enabled)
+                    checkbox = next(widget for canvas in settings.winfo_children()
+                        for frame in canvas.winfo_children() for widget in frame.winfo_children()
+                        if isinstance(widget, main.tk.Checkbutton)
+                        and str(widget.cget("variable")) == str(settings.v_show))
+                    checkbox.invoke()
+                    settings.destroy()
+                    self.wait(0.75)
+                    self.assertIs(storage.load_data()["settings"]["showOnStartup"], enabled)
+                    self.restart()
+                    for key, layer in (("0", "normal"), ("1", "top"), ("2", "bottom")):
+                        note = self.app.notes[key]
+                        visible = enabled or key != "0"
+                        self.assertIs(note.d["visible"], visible)
+                        self.assertEqual(note.state(), "normal" if visible else "withdrawn")
+                        self.assertEqual(note.d["z"], layer)
+                        self.assertEqual(bool(note.attributes("-topmost")), layer == "top")
+                    self.assertFalse(self.dock.expanded)
+                settings = main.SettingsWindow(self.app)
+                self.assertTrue(settings.v_show.get())
+                settings.destroy()
+
     def test_settings_round_trip(self):
         with tempfile.TemporaryDirectory(dir=Path(__file__).parent) as folder:
             target = str(Path(folder) / "notes.json")
