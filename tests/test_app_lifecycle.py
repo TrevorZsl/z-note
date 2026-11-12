@@ -78,6 +78,36 @@ class WelcomeNoteTests(unittest.TestCase):
 
 
 class AppLifecycleTests(unittest.TestCase):
+    def test_startup_repairs_autostart_only_when_enabled_and_needed(self):
+        executable = r"C:\Current Install\z-note.exe"
+        current = f'"{executable}"'
+        cases = [(True, None, True), (True, r'"C:\Old Install\z-note.exe"', True),
+                 (True, current, False), (False, None, False)]
+        for enabled, command, should_write in cases:
+            with self.subTest(enabled=enabled, command=command), \
+                    patch.object(main, "load_fonts"), \
+                    patch.object(main, "load_data", return_value={
+                        "settings": dict(main.DEFAULT_SETTINGS, autostart=enabled), "notes": []}), \
+                    patch.object(main.sys, "frozen", True, create=True), \
+                    patch.object(main.sys, "executable", executable), \
+                    patch.object(main.tk, "Tk", side_effect=RuntimeError("reached Tk")), \
+                    patch.object(main.winreg, "OpenKey") as open_key, \
+                    patch.object(main.winreg, "QueryValueEx") as query, \
+                    patch.object(main.winreg, "SetValueEx") as write:
+                if command is None:
+                    query.side_effect = FileNotFoundError
+                else:
+                    query.return_value = (command, main.winreg.REG_SZ)
+                with self.assertRaisesRegex(RuntimeError, "reached Tk"):
+                    main.App()
+                if should_write:
+                    self.assertEqual(write.call_args.args[1:],
+                                     (main.APP_NAME, 0, main.winreg.REG_SZ, current))
+                else:
+                    write.assert_not_called()
+                if not enabled:
+                    open_key.assert_not_called()
+
     def update_app(self):
         app = object.__new__(main.App)
         app.notes = {"note": Mock(d={}, _ime_active=False, _resizing=False, _title_editor=None,

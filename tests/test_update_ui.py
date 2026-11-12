@@ -180,6 +180,19 @@ class UpdateLayoutTests(unittest.TestCase):
         self.app.root.destroy()
         self.assertFalse(self.errors, self.errors)
 
+    def test_autostart_registry_failure_restores_checkbox(self):
+        settings = self.app.data["settings"]
+        for enabled in (True, False):
+            with self.subTest(enabled=enabled), \
+                    patch.object(main.winreg, "OpenKey", side_effect=PermissionError("拒绝访问")), \
+                    patch.object(main.messagebox, "showwarning") as warning:
+                settings["autostart"] = not enabled
+                self.window.v_boot.set(enabled)
+                self.window._toggle_boot()
+                self.assertEqual(self.window.v_boot.get(), not enabled)
+                self.assertEqual(settings["autostart"], not enabled)
+                self.assertIn("拒绝访问", warning.call_args.args[1])
+
     def test_long_update_error_stays_on_one_line_and_keeps_full_details(self):
         window = self.window
         cancel = window._update_cancel = threading.Event()

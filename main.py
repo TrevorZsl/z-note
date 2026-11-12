@@ -372,23 +372,34 @@ def check_images(master, size):
     return images
 
 # ---------- 开机启动 ----------
-def set_autostart(on):
-    key = r"Software\Microsoft\Windows\CurrentVersion\Run"
+AUTOSTART_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
+
+
+def autostart_command():
+    if getattr(sys, "frozen", False):
+        return f'"{sys.executable}"'
+    return f'"{sys.executable}" "{os.path.abspath(__file__)}"'
+
+
+def autostart_registered():
     try:
-        if on:
-            cmd = f'"{sys.executable}"' if getattr(sys, "frozen", False) else \
-                  f'"{sys.executable}" "{os.path.abspath(__file__)}"'
-            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, key, 0, winreg.KEY_SET_VALUE) as k:
-                winreg.SetValueEx(k, APP_NAME, 0, winreg.REG_SZ, cmd)
-        else:
-            try:
-                with winreg.OpenKey(winreg.HKEY_CURRENT_USER, key, 0, winreg.KEY_SET_VALUE) as k:
-                    winreg.DeleteValue(k, APP_NAME)
-            except FileNotFoundError:
-                pass
-        return True
-    except OSError:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, AUTOSTART_KEY) as key:
+            command, kind = winreg.QueryValueEx(key, APP_NAME)
+    except FileNotFoundError:
         return False
+    return kind == winreg.REG_SZ and os.path.normcase(command) == os.path.normcase(autostart_command())
+
+
+def set_autostart(on):
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, AUTOSTART_KEY, 0, winreg.KEY_SET_VALUE) as key:
+            if on:
+                winreg.SetValueEx(key, APP_NAME, 0, winreg.REG_SZ, autostart_command())
+            else:
+                winreg.DeleteValue(key, APP_NAME)
+    except FileNotFoundError:
+        if on:
+            raise
 
 # ---------- 悬停提示 ----------
 class Tooltip:
@@ -4330,11 +4341,15 @@ class SettingsWindow(tk.Toplevel):
             self._hotkey_hint.configure(text="快捷键已恢复默认值。", fg=QUIET)
 
     def _toggle_boot(self):
-        if set_autostart(self.v_boot.get()):
-            self.app.data["settings"]["autostart"] = self.v_boot.get()
-        else:
-            self.v_boot.set(False)
-            messagebox.showwarning("z-note", "写入开机自启失败。", parent=self)
+        settings = self.app.data["settings"]
+        enabled = self.v_boot.get()
+        try:
+            set_autostart(enabled)
+        except OSError as exc:
+            self.v_boot.set(settings["autostart"])
+            messagebox.showwarning("z-note", f"更新开机自启失败。\n{exc}", parent=self)
+            return
+        settings["autostart"] = enabled
         self._save()
 
     def _op(self, v):
@@ -5660,6 +5675,13 @@ class App:
         load_fonts()
         self.data = load_data()
         settings = self.data["settings"]
+        if settings["autostart"]:
+            try:
+                if not autostart_registered():
+                    set_autostart(True)
+            except OSError:
+                # 注册表暂时不可写时，保留用户选择，下次启动再尝试。
+                pass
         settings.setdefault("sideDock", True)
         settings.setdefault("sideDockY", 0.5)
         if settings.get("fontFamily") not in FONT_CHOICES:
