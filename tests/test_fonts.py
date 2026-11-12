@@ -36,7 +36,7 @@ class FontTests(unittest.TestCase):
                                                               "-family", "--", char), family)
 
     def test_selection_updates_notes_titles_and_new_notes_and_survives_restart(self):
-        note = next(iter(self.app.notes.values()))
+        note = self.app.new_note()
         note.d["title"] = "办公助手 ABC-11.06"
         note.d["lines"] = [{"type": "todo", "text": "中文 ABC", "checked": True}]
         note.render()

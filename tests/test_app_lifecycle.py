@@ -8,7 +8,7 @@ import main
 
 
 class WelcomeNoteTests(unittest.TestCase):
-    def restore_app(self, data):
+    def restore_app(self, data, *, show_welcome=False):
         app = object.__new__(main.App)
         app.data = data
         app.root = Mock(winfo_screenwidth=Mock(return_value=1920),
@@ -17,7 +17,7 @@ class WelcomeNoteTests(unittest.TestCase):
         app.show_notes = False
         self.enterContext(patch.object(main, "NoteWindow"))
         self.saved = self.enterContext(patch.object(main, "save_data"))
-        app._restore_notes()
+        app._restore_notes(show_welcome=show_welcome)
         return app
 
     def empty_data(self):
@@ -25,7 +25,7 @@ class WelcomeNoteTests(unittest.TestCase):
                 "archives": [], "deletedNotes": []}
 
     def test_fresh_install_persists_current_version_and_visible_guide(self):
-        app = self.restore_app(self.empty_data())
+        app = self.restore_app(self.empty_data(), show_welcome=True)
         self.assertEqual(len(app.data["notes"]), 1)
         guide = app.data["notes"][0]
         self.assertTrue(guide["visible"])
@@ -46,14 +46,7 @@ class WelcomeNoteTests(unittest.TestCase):
         data["deletedNotes"] = [{"id": "deleted"}]
         original = deepcopy(data)
         app = self.restore_app(data)
-        self.assertEqual(data["notes"][:-1], original["notes"])
-        self.assertEqual(data["archives"], original["archives"])
-        self.assertEqual(data["deletedNotes"], original["deletedNotes"])
-        self.assertTrue(data["notes"][-1]["visible"])
-        self.assertIn("Ctrl+Alt+L", "\n".join(line["text"] for line in data["notes"][-1]["lines"]))
-        saved = deepcopy(app.data)
-        self.restore_app(saved)
-        self.assertEqual(saved, data)
+        self.assertEqual(app.data, original)
         self.saved.assert_not_called()
 
     def test_deleted_guide_is_not_recreated_in_same_version(self):
@@ -63,17 +56,13 @@ class WelcomeNoteTests(unittest.TestCase):
         self.assertFalse(data["notes"])
         self.saved.assert_not_called()
 
-    def test_next_release_adds_only_one_new_guide(self):
+    def test_next_release_does_not_add_a_new_guide(self):
         data = self.empty_data()
-        self.restore_app(data)
-        old_guide = deepcopy(data["notes"][0])
+        self.restore_app(data, show_welcome=True)
+        original = deepcopy(data)
         with patch.object(main, "APP_VERSION", "9.9.9"):
             self.restore_app(data)
-            self.assertEqual(len(data["notes"]), 2)
-            self.assertEqual(data["notes"][0], old_guide)
-            self.assertEqual(data["welcomeVersion"], "9.9.9")
-            self.restore_app(data)
-            self.assertEqual(len(data["notes"]), 2)
+            self.assertEqual(data, original)
             self.saved.assert_not_called()
 
 

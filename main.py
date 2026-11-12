@@ -5927,6 +5927,7 @@ class NoteVisibilityMotion:
 class App:
     def __init__(self):
         load_fonts()
+        first_launch = not os.path.exists(DATA_FILE)
         self.data = load_data()
         settings = self.data["settings"]
         if settings["autostart"]:
@@ -5999,7 +6000,7 @@ class App:
         self.base_font = tkfont.Font(family=self.note_font_family(),
                                      size=self.data["settings"]["fontSize"])
 
-        self._restore_notes()
+        self._restore_notes(show_welcome=first_launch)
         self.dock = SideDock(self)
         self.dock.refresh()
         self._start_bottom_guard()
@@ -6012,8 +6013,8 @@ class App:
         self.root.protocol("WM_DELETE_WINDOW", lambda: None)
 
     # 便签管理
-    def _restore_notes(self):
-        if self.data.get("welcomeVersion") != APP_VERSION:
+    def _restore_notes(self, *, show_welcome=False):
+        if show_welcome:
             sw, sh = self.root.winfo_screenwidth(), self.root.winfo_screenheight()
             self.data["notes"].append({
                 "id": str(uuid.uuid4()), "x": sw - 480, "y": 90, "w": 440, "h": 560,

@@ -1052,36 +1052,42 @@ class NoteEditingTests(unittest.TestCase):
                     self.assertEqual(bool(note.attributes("-topmost")), z == "top")
                     self.assertEqual(note._temporarily_raised, show_on_startup and z == "bottom")
 
-    def test_first_startup_shows_welcome_note_by_default(self):
-        self.note.destroy()
-        self.app.notes.clear()
-        self.app.data["notes"].clear()
-        self.app.data.pop("welcomeVersion")
-        self.app._restore_notes()
-        self.note = next(iter(self.app.notes.values()))
-        self.app.root.update()
-        self.assertTrue(main.DEFAULT_SETTINGS["showOnStartup"])
-        self.assertTrue(self.app.show_notes)
-        self.assertTrue(self.note.d["visible"])
-        self.assertEqual(self.note.state(), "normal")
-        self.assertTrue(self.note.attributes("-topmost"))
-        self.assertEqual(self.note.winfo_width(), 440)
-        self.assertEqual(self.note.d["title"], "使用指南")
-        self.assertEqual(self.app.data["welcomeVersion"], main.APP_VERSION)
+    def test_welcome_guide_only_appears_on_first_launch(self):
+        from pathlib import Path
+        from tempfile import TemporaryDirectory
 
-    def test_upgrade_guide_is_visible_when_startup_notes_are_hidden(self):
-        old_id = self.note.d["id"]
-        self.note.d["visible"] = False
-        self.note.destroy()
-        self.app.notes.clear()
-        self.app.show_notes = False
-        self.app.data["welcomeVersion"] = "1.0.0"
-        self.app._restore_notes()
-        self.app.root.update()
-        self.assertEqual(self.app.notes[old_id].state(), "withdrawn")
-        guide = self.app.notes[self.app.data["notes"][-1]["id"]]
-        self.assertEqual(guide.state(), "normal")
-        self.assertTrue(guide.d["visible"])
+        with TemporaryDirectory(dir=Path(__file__).parent) as folder:
+            path = str(Path(folder) / "notes.json")
+            with patch.object(main, "DATA_FILE", path), patch.object(storage, "DATA_FILE", path), \
+                    patch.object(storage, "DATA_DIR", folder), \
+                    patch.object(storage, "BACKUP_DIR", str(Path(folder) / "backup")), \
+                    patch.object(main, "load_data", storage.load_data), \
+                    patch.object(main, "save_data", storage.save_data):
+                for version, expected_count in ((main.APP_VERSION, 1), ("9.9.9", 1), ("9.9.9", 0)):
+                    with self.subTest(version=version, expected_count=expected_count), \
+                            patch.object(main, "APP_VERSION", version):
+                        app = main.App()
+                        try:
+                            app.root.update()
+                            self.assertEqual(len(app.notes), expected_count)
+                            if version != "9.9.9":
+                                guide = next(iter(app.notes.values()))
+                                self.assertTrue(app.show_notes)
+                                self.assertTrue(guide.d["visible"])
+                                self.assertEqual(guide.state(), "normal")
+                                self.assertTrue(guide.attributes("-topmost"))
+                                self.assertEqual(guide.winfo_width(), 440)
+                                self.assertEqual(guide.d["title"], "使用指南")
+                                guide_id = guide.d["id"]
+                            elif expected_count:
+                                self.assertIn(guide_id, app.notes)
+                                app.data["notes"].clear()
+                                app.data.pop("welcomeVersion")
+                                app.save_now()
+                        finally:
+                            for job in app.root.tk.call("after", "info"):
+                                app.root.tk.call("after", "cancel", job)
+                            app.root.destroy()
 
     def test_show_all_raises_notes_and_preserves_pinning(self):
         import subprocess
