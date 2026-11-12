@@ -4571,63 +4571,78 @@ class HistoryWindow(tk.Toplevel):
         self.hint.configure(text="清除的已完成待办会保存在这里，按便签整理。" if self.mode == "archives"
                             else "彻底删除便签不会删除已清除待办的记录。")
         self.checked.intersection_update(self.ids)
-        for child in self.left.content.winfo_children():
-            child.destroy()
-        self._row_highlight = None
-        self.names = []
-        self.rows = {}
-        self._check_vars = {}
-        self._check_boxes = {}
-        self._recycle_labels = {}
-        recycled = self.mode == "deletedNotes"
-        for key in self.ids:
-            name, edited_at = names[key]
-            suffix = ""
-            if recycled or sum(value[0] == name for value in names.values()) > 1:
-                timestamp = (edited_at or "").split(".")[0].replace("T", " ") or "编辑时间未知"
-                suffix = ("\n" if recycled else " · ") + timestamp
-            self.names.append(name + suffix)
-            row = tk.Frame(self.left.content, bg=NOTE_BG, padx=5 if recycled else 6,
-                           pady=2 if recycled else 0)
-            row.pack(fill="x", pady=4)
-            row.bind("<Button-1>", lambda e,k=key: self.choose(k))
-            self.rows[key] = row
-            value = self._check_vars[key] = tk.BooleanVar(master=self, value=key in self.checked)
-            self._check_boxes[key] = tk.Checkbutton(row, variable=value, bg=NOTE_BG, activebackground=NOTE_BG,
-                indicatoron=False, image=self._check_images[False], selectimage=self._check_images[True],
-                command=lambda k=key, v=value: self.check(k,v.get()), bd=0, highlightthickness=0)
-            label = tk.Label(row, text=name, bg=NOTE_BG, fg="#2B2F36", anchor="w",
-                             justify="left", font=(UI_FONT,10), cursor="hand2")
-            if recycled:
-                row.columnconfigure(1, weight=1)
-                label.grid(row=0, column=1, sticky="ew")
-            else:
-                label.pack(side="left", fill="x", expand=not suffix)
-            if suffix:
-                detail = tk.Label(row, text=timestamp if recycled else suffix, bg=NOTE_BG, fg=INK,
-                                  anchor="w", justify="left", font=(UI_FONT, 9 if recycled else 10),
-                                  cursor="hand2")
+        # Lock both panes' viewport and content so the rebuild never shows a blank or
+        # half-erased pane on screen; the final RedrawWindow paints the new state once.
+        hwnds = [pane.viewport.winfo_id() for pane in (self.left, self.right)]
+        hwnds += [pane.content.winfo_id() for pane in (self.left, self.right)]
+        for hwnd in hwnds:
+            user32.SendMessageW(hwnd, 0x000B, 0, 0)  # WM_SETREDRAW
+        try:
+            for child in self.left.content.winfo_children():
+                child.destroy()
+            self._row_highlight = None
+            self.names = []
+            self.rows = {}
+            self._check_vars = {}
+            self._check_boxes = {}
+            self._recycle_labels = {}
+            recycled = self.mode == "deletedNotes"
+            for key in self.ids:
+                name, edited_at = names[key]
+                suffix = ""
+                if recycled or sum(value[0] == name for value in names.values()) > 1:
+                    timestamp = (edited_at or "").split(".")[0].replace("T", " ") or "编辑时间未知"
+                    suffix = ("\n" if recycled else " · ") + timestamp
+                self.names.append(name + suffix)
+                row = tk.Frame(self.left.content, bg=NOTE_BG, padx=5 if recycled else 6,
+                               pady=2 if recycled else 0)
+                row.pack(fill="x", pady=4)
+                row.bind("<Button-1>", lambda e,k=key: self.choose(k))
+                self.rows[key] = row
+                value = self._check_vars[key] = tk.BooleanVar(master=self, value=key in self.checked)
+                self._check_boxes[key] = tk.Checkbutton(row, variable=value, bg=NOTE_BG, activebackground=NOTE_BG,
+                    indicatoron=False, image=self._check_images[False], selectimage=self._check_images[True],
+                    command=lambda k=key, v=value: self.check(k,v.get()), bd=0, highlightthickness=0)
+                label = tk.Label(row, text=name, bg=NOTE_BG, fg="#2B2F36", anchor="w",
+                                 justify="left", font=(UI_FONT,10), cursor="hand2")
                 if recycled:
-                    detail.grid(row=1, column=1, sticky="ew")
-                    self._recycle_labels[key] = (label, detail)
+                    row.columnconfigure(1, weight=1)
+                    label.grid(row=0, column=1, sticky="ew")
                 else:
-                    row.bind("<Configure>", lambda e, l=label: l.configure(wraplength=max(1, e.width // 2)))
-                    detail.pack(side="left", fill="x", expand=True)
-                detail.bind("<Configure>", self._wrap_recycle_label if recycled else
-                            lambda e, l=detail: l.configure(wraplength=max(1, e.width-8)))
-                detail.bind("<Button-1>", lambda e,k=key: self.choose(k))
-            if recycled:
-                label.bind("<Configure>", self._wrap_recycle_label)
-            elif not suffix:
-                label.bind("<Configure>", lambda e, l=label: l.configure(wraplength=max(1,e.width-8)))
-            label.bind("<Button-1>", lambda e,k=key: self.choose(k))
-        if self.selected_id not in self.ids:
-            self.selected_id = self.ids[0] if self.ids else None
-        self._show_batch_controls()
-        self.left.content.update_idletasks()
-        self.left.update_region()
-        self.highlight_selection()
-        self.select()
+                    label.pack(side="left", fill="x", expand=not suffix)
+                if suffix:
+                    detail = tk.Label(row, text=timestamp if recycled else suffix, bg=NOTE_BG, fg=INK,
+                                      anchor="w", justify="left", font=(UI_FONT, 9 if recycled else 10),
+                                      cursor="hand2")
+                    if recycled:
+                        detail.grid(row=1, column=1, sticky="ew")
+                        self._recycle_labels[key] = (label, detail)
+                    else:
+                        row.bind("<Configure>", lambda e, l=label: l.configure(wraplength=max(1, e.width // 2)))
+                        detail.pack(side="left", fill="x", expand=True)
+                    detail.bind("<Configure>", self._wrap_recycle_label if recycled else
+                                lambda e, l=detail: l.configure(wraplength=max(1, e.width-8)))
+                    detail.bind("<Button-1>", lambda e,k=key: self.choose(k))
+                if recycled:
+                    label.bind("<Configure>", self._wrap_recycle_label)
+                elif not suffix:
+                    label.bind("<Configure>", lambda e, l=label: l.configure(wraplength=max(1,e.width-8)))
+                label.bind("<Button-1>", lambda e,k=key: self.choose(k))
+            if self.selected_id not in self.ids:
+                self.selected_id = self.ids[0] if self.ids else None
+            self._show_batch_controls()
+            self.highlight_selection()
+            self.left.content.update_idletasks()
+            self.left.update_region()
+            self.select()
+        finally:
+            for hwnd in hwnds:
+                if user32.IsWindow(hwnd):
+                    user32.SendMessageW(hwnd, 0x000B, 1, 0)
+            for pane in (self.left, self.right):
+                if user32.IsWindow(pane.viewport.winfo_id()):
+                    # RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN | RDW_UPDATENOW
+                    user32.RedrawWindow(pane.viewport.winfo_id(), None, None, 0x0185)
 
     def _show_batch_controls(self):
         recycled = self.mode == "deletedNotes"
@@ -4647,7 +4662,10 @@ class HistoryWindow(tk.Toplevel):
         # Keep the label HWNDs in place so Tk cannot copy old text pixels when the inset changes.
         inset = box.winfo_reqwidth() + 6 if self.batch_mode else 0
         for label in self._recycle_labels[key]:
-            label.configure(padx=1 + inset, wraplength=max(1, label.winfo_width() - inset - 8))
+            width = label.winfo_width()
+            if width <= 1:
+                width = self.left.viewport.winfo_width() - 2 * int(label.master.cget("padx"))
+            label.configure(padx=1 + inset, wraplength=max(1, width - inset - 8))
         if self.batch_mode:
             box.place(x=0, rely=.5, anchor="w")
             box.lift()

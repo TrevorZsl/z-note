@@ -3065,6 +3065,28 @@ class NoteEditingTests(unittest.TestCase):
         self.assertEqual(work.right, 1200)
         self.assertEqual(fallback.call_args.args[0], 48)
 
+    def test_recycle_switch_uses_available_width_before_first_layout(self):
+        self.app.data["deletedNotes"] = [
+            dict(self.note.d, id="deleted", title="回收站长标题" * 4,
+                 editedAt="2026-11-12T12:34:56")]
+        win = main.HistoryWindow(self.app)
+        self.app.root.update()
+        show_controls = win._show_batch_controls
+        initial = []
+
+        def capture_initial_layout():
+            show_controls()
+            for label in win._recycle_labels["deleted"]:
+                initial.append((int(label.cget("wraplength")), label.winfo_reqheight()))
+
+        with patch.object(win, "_show_batch_controls", side_effect=capture_initial_layout):
+            win.switch("deletedNotes")
+        self.app.root.update()
+        for (width, height), label in zip(initial, win._recycle_labels["deleted"]):
+            self.assertGreater(width, 1)
+            self.assertEqual(width, int(label.cget("wraplength")))
+            self.assertEqual(height, label.winfo_reqheight())
+
     def test_recycle_bin_stacks_edit_time_under_every_title(self):
         from copy import deepcopy
         note = deepcopy(self.note.d)
