@@ -4094,9 +4094,11 @@ class SettingsWindow(tk.Toplevel):
             label.configure(wraplength=max(1, content_width - 16), justify="left")
             if appearance_row.winfo_reqwidth() > content_width - 8:
                 label.pack_configure(side="top", anchor="w")
+        self._layout_update_status(content_width - 2 * f.winfo_pixels(f.cget("padx")))
         self.update_idletasks()
         content_height = f.winfo_reqheight()
-        height = min(content_height + 2 * RADIUS, available_h)
+        bottom_padding = 10
+        height = min(content_height + RADIUS + bottom_padding, available_h)
         body.configure(yscrollcommand=scrollbar.set)
         self.bind("<MouseWheel>", lambda e: body.yview_scroll(-int(e.delta / 120), "units"))
         border = cv.create_rectangle(0, 0, width - 1, height - 1,
@@ -4106,7 +4108,7 @@ class SettingsWindow(tk.Toplevel):
             if event.widget != self:
                 return
             w, h = event.width, event.height
-            viewport_height = max(1, h - 2 * RADIUS)
+            viewport_height = max(1, h - RADIUS - bottom_padding)
             # Reserve scrollbar space so wrapping does not oscillate at the overflow boundary.
             content_width = max(1, w - 2 * RADIUS - scrollbar.winfo_reqwidth() - 4)
             body.place(x=RADIUS, y=RADIUS, width=content_width, height=viewport_height)

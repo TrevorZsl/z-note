@@ -3270,6 +3270,20 @@ class NoteEditingTests(unittest.TestCase):
                 self.assertGreaterEqual(bounds[1], 0)
                 self.assertLessEqual(bounds[3], thumb.winfo_height())
 
+    def test_settings_height_fits_content_after_update_row_layout(self):
+        with patch.object(main.SettingsWindow, "_work_area", return_value=main.wintypes.RECT(0, 0, 1280, 1400)):
+            win = main.SettingsWindow(self.app)
+        self.app.root.update()
+        thumb = next(w for w in win.winfo_children() if isinstance(w, main.VerticalThumb))
+        body = thumb.target
+        content = next(w for w in body.winfo_children() if isinstance(w, main.tk.Frame))
+        path = content.winfo_children()[-1]
+        bottom_gap = win.winfo_rooty() + win.winfo_height() - path.winfo_rooty() - path.winfo_height()
+        self.assertFalse(thumb.winfo_ismapped())
+        self.assertEqual(body.winfo_height(), content.winfo_reqheight())
+        self.assertEqual(bottom_gap, 12)
+        win.destroy()
+
     def test_settings_scroll_thumb_tracks_drag_wheel_and_overflow(self):
         with patch.object(main.SettingsWindow, "_work_area", return_value=main.wintypes.RECT(0, 0, 1024, 600)):
             win = main.SettingsWindow(self.app)
