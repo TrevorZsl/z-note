@@ -202,8 +202,8 @@ class UpdateLayoutTests(unittest.TestCase):
         status = window._update_status
         self.assertEqual(status.cget("text"), "可更新至 v9.9.9")
         self.assertEqual(window._update_button.cget("text"), "立即更新")
-        link = status.master.master.pack_slaves()[-1]
-        self.assertEqual(link.cget("text"), "查看发布页面 ↗")
+        link = window._update_release_link
+        self.assertEqual(link.cget("text"), "查看发布页↗")
         initial_link_y = link.winfo_rooty()
         initial_height = status.winfo_height()
         error = ("Gitee：下载连接中断，请检查网络后重试。\n"
@@ -216,7 +216,7 @@ class UpdateLayoutTests(unittest.TestCase):
         self.assertLessEqual(status.winfo_x() + status.winfo_width(), status.master.winfo_width())
         self.assertGreater(details.winfo_x(), status.winfo_x() + status.winfo_width())
         self.assertEqual(link.winfo_rooty(), initial_link_y)
-        self.assertGreater(link.winfo_rooty(), status.winfo_rooty() + status.winfo_height())
+        self.assertGreater(link.winfo_rootx(), details.winfo_rootx() + details.winfo_width())
         self.assertEqual(window._update_button.cget("state"), "normal")
         status.master.master.master.yview_moveto(1)
         self.app.root.update()
@@ -235,9 +235,19 @@ class UpdateLayoutTests(unittest.TestCase):
         window = self.window
         button, status = window._update_button, window._update_status
         cancel = window._update_cancel_button
-        link = status.master.master.pack_slaves()[-1]
+        link = window._update_release_link
         initial_link_y = link.winfo_rooty()
-        self.assertEqual(initial_link_y - (button.winfo_rooty() + button.winfo_height()), 8)
+        content = status.master.master
+        data_heading, path = content.pack_slaves()[-2:]
+        self.assertEqual(data_heading.winfo_children()[0].cget("text"), "数据")
+        self.assertEqual(path.cget("text"), main.DATA_FILE)
+        self.assertGreater(data_heading.winfo_rooty(), initial_link_y + link.winfo_height())
+        version = next(label for frame in content.pack_slaves()
+                       for label in frame.winfo_children()
+                       if isinstance(label, main.tk.Label)
+                       and label.cget("text") == f"z-note {main.APP_VERSION}")
+        self.assertEqual(link.winfo_rootx() + link.winfo_width(),
+                         version.winfo_rootx() + version.winfo_width())
         release = updater.Release("9.9.9", "演示说明", "setup.exe", "url", 100, "sums")
         self.app._available_update = release
 
@@ -248,6 +258,10 @@ class UpdateLayoutTests(unittest.TestCase):
             button_center = button.winfo_rooty() + button.winfo_height() / 2
             status_center = status.winfo_rooty() + status.winfo_height() / 2
             self.assertAlmostEqual(status_center, button_center, delta=1)
+            self.assertAlmostEqual(link.winfo_rooty() + link.winfo_height() / 2,
+                                   button_center, delta=1)
+            rightmost = window._update_details if window._update_error else status
+            self.assertGreater(link.winfo_rootx(), rightmost.winfo_rootx() + rightmost.winfo_width())
             self.assertEqual(link.winfo_rooty(), initial_link_y)
 
         with patch.object(self.app, "_check_for_update"), \
@@ -301,7 +315,7 @@ class UpdateLayoutTests(unittest.TestCase):
         with patch.object(main.threading, "Thread"):
             button.invoke()
         window._receive_update(window._update_cancel, "progress", (5 * 1048576, 10 * 1048576))
-        fixed_width = button.winfo_reqwidth() + cancel.winfo_reqwidth() + 16
+        fixed_width = button.winfo_reqwidth() + cancel.winfo_reqwidth() + 24
         fixed_width += window.winfo_width() - status.master.winfo_width()
         measure = window._update_status_font.measure
         height = window.winfo_height()
@@ -312,6 +326,9 @@ class UpdateLayoutTests(unittest.TestCase):
             self.app.root.update()
             self.assertEqual(status.cget("text"), expected)
             self.assertLessEqual(status.winfo_x() + status.winfo_width(), status.master.winfo_width())
+            link = window._update_release_link
+            self.assertGreater(link.winfo_y(), button.winfo_y() + button.winfo_height())
+            self.assertEqual(link.winfo_x() + link.winfo_width(), status.master.winfo_width())
 
     def test_startup_check_uses_worker_and_remembers_result_across_settings(self):
         release = updater.Release("9.9.9", "演示说明", "setup.exe", "url", 100, "sums")

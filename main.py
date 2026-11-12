@@ -3989,11 +3989,6 @@ class SettingsWindow(tk.Toplevel):
         self._hotkey_hint = hotkey_hint
         hotkey_hint.pack(fill="x", pady=(8, 0))
         self.bind("<Destroy>", lambda e: e.widget == self and setattr(app, "_hotkey_capture", None))
-        section("数据")
-        path = tk.Label(f, text=DATA_FILE, bg=NOTE_BG, fg="#A9AFB6",
-                        font=(UI_FONT, 9), wraplength=460, justify="left")
-        path.pack(anchor="w", pady=(8, 0))
-
         update_heading = section("关于与更新")
         tk.Label(update_heading, text=f"z-note {APP_VERSION}", bg=NOTE_BG, fg=QUIET,
                  font=(UI_FONT, 9)).pack(side="right")
@@ -4022,9 +4017,9 @@ class SettingsWindow(tk.Toplevel):
         # Reserve enough width for every state without changing the window width.
         self._update_button = update_button("立即更新", self._update_action)
         self._update_button.configure(text="检查更新")
-        self._update_button.grid(row=0, column=0, sticky="nw", padx=(0, 8))
+        self._update_button.grid(row=0, column=0, sticky="w", padx=(0, 12))
         self._update_cancel_button = update_button("取消", self._cancel_update)
-        self._update_cancel_button.grid(row=0, column=1, sticky="nw", padx=(0, 8))
+        self._update_cancel_button.grid(row=0, column=1, sticky="w", padx=(0, 12))
         self._update_cancel_button.grid_remove()
         self._update_status_choices = ("点击检查正式版本更新。",)
         self._update_error = None
@@ -4042,11 +4037,16 @@ class SettingsWindow(tk.Toplevel):
         self._update_details.grid_remove()
         actions.grid_columnconfigure(4, weight=1)
         actions.bind("<Configure>", lambda event: self._layout_update_status(event.width))
-        release_link = tk.Label(f, text="查看发布页面 ↗", bg=NOTE_BG, fg=QUIET,
-                                font=(UI_FONT, 9), cursor="hand2")
-        release_link.pack(anchor="w", pady=(8, 0))
-        release_link.bind("<Button-1>", lambda _e: webbrowser.open(updater.RELEASES_URL))
+        self._update_release_link = tk.Label(actions, text="查看发布页↗", bg=NOTE_BG,
+                                             fg=QUIET, font=(UI_FONT, 9), cursor="hand2")
+        self._update_release_link.grid(row=0, column=5, sticky="e", padx=(12, 0))
+        self._update_release_link.bind("<Button-1>", lambda _e: webbrowser.open(updater.RELEASES_URL))
         self.bind("<Destroy>", self._destroy_update, add="+")
+
+        section("数据")
+        path = tk.Label(f, text=DATA_FILE, bg=NOTE_BG, fg=QUIET,
+                        font=(UI_FONT, 9), wraplength=460, justify="left")
+        path.pack(anchor="w")
 
         def layout_hotkeys(content_width):
             for hotkey_row, label, entry in hotkey_rows:
@@ -4065,7 +4065,9 @@ class SettingsWindow(tk.Toplevel):
         margin = max(8, round(16 * scale))
         available_w, available_h = work.right - work.left - 2*margin, work.bottom - work.top - 2*margin
         width = min(max(round(480 * scale), f.winfo_reqwidth() + 2 * RADIUS), available_w)
-        content_width = width - 2 * RADIUS
+        scrollbar = VerticalThumb(self, body, NOTE_BG)
+        scrollbar.configure(width=8)
+        content_width = max(1, width - 2 * RADIUS - scrollbar.winfo_reqwidth() - 4)
         # 文本按实际可用宽度换行，窗口高度在换行完成后再计算。
         startup.configure(wraplength=max(1, content_width - self._check_images[False].width() - 16))
         hotkey_hint.configure(wraplength=max(1, content_width - 16))
@@ -4080,8 +4082,6 @@ class SettingsWindow(tk.Toplevel):
         self.update_idletasks()
         content_height = f.winfo_reqheight()
         height = min(content_height + 2 * RADIUS, available_h)
-        scrollbar = VerticalThumb(self, body, NOTE_BG)
-        scrollbar.configure(width=8)
         body.configure(yscrollcommand=scrollbar.set)
         self.bind("<MouseWheel>", lambda e: body.yview_scroll(-int(e.delta / 120), "units"))
         border = cv.create_rectangle(0, 0, width - 1, height - 1,
@@ -4192,12 +4192,23 @@ class SettingsWindow(tk.Toplevel):
             updater.remove_download(self._update_download[0])
 
     def _layout_update_status(self, content_width):
-        width = content_width - self._update_button.winfo_reqwidth() - 8
+        width = content_width - self._update_button.winfo_reqwidth() - 12
+        measure = self._update_status_font.measure
+        link = self._update_release_link
+        link_width = link.winfo_reqwidth() + 12
+        # Keep the link in place as cancel, progress, and error details come and go.
+        inline = width >= link_width + max(
+            self._update_cancel_button.winfo_reqwidth() + 12 + measure("50%（5.0 / 10.0 MB）"),
+            self._update_details.winfo_reqwidth() + 6 + measure("下载失败，请重试。"),
+        )
+        link.grid_configure(row=0 if inline else 1, columnspan=1 if inline else 6,
+                            column=5 if inline else 0, pady=0 if inline else (8, 0))
+        if inline:
+            width -= link_width
         if self._update_cancel_button.winfo_manager():
-            width -= self._update_cancel_button.winfo_reqwidth() + 8
+            width -= self._update_cancel_button.winfo_reqwidth() + 12
         if self._update_error is not None:
             width -= self._update_details.winfo_reqwidth() + 6
-        measure = self._update_status_font.measure
         text = next((choice for choice in self._update_status_choices if measure(choice) <= width), "")
         if not text and measure("…") <= width:
             prefix = self._update_status_choices[-1]
