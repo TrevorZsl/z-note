@@ -5048,7 +5048,6 @@ class HistoryWindow(tk.Toplevel):
             actions.pack(anchor="w", pady=(0,12))
             self.button(actions, "彻底删除", lambda: self.delete_record(note["id"])).pack(side="left")
             self.button(actions, "还原", lambda: self.app.recover_note(note["id"])).pack(side="left", padx=(8,0))
-            self.label(note.get("title") or "无标题", True)
             if note.get("twoColumn"):
                 for key, name in (("lines", "左栏"), ("lines2", "右栏")):
                     section = tk.Frame(self.content, bg=NOTE_BG)

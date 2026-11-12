@@ -3204,7 +3204,7 @@ class NoteEditingTests(unittest.TestCase):
     def test_recycle_bin_stacks_edit_time_under_every_title(self):
         from copy import deepcopy
         note = deepcopy(self.note.d)
-        note.update(id="second", title="同名", editedAt="2026-10-28T12:34:56.123456")
+        note.update(id="second", title="同名 ABC 123", editedAt="2026-10-28T12:34:56.123456")
         first = dict(note, id="first", editedAt="2026-10-28T11:22:33.654321")
         unique = dict(note, id="unique", title="很长的唯一标题" * 4, editedAt="2026-10-28T10:20:30")
         old = dict(note, id="old", title="")
@@ -3214,8 +3214,8 @@ class NoteEditingTests(unittest.TestCase):
         win.switch("deletedNotes")
         self.app.root.update()
         for key, name, timestamp in (
-                ("first", "同名", "2026-10-28 11:22:33"),
-                ("second", "同名", "2026-10-28 12:34:56"),
+                ("first", note["title"], "2026-10-28 11:22:33"),
+                ("second", note["title"], "2026-10-28 12:34:56"),
                 ("unique", unique["title"], "2026-10-28 10:20:30"),
                 ("old", "无标题", "编辑时间未知")):
             with self.subTest(key=key):
@@ -3227,6 +3227,12 @@ class NoteEditingTests(unittest.TestCase):
         detail, title = row.grid_slaves()
         detail.event_generate("<Button-1>")
         self.assertEqual(win.selected_id, "second")
+        for char in "同A1":
+            self.assertEqual(win.tk.call("font", "actual", title.cget("font"), "-weight", "--", char), "normal")
+        preview_labels = [widget.cget("text") for widget in win.content.winfo_children()
+                          if isinstance(widget, main.tk.Label)]
+        self.assertNotIn(note["title"], preview_labels)
+        self.assertIn(note["lines"][0]["text"], preview_labels)
         for widget in (row, title, detail):
             self.assertEqual(widget.cget("bg"), "#E9EDF2")
         label_positions = title.winfo_x(), detail.winfo_x()
