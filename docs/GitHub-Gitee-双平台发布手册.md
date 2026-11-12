@@ -1,95 +1,225 @@
 # GitHub 与 Gitee 双平台发布手册
 
-这份手册供维护者和其他 Agent 接手发布。推送一个版本标签，构建一次，把同一份安装包和校验文件上传到 GitHub 草稿与 Gitee 预览版。两个平台验收通过后，由维护者确认正式发布。
+适用于 z-note。一次标签构建生成一份安装包和一份 `SHA256SUMS`，上传到 GitHub 草稿和 Gitee 预览版。下载两边的附件，与原构建逐一比对 SHA-256 后交付链接。正式发布由维护者操作。
 
-## 交给 Agent 的任务说明
+> 给执行 Agent：按本文发布指定版本。先查已有标签、Actions 运行和两边的发行版，优先接续已完成的工作。新版本用标签触发构建。在 Actions 构建期间准备本机 Windows Runner。构建和 GitHub 草稿成功后，如果云端 Gitee 任务仍在运行、安装包尚未就绪、且本机 Runner 已在线，切换到原产物补传。两边下载验收完成后再交付。
 
-> 按本手册为 `<项目>` 准备 `<版本号>` 的双平台发布。先检查现有工作流、Git 差异、版本号和远端标签。用同一次构建生成安装包和 `SHA256SUMS`，将两份文件上传到 GitHub 草稿和 Gitee 预览版。任一侧失败时保留成功的一侧，从原构建产物补传。核对两边下载到的文件与原构建哈希一致后，交付两个待发布页面。正式发布由维护者确认。
+## 1. 查版本和现有状态
 
-交接时提供源码仓、两个发布仓、目标版本、发布分支和现有打包入口。有现成工作流就沿用它。移植到其他项目时，替换仓库路径、版本号来源、安装包名称、测试命令和打包命令。令牌由维护者配置为 Actions Secrets。
-
-## 仓库和凭据
-
-| 用途 | z-note 实例 | 移植时替换 |
-| --- | --- | --- |
-| 私有源码仓与 Actions | `TrevorZsl/z-note` | 源码仓，承载工作流和构建产物 |
-| GitHub 发布仓 | `TrevorZsl/z-note-releases` | 公开仓，初始化默认分支 |
-| Gitee 发布仓 | `trevorzsl/z-note-releases` | 公开仓，初始化默认分支 |
-| 版本与说明 | `version.py`、`releases/<版本>.md` | 版本来源与公开更新说明 |
-| 打包入口 | `scripts/package.ps1 -Installer` | 项目自己的打包命令 |
-| 工作流 | `.github/workflows/release.yml` | 双平台发布实现参考 |
-
-两个公开发布仓仅承载公开说明和安装附件。GitHub 的 `RELEASE_TOKEN` 使用仅能写入目标发布仓的细粒度令牌，仓库 `Contents` 权限为读写。Gitee 的 `GITEE_TOKEN` 使用对目标发布仓有写权限的私人令牌。两者都放在**源码仓**的 **Settings → Secrets and variables → Actions**。源码仓自带的 `GITHUB_TOKEN` 用于读取该仓的 Actions 构建产物。上传令牌只注入对应的上传步骤，保持在 Secrets 中。 [GitHub Actions Secrets](https://docs.github.com/en/actions/how-tos/write-workflows/choose-what-workflows-do/use-secrets)
-
-## 配置工作流
-
-1. **构建任务**监听 `v*.*.*` 标签。确认标签和程序版本一致，确认公开说明存在，再运行项目测试。z-note 用 PyInstaller 打包、Inno Setup 生成安装包。打包后按 `<64 位小写 SHA-256><两个空格><文件名>` 写入 `SHA256SUMS`。将安装包和校验文件保存为同一个 Actions Artifact，例如 `z-note-2.1.8`。
-2. **GitHub 上传任务**下载这个 Artifact，用 `gh release create --draft` 把两份附件和更新说明传到公开发布仓。草稿上传失败时，先核对已有草稿和附件，再用同一次构建的文件补齐。
-3. **Gitee 上传任务**下载同一个 Artifact，校验本地文件后，通过 Gitee v5 API 查找目标标签。缺少发行版时创建 `prerelease: true` 的预览版，目标提交选择**发布仓**的默认分支。按 `SHA256SUMS`、安装包的顺序上传附件。先校验同名已有附件的大小和 SHA-256，匹配就复用，缺少就补传，冲突就停下来检查。Gitee 预览版在公开仓可见，z-note 更新器会过滤它。
-4. **仅补传 Gitee 的入口**使用 `workflow_dispatch`。输入 `source_run` 为原标签触发的构建运行编号，可选输入 `gitee_runner` 指定一个已在线的 Runner 标签。校验原运行来自同一源码仓、同一构建工作流及版本标签，并确认 Artifact 仍存在。补传只执行 Gitee 任务，原安装包和 GitHub 草稿继续使用。
-
-Gitee 附件接口是 `POST https://gitee.com/api/v5/repos/<owner>/<repo>/releases/<release_id>/attach_files`，实测可用的请求是 `multipart/form-data`，表单字段为 `access_token` 和 `file`。检查 HTTP 状态、返回的文件名和字节数。日志保留状态码、已发送字节数和耗时，避免输出令牌、完整请求体或带凭据的 URL。Gitee 普通仓库公布的单附件上限为 100 MB，总附件上限为 1 GB，长期发布时也要检查剩余配额。 [Gitee 发行版说明](https://help.gitee.com/repository/release/create) · [Gitee v5 API](https://gitee.com/api/v5/swagger)
-
-实现参考见 [z-note 发布工作流](../.github/workflows/release.yml) 和 [z-note 打包脚本](../scripts/package.ps1)。
-
-## 发一个新版本
-
-先确认工作区与待发布提交一致，检查远端没有同名标签和发行版，再把项目版本、发布说明、工作流推送到源码仓。然后在对应提交上创建并推送标签。以下以尚未使用的 `2.1.9` 为示例，实际执行时替换为本次版本。
+在源码仓根目录用 PowerShell 执行。以下变量供后续命令复用。
 
 ~~~powershell
-git ls-remote origin refs/tags/v2.1.9
-# 确认命令执行成功且远端没有同名标签后再执行。
-git tag -a v2.1.9 -m 'z-note 2.1.9'
-git push origin refs/tags/v2.1.9
-gh run list --repo TrevorZsl/z-note --workflow release.yml --branch v2.1.9 --limit 1
+$version = '<目标版本，例如 2.2.8>'
+$tag = "v$version"
+$sourceRepo = 'TrevorZsl/z-note'
+$githubRepo = 'TrevorZsl/z-note-releases'
+$giteeRepo = 'trevorzsl/z-note-releases'
+$installer = "z-note-setup-$version.exe"
+$notes = "releases/$version.md"
+$giteeApi = "https://gitee.com/api/v5/repos/$giteeRepo/releases/tags/$tag"
+$giteePage = "https://gitee.com/$giteeRepo/releases/tag/$tag"
+
+git status --short
+git remote -v
+git log -5 --oneline
+git tag --list $tag
+git ls-remote origin "refs/tags/$tag" "refs/tags/$tag^{}"
+gh run list -R $sourceRepo -w release.yml -b $tag -e push -L 10 --json databaseId,headSha,status,conclusion,url
+gh release view $tag -R $githubRepo --json tagName,isDraft,url,assets
+curl.exe --noproxy gitee.com,foruda.gitee.com -sS --connect-timeout 10 --max-time 30 -w "`nHTTP %{http_code}`n" $giteeApi
 ~~~
 
-记下原构建运行编号，并跟到构建、`github-draft` 和 `gitee-preview` 三个任务结束。上传失败时先读失败步骤和平台附件列表。只补传失败的一侧，避免同时运行多个任务写入同一版本的附件。已正式发布的版本使用新标签修复，保留原标签和原附件。
+- 确认 `origin` 指向私有源码仓。源码版本在 `version.py` 的 `APP_VERSION`，公开说明在 `releases/<版本>.md`。把版本和说明准备在待发布提交上。确认发布分支和提交，保留工作区里的无关改动。补传用的远端 `main` 也要包含目标版本说明和支持 `source_run` 的工作流。
+- 已有远端标签时，核对它指向的提交（附注标签用 `^{}` 那一行）。以同标签、同提交的原始 `push` 运行继续。已有同名发行版时先查状态和附件。任一平台已正式发布且发现产物冲突时，报告冲突，用新版本处理修复。
+- 查询失败时区分权限、代理和不存在。GitHub 草稿需要有权访问发布仓的登录。Gitee 匿名接口返回 404 时，再用已授权账号查看发布页或已认证 API，确认是否有预览版。沙箱阻止访问本机代理时，用获准联网的终端执行；保留系统代理设置。
+- 纯发版复用已完成的功能回归。现有 Actions 自动运行 `test_updater.py`、`test_storage.py`、`test_app_lifecycle.py` 和 `test_update_ui.py`，保留这道构建检查。无需为了上传再本地重跑全套、重做 UI 回归或先手工打一遍包。新增代码仍按仓库规则验证。安装器或应用内更新本身有改动时，按改动做一次对应的 Windows 冒烟验证；Gitee 仅补传时直接验收附件。
 
-## 优先用 Windows Runner 直连 Gitee
+日常发布沿用源码仓 Actions Secrets 中已配置的 `RELEASE_TOKEN` 和 `GITEE_TOKEN`。前者需要 GitHub 发布仓 `Contents: Read and write`，后者需要 Gitee 发布仓写权限。一次性 Runner 的注册权限来自操作者的 GitHub CLI 登录。令牌留在对应 Secrets 或当前进程变量内。
 
-`v2.1.8` 的真实案例中，云端创建了预览版，`SHA256SUMS` 也上传成功，但安装包约 65.5 MB，一次重试在 600 秒时只记录了 11.7 MB 已发送，附件列表仍缺少安装包。这两个数字无法区分持续低速与中途卡住。用一次性 Windows Runner 从本机直连 Gitee 后，补传成功，整个补传任务用时 48 秒，随后从 Gitee 下载回读，两份附件的 SHA-256 均与 GitHub 一致。 [云端超时日志](https://github.com/TrevorZsl/z-note/actions/runs/42600426666) · [本机补传成功日志](https://github.com/TrevorZsl/z-note/actions/runs/42603403228)
+## 2. 只触发一次构建
 
-`v2.2.1` 再次遇到云端上传超时。复用本机 `.runtime-deps/gitee-actions-runner` 的官方 Runner 后补传成功，两边附件回读的 SHA-256 与原构建一致。发版前先确认本机 Runner 能否使用。若已有在线的专用 Runner 和仓库变量，标签触发的 Gitee 任务会直接走本机。否则，构建与 GitHub 草稿任务成功后，若 Gitee 仍缺安装包且一次性 Runner 已在线，就结束原运行中剩下的 Gitee 云端任务，再用原构建产物补传。Gitee 附件已齐全时直接验收，本机暂不可用时继续跟踪云端上传。 [原构建及超时日志](https://github.com/TrevorZsl/z-note/actions/runs/42649463586) · [本机补传成功日志](https://github.com/TrevorZsl/z-note/actions/runs/42651676794)
+新版本且确认无同名远端标签时，先推送已确认的发布提交，再在它上面打标签。以下以发布分支为 `main` 为例。已有正确的本地标签时可直接推送该标签。
 
-1. 确认原运行已结束且构建成功。核对 Gitee 现有附件，保留通过校验的文件。
-2. 选择维护者认可、能连接 GitHub Actions 和直连 Gitee 的 Windows 机器。确认已有 PowerShell 7、Git、GitHub CLI、curl 和可执行的 Python 3.12 或更新版本。将现有 Python 加入启动 Runner 的进程 `PATH`。z-note 的自托管上传步骤复用这个 Python，省去运行中再下载和安装。
-3. 优先复用本机已经校验、解压且未注册的官方 Runner。没有可复用的副本时，在私有源码仓的 **Settings → Actions → Runners → New self-hosted runner** 取官方 Windows Runner，并校验下载包。使用独占标签和 `--ephemeral` 注册，等状态显示 `Online` 后再派发补传。Runner 处理一个任务后自动注销。若在接单前中止，按 GitHub 的移除流程注销该 Runner。 [GitHub Runner 参考](https://docs.github.com/en/actions/reference/runners/self-hosted-runners)
-4. 如果 GitHub 需要代理，只给 Runner 进程配置 `https_proxy` / `http_proxy`，将 `gitee.com,foruda.gitee.com` 放入 `no_proxy`。Gitee API 和上传命令也显式绕过 HTTP 代理。如果代理软件接管系统流量（TUN），还要确认软件的分流规则让 Gitee 直连。Runner 通过出站 HTTPS 领任务，无需设置入站端口或开机自启。 [GitHub Runner 代理配置](https://docs.github.com/en/actions/how-tos/manage-runners/use-proxy-servers)
-5. 用原构建的运行编号和临时 Runner 标签派发补传，记录新运行编号并等待结果。任务成功后核对 Gitee 的两份附件，再确认一次性 Runner 已从仓库 Runner 列表消失。
+~~~powershell
+$commit = git rev-parse HEAD
+git push origin HEAD:refs/heads/main
+if ($LASTEXITCODE -ne 0) { throw '发布分支推送失败' }
+git tag -a $tag $commit -m "z-note $version"
+if ($LASTEXITCODE -ne 0) { throw '创建标签失败' }
+git push origin "refs/tags/$tag"
+if ($LASTEXITCODE -ne 0) { throw '标签推送失败' }
+gh run list -R $sourceRepo -w release.yml -b $tag -c $commit -e push -L 5 --json databaseId,status,conclusion,url
+~~~
 
-在已校验并解压的 Runner 目录打开 PowerShell。以下命令以有源码仓管理权限的 GitHub CLI 登录为前提。注册令牌只在当前进程中使用。
+Actions 列表刚推标签可能暂时为空，等十几秒再查。记下这次标签运行的 `databaseId` 为 `$sourceRun`。查看各任务状态，原运行整体显示失败或取消时也要看任务级结果。
+
+~~~powershell
+$sourceRun = '<标签触发的原运行编号>'
+gh run view $sourceRun -R $sourceRepo --json status,conclusion,url,jobs --jq '{status,conclusion,url,jobs:[.jobs[]|{name,status,conclusion,databaseId,startedAt,completedAt}]}'
+gh api "repos/$sourceRepo/actions/runs/$sourceRun/artifacts" --jq '.artifacts[]|{name,expired,size_in_bytes}'
+~~~
+
+`build` 在 GitHub 的 Windows Runner 校验标签和说明、运行测试、调用 `scripts/package.ps1 -Installer`，保存 `z-note-<版本>` Artifact。随后 `github-draft` 和 `gitee-preview` 并行消费它。GitHub 草稿应有两份附件。Gitee 任务在传安装包前先上传或复用 `SHA256SUMS`。
+
+## 3. 构建期间准备 Windows Runner
+
+在能连 GitHub Actions 且能直连 Gitee 的 Windows 机器操作。若仓库变量 `GITEE_RELEASE_RUNNER` 已指向在线专用 Runner，标签运行会直接用它。变量已设置但 Runner 离线时，尽早恢复该 Runner 或准备以下一次性 Runner。变量未设置时标签运行的 Gitee 任务使用 GitHub 云端。日常一次性补传无需修改仓库变量。
+
+优先复用本机已校验的 `.runtime-deps/gitee-actions-runner`。没有副本时，到私有源码仓 **Settings → Actions → Runners → New self-hosted runner**，按页面提供的 Windows 命令下载、校验、解压。目录若仍在接单，先核对当前任务和注册状态，使用空闲副本。
+
+在启动 Runner 的 PowerShell 7 窗口检查工具。需要时把已有 Python 的目录加到当前进程 `PATH`。自托管上传使用本机 Python。
+
+~~~powershell
+Get-Command pwsh, git, gh, curl.exe, python -ErrorAction Stop
+python -c "import sys; assert sys.version_info >= (3, 12); print(sys.executable)"
+gh auth status --hostname github.com
+curl.exe --noproxy gitee.com,foruda.gitee.com -fsS --connect-timeout 10 --max-time 20 -o NUL https://gitee.com/api/v5/repos/trevorzsl/z-note-releases
+~~~
+
+GitHub 如需代理，在 Runner 启动进程里使用已确认有效的 `https_proxy` / `http_proxy`，并把 `gitee.com,foruda.gitee.com` 加入该进程的 `no_proxy`。开启 TUN 时同时确认分流规则让 Gitee 直连。GitHub 和 Actions Artifact 下载走可用的 GitHub 网络路径，Gitee 走直连，两段分别诊断。
 
 ~~~powershell
 $sourceRepo = 'TrevorZsl/z-note'
-$runnerLabel = 'z-note-gitee-once-219'
-$runnerToken = gh api --method POST "repos/$sourceRepo/actions/runners/registration-token" --jq .token
-if ($LASTEXITCODE -ne 0 -or -not $runnerToken) { throw '获取 Runner 注册令牌失败' }
+$runnerLabel = "z-note-gitee-once-$([guid]::NewGuid().ToString('N').Substring(0, 8))"
+$runnerDir = (Resolve-Path '.runtime-deps/gitee-actions-runner').Path
+Push-Location $runnerDir
 try {
-    .\config.cmd --unattended --ephemeral --no-default-labels --url "https://github.com/$sourceRepo" --token $runnerToken --name $runnerLabel --labels $runnerLabel --work '_work'
-    if ($LASTEXITCODE -ne 0) { throw 'Runner 注册失败' }
+    $runnerToken = gh api --method POST "repos/$sourceRepo/actions/runners/registration-token" --jq .token
+    if ($LASTEXITCODE -ne 0 -or -not $runnerToken) { throw '获取 Runner 注册令牌失败' }
+    try {
+        .\config.cmd --unattended --ephemeral --no-default-labels --url "https://github.com/$sourceRepo" --token $runnerToken --name $runnerLabel --labels $runnerLabel --work '_work'
+        if ($LASTEXITCODE -ne 0) { throw 'Runner 注册失败' }
+    } finally {
+        Remove-Variable runnerToken
+    }
+    Write-Host "Runner label: $runnerLabel"
+    .\run.cmd
 } finally {
-    Remove-Variable runnerToken
+    Pop-Location
 }
-.\run.cmd
 ~~~
 
-Runner 开始监听后，在另一个终端派发任务。原运行编号应取**构建并保存 Artifact 的那一次**，即使该次运行因为 Gitee 上传失败而整体标记为失败，也可以补传。
+保持该窗口运行，见到 `Listening for Jobs` 后，在另一个终端核对 Runner 在线且空闲。自动化环境可在同一套进程环境中后台启动 `run.cmd`，把标准输出和错误重定向到各自日志；确认监听后继续，避免让长驻进程挡住后续命令。
 
 ~~~powershell
-$sourceRepo = 'TrevorZsl/z-note'
-$sourceRun = '<原构建运行编号>'
-$runnerLabel = 'z-note-gitee-once-219'
-gh workflow run release.yml --repo $sourceRepo --ref main -f "source_run=$sourceRun" -f "gitee_runner=$runnerLabel"
-$retryRun = '<新运行页面地址末尾的数字>'
-gh run watch $retryRun --repo $sourceRepo --exit-status
+gh api "repos/$sourceRepo/actions/runners" --paginate --jq '.runners[] | [.name,.status,.busy,([.labels[].name]|join(","))] | @tsv'
 ~~~
 
-如果维护者希望以后**每次只推一次标签**就走本机直连路线，可在私有源码仓配置专用 Runner，并把仓库的 Actions 变量 `GITEE_RELEASE_RUNNER` 设为它的标签。该 Runner 在发版时要在线。z-note 工作流已支持这个变量，`v2.1.8` 实际验收的是一次性 Runner 补传，长期在线配置需在目标机器上单独验证。
+## 4. 到切换条件就补传
 
-## 交付前核验
+| 看到的状态 | 下一步 |
+| --- | --- |
+| `build` 和 `github-draft` 成功，Gitee 附件已齐 | 进入下载验收。如果仍启动了闲置的一次性 Runner，注销它。 |
+| 两个前置任务成功、原 Artifact 存在、云端 Gitee 仍在跑或排队、确认 Gitee 缺文件、本机已在线 | 取消原运行中仅剩的云端任务，等原运行成为 `completed`，再派发本机补传。若取消期间云端已上传完成，直接验收。 |
+| 原运行已结束，Gitee 缺文件 | 跳过取消，派发本机补传。原运行的总体结论可以是 `failure` 或 `cancelled`。 |
+| Runner 暂不可用 | 继续跟踪原上传，同时解决 Runner 连通性；先查具体失败步骤。 |
+| `build` 失败且没有可用 Artifact | 查看构建失败日志并处理根因；只有无可复用的合格产物时才需要构建。 |
+| 已有附件同名但字节数或 SHA-256 不同 | 记录冲突来源、标签和哈希，停止写入冲突附件，核实原产物及发行状态。 |
 
-- **同一版本、同一次构建。** 两边的版本标签和附件名一致，各有一个安装包和一个 `SHA256SUMS`。从两个平台读取附件，计算 SHA-256 并与原构建逐一比对。GitHub API 提供的资产摘要也可直接用于比对。
-- **验证用户能下载。** 从目标用户的网络用匿名请求读取 Gitee Release API 和实际安装包下载 URL。确认下载完整、字节数正确、SHA-256 一致。对应用内更新，用支持 Gitee 的旧版本验证它能发现更高版本，再验证下载和校验。z-note 从 `2.1.8` 开始支持 Gitee，`2.1.7` 及之前的客户端仅查 GitHub。
-- **提交给维护者确认。** 附上 GitHub 草稿和 Gitee 预览版地址、成功任务链接和核验结果。GitHub 点 **Publish release**。Gitee 点 **编辑**，取消 **「这是一个预览版本」** 并保存。正式发布后可再查两边 API 确认状态。
+取消前用任务列表确认只有云端 Gitee 还在运行，避免取消构建或 GitHub 上传。通过 Gitee 发行版附件列表确认安装包状态；无法读取时先处理连通或权限，避免在状态不明时重复写入。可从第 1 步的 Gitee 标签查询取得发行版 `id`，再列附件。匿名接口不可见时，在有权限的 Gitee 发布页检查同样的信息。
 
+~~~powershell
+$releaseId = '<Gitee 标签查询返回的发行版 id>'
+$attachApi = "https://gitee.com/api/v5/repos/$giteeRepo/releases/$releaseId/attach_files"
+$attachmentJson = curl.exe --noproxy gitee.com,foruda.gitee.com -fsS --connect-timeout 10 --max-time 30 $attachApi
+if ($LASTEXITCODE -ne 0) { throw '读取 Gitee 附件列表失败' }
+$attachmentJson | ConvertFrom-Json | Select-Object name, size
+~~~
+
+~~~powershell
+# 仅在上述切换条件满足、原运行仍在进行时执行。
+gh run cancel $sourceRun -R $sourceRepo
+gh run view $sourceRun -R $sourceRepo --json status,conclusion
+~~~
+
+原运行状态为 `completed` 后，用上一步打印的**实际标签**派发。原 Artifact 和 GitHub 草稿保持有效。工作流从远端 `main` 取脚本和说明，从 `source_run` 取版本和二进制。
+
+~~~powershell
+$runnerLabel = '<Runner 窗口打印的标签>'
+gh workflow run release.yml -R $sourceRepo --ref main -f "source_run=$sourceRun" -f "gitee_runner=$runnerLabel"
+if ($LASTEXITCODE -ne 0) { throw '派发 Gitee 补传失败' }
+~~~
+
+使用派发返回的 URL 取得新运行编号。没有返回 URL 时，查看 Actions 列表中刚派发的 `workflow_dispatch` 运行，并用 Runner 日志核对接单情况。该运行的分支是 `main`，按版本标签筛选会漏掉它。
+
+~~~powershell
+gh run list -R $sourceRepo -w release.yml -b main -e workflow_dispatch -L 5 --json databaseId,createdAt,status,conclusion,url
+$retryRun = '<补传运行编号>'
+gh run watch $retryRun -R $sourceRepo --exit-status
+~~~
+
+预期 `build` 和 `github-draft` 为 `skipped`，`gitee-preview` 为 `success`。Gitee 任务会校验原安装包与清单、检查预览版、复用已经匹配的附件、补齐缺失文件。已开始的任务结束后，一次性 Runner 自动注销。若接单前中止，在仓库 Runner 设置按移除流程注销。
+
+### 失败时查当前步骤
+
+- **一直排队**。核对 `gitee_runner` 的标签、Runner 是否在线且空闲、`run.cmd` 是否还在运行、原运行是否已结束。先解决现有任务的阻塞。
+- **卡在 `download-artifact`**。检查原运行编号、Artifact 名、过期状态以及本机访问 GitHub 和 Artifact 存储的代理路径。v2.2.6 的这个步骤用时约 10 分 50 秒，安装包实际传到 Gitee 只用约 14 秒。
+- **Gitee API 或上传失败**。用 `gh run view $retryRun -R $sourceRepo --log-failed` 查看具体步骤。先核对直连，再看 API 的 HTTP 状态或 curl 的上传字节和耗时。API 请求超时可能发生在创建发行版或枚举附件阶段。curl 超时后先刷新附件列表，服务端可能已收到文件；确认缺失后再用同一 `source_run` 和新的在线一次性 Runner 补传。
+- **仅 GitHub 草稿缺附件**。从原运行下载 Artifact 后，用有发布仓写权限的 CLI 针对缺失附件执行 `gh release upload $tag <缺失文件路径> -R $githubRepo`。若已确认草稿不存在，用 `gh release create $tag <安装包路径> <清单路径> -R $githubRepo --draft --title "z-note $version" --notes-file $notes`。部分成功时保留现有正确附件，检查同名冲突，避免使用 `--clobber`。
+- **配置类错误**。GitHub 凭据失败核对源码仓 `RELEASE_TOKEN` 与发布仓写权限。Gitee 鉴权失败核对 `GITEE_TOKEN`、目标仓和状态。预览版必须在已初始化的 Gitee 公开发布仓创建。工作流的附件上传使用 `multipart/form-data` 的 `access_token` 和 `file` 字段，已有实现见 [release.yml](../.github/workflows/release.yml)。
+
+## 5. 下载回读与交付
+
+每次验收用新目录，避免旧下载混进本次结果。三个来源各取两份文件，逐项比对两个 SHA-256，再核对清单里的安装包哈希。GitHub 草稿用登录后的 CLI 下载；Gitee 附件以匿名、直连方式从用户实际下载路径取回。三个目录互相独立，连接条件允许时可并行下载。当前发版过程中已经从同一 `source_run` 下载并核验的原 Artifact 可以复用。若临近 Artifact 过期，优先保存原文件和运行编号供验收使用；自动补传仍需要远端 Artifact 可用。
+
+~~~powershell
+$verify = Join-Path $PWD ".runtime-deps/release-$version-$(Get-Date -Format yyyyMMdd-HHmmss)"
+$artifactDir = Join-Path $verify 'artifact'
+$githubDir = Join-Path $verify 'github'
+$giteeDir = Join-Path $verify 'gitee'
+$null = New-Item -ItemType Directory -Path $artifactDir, $githubDir, $giteeDir
+
+gh run download $sourceRun -R $sourceRepo -n "z-note-$version" -D $artifactDir
+if ($LASTEXITCODE -ne 0) { throw '下载原 Artifact 失败' }
+
+$draftJson = gh release view $tag -R $githubRepo --json url,tagName,isDraft,assets
+if ($LASTEXITCODE -ne 0) { throw '读取 GitHub 草稿失败' }
+$draft = $draftJson | ConvertFrom-Json
+$files = @('SHA256SUMS', $installer)
+if ($draft.tagName -cne $tag -or $draft.isDraft -ne $true -or
+    @($draft.assets).Count -ne 2 -or (Compare-Object $files @($draft.assets.name) -CaseSensitive)) {
+    throw 'GitHub 草稿的标签、状态或附件名不符'
+}
+gh release download $tag -R $githubRepo -p $installer -p SHA256SUMS -D $githubDir
+if ($LASTEXITCODE -ne 0) { throw '下载 GitHub 草稿附件失败' }
+
+# 用预览页或已认证 API 确认标签、预览状态和两份附件。
+# 匿名标签 API 能返回预览元数据时，也可用于这一步。
+$giteeDownload = "https://gitee.com/$giteeRepo/releases/download/$tag"
+foreach ($file in $files) {
+    curl.exe --noproxy gitee.com,foruda.gitee.com -fLsS --connect-timeout 10 --max-time 300 -o (Join-Path $giteeDir $file) "$giteeDownload/$file"
+    if ($LASTEXITCODE -ne 0) { throw "下载 Gitee 附件失败：$file" }
+}
+
+$ErrorActionPreference = 'Stop'
+foreach ($file in $files) {
+    $expected = (Get-FileHash -LiteralPath (Join-Path $artifactDir $file) -Algorithm SHA256).Hash
+    foreach ($directory in @($githubDir, $giteeDir)) {
+        $actual = (Get-FileHash -LiteralPath (Join-Path $directory $file) -Algorithm SHA256).Hash
+        if ($actual -cne $expected) { throw "SHA-256 不一致：$directory / $file" }
+    }
+    Write-Output "$file  $($expected.ToLowerInvariant())"
+}
+$installerHash = (Get-FileHash -LiteralPath (Join-Path $artifactDir $installer) -Algorithm SHA256).Hash.ToLowerInvariant()
+if ((Get-Content -Raw -LiteralPath (Join-Path $artifactDir 'SHA256SUMS')).TrimEnd() -cne "$installerHash  $installer") {
+    throw '原 Artifact 清单与安装包不匹配'
+}
+$draft.url
+$giteePage
+~~~
+
+交付时给出版本、原构建运行和补传运行链接、`$draft.url`、`$giteePage` 及两份附件的 SHA-256 核验结果。GitHub 草稿链接从 CLI 实际读取，可能含 `untagged-...`。Gitee 预览版可以被浏览，更新器会过滤预览版，应用内发现新版本留到正式发布之后验证。
+
+维护者确认后，在 GitHub 草稿点击 **Publish release**，选择正式版和 **Latest release**；在 Gitee 预览页点击 **编辑**，取消 **「这是一个预览版本」** 并保存。再核对两个平台的正式状态、版本及匿名下载；若本次改了更新链路，用支持对应平台的旧版本做一次更新验证。z-note 从 2.1.8 开始支持 Gitee。覆盖安装和应用更新专项验收见 [版本发布与更新](版本发布与更新.md)。
+
+## 历史执行记录
+
+| 版本 | 实际结果 |
+| --- | --- |
+| v2.1.8 | 一次云端重试 600 秒只记录了 11.7 MB 已发送，本机补传任务 48 秒。最后对两边下载文件做了 SHA-256 回读。 [云端重试](https://github.com/TrevorZsl/z-note/actions/runs/42600426666) · [本机补传](https://github.com/TrevorZsl/z-note/actions/runs/42603403228) |
+| v2.2.1 | 原运行在云端超时后结束，复用本机 Runner 补传成功。原构建和两平台留存的两个文件各自 SHA-256 一致。 [原运行](https://github.com/TrevorZsl/z-note/actions/runs/42649463586) · [本机补传](https://github.com/TrevorZsl/z-note/actions/runs/42651676794) |
+| v2.2.5 | 构建和 GitHub 草稿成功后取消尚未完成的云端 Gitee 任务，原 Artifact 由本机接手。补传任务约 95 秒；留存的原产物及两平台下载文件逐一验过 SHA-256。 [原运行](https://github.com/TrevorZsl/z-note/actions/runs/42842280972) · [本机补传](https://github.com/TrevorZsl/z-note/actions/runs/42843004016) |
+| v2.2.6 | 本机补传成功，下载 Artifact 约 10 分 50 秒，Gitee 安装包上传约 14 秒。旧验收目录里有两种同名安装包哈希，其中一份 GitHub 下载副本和清单不匹配。这正是验收时使用全新目录并以原 Artifact 为准的原因。 [原运行](https://github.com/TrevorZsl/z-note/actions/runs/43061724935) · [本机补传](https://github.com/TrevorZsl/z-note/actions/runs/43062112625) |
+| v2.2.7 | 查阅记录时，原构建成功，GitHub 草稿有两份附件，云端 Gitee 步骤报 30 秒 HTTP 请求超时。后续接手时先查两平台现状，原构建编号为 `43258186176`。 [原运行](https://github.com/TrevorZsl/z-note/actions/runs/43258186176) |
+
+跨项目复用时，替换源码仓、两个发布仓、版本来源、附件名称和构建命令即可沿用这条链路。发布仓应先初始化默认分支，公开发行说明与附件放在发布仓，工作流和构建产物留在源码仓。
