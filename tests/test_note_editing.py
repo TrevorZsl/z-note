@@ -4566,6 +4566,21 @@ class NoteEditingTests(unittest.TestCase):
         self.app.root.update()
         self.assertTrue(self.text.tag_ranges("selection_fill"))
 
+    def test_selecting_empty_rows_paints_a_marker_on_each_selected_row(self):
+        self.note.d["lines"] = [{"type": "todo", "text": "", "checked": False},
+                                {"type": "text", "text": "", "checked": False},
+                                {"type": "todo", "text": "", "checked": False}]
+        self.note.render()
+        self.app.root.update()
+        self.text.tag_add("sel", "1.3", "3.3")
+        self.app.root.update()
+        for row in (1, 2, 3):
+            self.assertTrue(self.text.tag_nextrange("selection_fill", f"{row}.end", f"{row+1}.0"),
+                            f"第 {row} 行没有选中标记")
+        self.text.tag_remove("sel", "1.0", "end")
+        self.app.root.update()
+        self.assertFalse(self.text.tag_ranges("selection_fill"))
+
     def test_cross_row_delete_stays_deleted_after_redraw(self):
         first, second = self.note.d["lines"][1:3]
         expected = first["text"][:2] + second["text"][2:]

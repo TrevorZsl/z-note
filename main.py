@@ -2033,6 +2033,11 @@ class NoteEditor:
         if _e is None or _e.keysym not in ("Shift_L", "Shift_R", "Control_L", "Control_R", "Alt_L", "Alt_R"):
             self._see_text("insert")
         self.app.schedule_save()
+            elif row <= len(self.lines) and not self.lines[row-1]["text"] and (
+                    row < last_row or (t.compare(last, ">", f"{row}.0")
+                                       and (row > first_row or t.compare(first, "<", f"{row}.end")))):
+                # 空行没有文字可画：只给被选中的空行补一个换行符大小的标记，其余行不变。
+                t.tag_add("selection_fill", f"{row}.end", f"{row}.end+1c")
 
     def _on_enter(self, _e):
         if self.win._ime_composing(self.text):
