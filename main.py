@@ -2493,8 +2493,9 @@ class NoteWindow(tk.Toplevel):
                     col_w = left_w if i == 0 else max(1, avail - gap - left_w)
                     x = ix if i == 0 else ix + left_w + gap
                     editor.body.place(x=x, y=text_y, width=col_w, height=height)
-                    editor.scroll_thumb.place(x=x + col_w - 10, y=text_y + 4,
-                                              width=8, height=max(12, height - 8))
+                    # 与分页线两端对齐（分页线绘制在 y+13 至 y+height-13），滑块不越过分隔线。
+                    editor.scroll_thumb.place(x=x + col_w - 10, y=text_y + 13,
+                                              width=8, height=max(12, height - 26))
                     tk.Misc.lift(editor.scroll_thumb)
                 self._layout_divider(ix + left_w, text_y, height)
             else:
