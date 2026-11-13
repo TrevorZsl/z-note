@@ -5118,7 +5118,7 @@ class SideDockTooltip(Tooltip):
         self._aid = None
         dock = self._w.master.dock
         if dock._sorting_bookmark is None and dock._scroll_job is None:
-            self.show_at(self._w, self._gt())
+            self.show_at(self._w, self._gt(), beside=True)
 
     @staticmethod
     def show_at(widget, text, *, beside=False):
