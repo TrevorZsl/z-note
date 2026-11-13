@@ -776,6 +776,27 @@ class EdgeFade:
                 user32.ShowWindow(hwnd, 8 if show else 0)  # SW_SHOWNA，不激活便签。
         self._visible = visible
 
+    def schedule_repaint(self):
+        # 勾选框是随正文滚动的子窗口，渐隐层下方的旧像素不会自动擦净，会拖出叠影、
+        # 也会让进入渐隐区的勾选框漏画。滚动落定后只对渐隐区补一次重绘，渐隐本身不变。
+        if getattr(self, "_repaint_job", None) is None and self.windows:
+            self._repaint_job = self.body.after_idle(self._repaint)
+
+    def _repaint(self):
+        self._repaint_job = None
+        if not self.body.winfo_exists():
+            return
+        self.body.update_idletasks()  # 先让 place 把正文和勾选框移到位，再重绘。
+        hwnd = self.body.winfo_id()
+        if not hwnd or not user32.IsWindow(hwnd) or not self.height:
+            return
+        width, viewport = self.body.winfo_width(), self.body.winfo_height()
+        for visible, top in zip(self._visible, (0, viewport - self.height)):
+            if visible:
+                rect = wintypes.RECT(0, top, width, top + self.height)
+                # RDW_INVALIDATE | RDW_ALLCHILDREN | RDW_UPDATENOW；不加 RDW_ERASE，避免闪一下底色。
+                user32.RedrawWindow(hwnd, ctypes.byref(rect), None, 0x0181)
+
     @staticmethod
     def _paint(hwnd, width, height, bottom):
         # UpdateLayeredWindow 需要预乘 BGRA；白色的各通道恰好都等于 alpha。
@@ -1011,6 +1032,7 @@ class NoteEditor:
         self._edge_fade.update(first, last)
         if self._layout_busy:
             return
+        self._edge_fade.schedule_repaint()
         top = round(self.body.canvasy(0))
         if ((self._chunk_start > 0 and top < self._chunk_start + self._buffer_margin) or
                 (self.text.yview()[1] < 1 and
