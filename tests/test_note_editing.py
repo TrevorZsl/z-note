@@ -37,6 +37,7 @@ class NoteEditingTests(unittest.TestCase):
         self.app = main.App()
         self.note = next(iter(self.app.notes.values()))
         self.app.root.update()
+        self.app._note_motion.finish_all()  # 启动淡入结束后再开始各项检查。
         self.text = self.note.text
 
     def tearDown(self):
@@ -46,6 +47,13 @@ class NoteEditingTests(unittest.TestCase):
         for item in reversed(self.patches):
             item.stop()
         self.assertFalse(self._callback_errors, self._callback_errors)
+
+    def _finish_popup_fade(self, win):
+        import time
+        deadline = time.perf_counter() + 2
+        while getattr(win, "_popup_fade_job", None) is not None and time.perf_counter() < deadline:
+            time.sleep(0.005)
+            self.app.root.update()
 
     def _visible_bbox(self, index):
         box = self.text.bbox(index)
@@ -2476,6 +2484,7 @@ class NoteEditingTests(unittest.TestCase):
                 self.app.root.update()
                 content = win._close_button if action == "settings" else win.content.winfo_children()[0]
                 self.assertTrue(content.winfo_ismapped())
+                self._finish_popup_fade(win)
                 self.assertEqual(win.attributes("-alpha"), 1.0)
                 hwnd = main.user32.GetParent(win.winfo_id()) or win.winfo_id()
                 self.assertFalse(main.user32.GetWindowLongPtrW(hwnd, -20) & 0x00080000)
@@ -2760,6 +2769,7 @@ class NoteEditingTests(unittest.TestCase):
         self.assertTrue(win.winfo_viewable())
         win._close_button.event_generate("<Button-1>")
         self.app.root.update()
+        self._finish_popup_fade(win)
         self.assertTrue(win.winfo_exists())
         self.assertFalse(win.winfo_viewable())
         win.destroy()

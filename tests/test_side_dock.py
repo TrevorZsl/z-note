@@ -36,6 +36,7 @@ class SideDockTests(unittest.TestCase):
         self.root = self.app.root
         self.dock = self.app.dock
         self.root.update()
+        self.app._note_motion.finish_all()  # 启动淡入结束后再开始各项检查。
 
     def tearDown(self):
         self.app._stop_bottom_guard()

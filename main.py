@@ -38,6 +38,8 @@ PREFIX_PAD = "  "                       # 勾选框后跟 2 个空格
 INK, QUIET = "#6B7280", "#666D75"      # 图标与状态栏的墨色（冷灰单色系）
 # Windows 上 Tk 的 16ms 定时器有时要等近两个系统时钟节拍。
 VISIBILITY_TICK_MS = 10
+# 托盘与全局快捷键经队列转交主线程，轮询间隔决定点击后的响应延迟。
+PUMP_MS = 30
 
 # ---------- Win32 ----------
 user32 = ctypes.WinDLL("user32")
@@ -3710,9 +3712,7 @@ def _show_after_layout(window):
         if window.winfo_exists():
             window.update_idletasks()
             if window.winfo_exists():
-                window.attributes("-alpha", 1.0)
-                style = user32.GetWindowLongPtrW(hwnd, -20)
-                user32.SetWindowLongPtrW(hwnd, -20, style & ~0x00080000)  # WS_EX_LAYERED
+                PopupFade.show(window)
 
     def on_map(event):
         if event.widget == window:
@@ -3724,6 +3724,7 @@ def _show_after_layout(window):
     preference = ctypes.c_int(2)
     dwmapi.DwmSetWindowAttribute(hwnd, 33, ctypes.byref(preference), ctypes.sizeof(preference))
     window.attributes("-alpha", 0.0)
+    window._popup_alpha = 0.0
     # Tk 设置透明度时会重置扩展样式，因此随后再设置任务栏样式。
     style = user32.GetWindowLongPtrW(hwnd, -20)
     user32.SetWindowLongPtrW(hwnd, -20, style & ~0x80 | 0x40000)  # WS_EX_TOOLWINDOW / WS_EX_APPWINDOW
@@ -3944,12 +3945,12 @@ class SettingsWindow(tk.Toplevel):
         close = tk.Label(header, text="×", bg=NOTE_BG, fg=INK,
                          font=(UI_FONT, 17), cursor="hand2")
         close.pack(side="right", padx=(8, 2))
-        close.bind("<Button-1>", lambda _e: self.destroy())
+        close.bind("<Button-1>", lambda _e: PopupFade.hide(self, self.destroy))
         minimize = tk.Label(header, text="−", bg=NOTE_BG, fg=INK,
                             font=(UI_FONT, 17), cursor="hand2")
         minimize.pack(side="right", padx=(8, 2))
         minimize.bind("<Button-1>", lambda _e: self._minimize())
-        self.bind("<Escape>", lambda _e: self.destroy())
+        self.bind("<Escape>", lambda _e: PopupFade.hide(self, self.destroy))
         self._drag = None
         self._close_button = close
         self._minimize_button = minimize
@@ -4632,7 +4633,7 @@ class HistoryWindow(tk.Toplevel):
         self.canvas = self.right.viewport
         self.content = self.right.content
         self.bind("<MouseWheel>", self.wheel)
-        self.bind("<Escape>", lambda e: self.withdraw())
+        self.bind("<Escape>", lambda e: PopupFade.hide(self, self.withdraw))
         work = SettingsWindow._work_area(self)
         scale = max(1, round(self.winfo_fpixels("1i")) / 96)
         margin = max(8, round(16 * scale))
@@ -4989,7 +4990,7 @@ class HistoryWindow(tk.Toplevel):
         self.select()
 
     def _close(self, _event):
-        self.withdraw()
+        PopupFade.hide(self, self.withdraw)
         if self.selected_id is not None:
             self.choose(None)
 
@@ -5965,12 +5966,15 @@ class NoteVisibilityMotion:
         motion.current = frame
         return True
 
-    def change(self, note, visible, *, duration, bookmark=None, temporary_raise=False, first_show=False):
+    def change(self, note, visible, *, duration, bookmark=None, temporary_raise=False, first_show=False,
+               show_window=True):
+        # show_window=False：窗口已按原逻辑显示，只淡入透明度（启动时使用）。
         def apply_now():
             if visible:
                 if first_show:
                     self._restore_alpha(note, layered=False)
-                note.show(temporary_raise=temporary_raise)
+                if show_window:
+                    note.show(temporary_raise=temporary_raise)
             else:
                 note.hide()
 
@@ -6009,7 +6013,8 @@ class NoteVisibilityMotion:
                 self.finish(note, apply_target=False)
                 apply_now()
                 return
-            note.show(temporary_raise=temporary_raise)
+            if show_window:
+                note.show(temporary_raise=temporary_raise)
         else:
             note._cancel_dock_reveal()
             note.d["visible"] = False
@@ -6058,6 +6063,10 @@ class NoteVisibilityMotion:
         opacity = note.d["opacity"]
         note.attributes("-alpha", opacity)
         style = user32.GetWindowLongPtrW(note.hwnd, -20)
+        if opacity < 1 and not style & self._LAYERED:
+            # Tk 记着曾设过分层样式，原生移除后不会再补上，半透明需要它。
+            style |= self._LAYERED
+            user32.SetWindowLongPtrW(note.hwnd, -20, style)
         if style & self._LAYERED:
             user32.SetLayeredWindowAttributes(note.hwnd, 0, round(opacity*255), 2)
             if opacity == 1 and not layered:
@@ -6065,6 +6074,88 @@ class NoteVisibilityMotion:
 
     def finish_all(self):
         return {note: self.finish(note) for note in tuple(self._active)}
+
+
+class PopupFade:
+    """设置与回收站窗口的淡入淡出，时长和缓动与一键显示便签一致。"""
+    DURATION = NoteVisibilityMotion.LOCAL_DURATION
+    _LAYERED = 0x00080000
+
+    @staticmethod
+    def _hwnd(window):
+        return user32.GetParent(window.winfo_id()) or window.winfo_id()
+
+    @classmethod
+    def _set_alpha(cls, window, opacity):
+        hwnd = cls._hwnd(window)
+        style = user32.GetWindowLongPtrW(hwnd, -20)
+        if not style & cls._LAYERED:
+            user32.SetWindowLongPtrW(hwnd, -20, style | cls._LAYERED)
+        user32.SetLayeredWindowAttributes(hwnd, 0, round(opacity*255), 2)
+        window._popup_alpha = opacity
+
+    @staticmethod
+    def cancel(window):
+        job = getattr(window, "_popup_fade_job", None)
+        if job is not None:
+            window.after_cancel(job)
+            window._popup_fade_job = None
+        return job is not None
+
+    @classmethod
+    def _run(cls, window, target, done):
+        start = getattr(window, "_popup_alpha", 1.0)
+        cls.cancel(window)
+        if not NoteVisibilityMotion.enabled() or start == target:
+            done()
+            return
+        began = time.perf_counter()
+
+        def frame():
+            window._popup_fade_job = None
+            if not window.winfo_exists():
+                return
+            t = min(1.0, (time.perf_counter()-began)/cls.DURATION)
+            cls._set_alpha(window, start+(target-start)*t*t*(3-2*t))
+            if t < 1:
+                window._popup_fade_job = window.after(VISIBILITY_TICK_MS, frame)
+            else:
+                done()
+
+        frame()
+
+    @classmethod
+    def show(cls, window):
+        """首次显示（窗口已在透明状态下映射）或重新打开已隐藏、最小化的窗口。"""
+        fading = cls.cancel(window)
+        if window.state() != "normal":
+            if not fading:
+                cls._set_alpha(window, 0.0)
+            window.deiconify()
+        elif not fading and getattr(window, "_popup_alpha", 1.0) == 1.0:
+            return
+
+        def done():
+            if not window.winfo_exists():
+                return
+            if float(window.attributes("-alpha")) != 1.0:
+                window.attributes("-alpha", 1.0)
+            hwnd = cls._hwnd(window)
+            user32.SetLayeredWindowAttributes(hwnd, 0, 255, 2)
+            style = user32.GetWindowLongPtrW(hwnd, -20)
+            user32.SetWindowLongPtrW(hwnd, -20, style & ~cls._LAYERED)
+            window._popup_alpha = 1.0
+
+        cls._run(window, 1.0, done)
+
+    @classmethod
+    def hide(cls, window, then):
+        """淡出后执行 then（隐藏或销毁）；淡出途中再次打开会反向淡入。"""
+        def done():
+            if window.winfo_exists():
+                then()
+
+        cls._run(window, 0.0, done)
 
 
 class App:
@@ -6151,7 +6242,7 @@ class App:
             self.save_now()
         self._start_tray()
         self._start_hotkeys()
-        self.root.after(120, self._pump)
+        self.root.after(PUMP_MS, self._pump)
         self.root.after(10_000, lambda: self._last_update_check is None and self._check_for_update())
         self.root.protocol("WM_DELETE_WINDOW", lambda: None)
 
@@ -6187,10 +6278,31 @@ class App:
             d["h"] = max(d.get("h", 300), 240)
             if d.get("z") not in ("normal", "bottom", "top"):
                 d["z"] = "normal"
-            w = NoteWindow(self, d)
+            # 构造期间窗口会先映射再设圆角、边框和层级，保持透明直到全部就绪。
+            w = NoteWindow(self, d, start_transparent=True)
             self.notes[d["id"]] = w
         if self.show_notes:
             self.show_all()
+        self.root.after_idle(self._reveal_startup_notes)
+
+    def _reveal_startup_notes(self):
+        """显示与层级已按原逻辑处理，这里只把透明度统一淡入，效果与一键显示相同。"""
+        self.root.update_idletasks()
+        duration = NoteVisibilityMotion.LOCAL_DURATION if self._note_motion.enabled() else 0
+        motions = []
+        for note in self.notes.values():
+            if not note.winfo_exists():
+                continue
+            if note.d.get("visible", True):
+                motion = self._note_motion.change(note, True, duration=duration,
+                                                  first_show=True, show_window=False)
+                if motion is not None:
+                    motions.append(motion)
+            else:
+                self._note_motion._restore_alpha(note, layered=False)
+        began = time.perf_counter()
+        for motion in motions:
+            motion.began = began
 
     def note_font_family(self):
         choice = self.data["settings"]["fontFamily"]
@@ -6224,7 +6336,7 @@ class App:
             if note._resizing:
                 note._resize_dirty = True
             else:
-                note.attributes("-alpha", value)
+                self._note_motion._restore_alpha(note, layered=False)
         scale = getattr(self, "opacity_scale", None)
         if scale is not None and scale.winfo_exists() and scale.get() != 100 - percent:
             scale.set(100 - percent)
@@ -6739,16 +6851,20 @@ class App:
                         self.history_win = HistoryWindow(self)
                     else:
                         self.history_win.refresh(if_changed=True)
-                        self.history_win.deiconify()
+                        PopupFade.show(self.history_win)
                     self.history_win.lift()
                     self.history_win.focus_force()
                 elif act == "settings":
-                    if self.settings_win is None or not self.settings_win.winfo_exists():
+                    created = self.settings_win is None or not self.settings_win.winfo_exists()
+                    if created:
                         self.settings_win = SettingsWindow(self)
                     self._check_for_update()
                     win = self.settings_win
                     win.attributes("-topmost", True)
-                    win.deiconify()
+                    if created:
+                        win.deiconify()
+                    else:
+                        PopupFade.show(win)
                     win.lift()
                     win.focus_force()
                     self.root.after(300, lambda: win.winfo_exists() and win.attributes("-topmost", False))
@@ -6756,7 +6872,7 @@ class App:
                     self.quit()
         except queue.Empty:
             pass
-        self.root.after(120, self._pump)
+        self.root.after(PUMP_MS, self._pump)
 
     # 保存
     def schedule_save(self):
