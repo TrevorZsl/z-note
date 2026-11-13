@@ -741,6 +741,39 @@ class SideDockTests(unittest.TestCase):
         self.assertFalse(note.d.get("title"))
         self.assertIs(self.dock.bookmarks[note.d["id"]], bookmark)
 
+    def test_blank_numbers_continue_from_current_max_and_restart_when_all_deleted(self):
+        for note in list(self.app.notes.values()):
+            self.app.remove_note(note)  # 夹具里的有标题便签先移走，只留空白便签。
+        notes = [self.app.new_note() for _ in range(4)]
+        self.click_bar()
+        label = lambda note: self.dock.bookmarks[note.d["id"]].full_label
+        self.assertEqual([label(note) for note in notes], ["便签 1", "便签 2", "便签 3", "便签 4"])
+        # 删掉 1、2：现有最大号是 4，新便签取 5。
+        self.app.remove_note(notes[0])
+        self.app.remove_note(notes[1])
+        fifth = self.app.new_note()
+        self.root.update()
+        self.assertEqual(label(fifth), "便签 5")
+        # 隐藏的便签仍然占号。
+        fifth.hide()
+        sixth = self.app.new_note()
+        self.root.update()
+        self.assertEqual(label(sixth), "便签 6")
+        # 全部删除后从 1 开始。
+        for note in (notes[2], notes[3], fifth, sixth):
+            self.app.remove_note(note)
+        fresh = self.app.new_note()
+        self.root.update()
+        number = lambda note: self.app.data["settings"]["sideDockBlankNumbers"][note.d["id"]]
+        self.assertEqual(number(fresh), 1)  # 收纳全空时会收起，直接看分配到的编号。
+        # 还原的便签原号已被占用时取最大号 + 1；原号空着时沿用。
+        self.assertTrue(self.app.recover_note(notes[0].d["id"]))
+        self.root.update()
+        self.assertTrue(self.app.recover_note(notes[3].d["id"]))
+        self.root.update()
+        self.assertEqual(number(self.app.notes[notes[0].d["id"]]), 2)
+        self.assertEqual(number(self.app.notes[notes[3].d["id"]]), 4)
+
     def test_blank_numbers_follow_note_ids_through_sort_delete_restore_and_restart(self):
         first, second, third, fourth = [self.app.new_note() for _ in range(4)]
         ids = [note.d["id"] for note in (first, second, third, fourth)]
@@ -765,7 +798,8 @@ class SideDockTests(unittest.TestCase):
         sixth = self.app.new_note()
         sixth_id = sixth.d["id"]
         self.root.update()
-        self.assertEqual(self.dock.bookmarks[sixth_id].full_label, "便签 6")
+        # 回收站里的“便签 5”不再占号：现有最大号是 4，新便签取 5。
+        self.assertEqual(self.dock.bookmarks[sixth_id].full_label, "便签 5")
         self.app.remove_note(sixth)
         history = self.app.history_win = main.HistoryWindow(self.app)
         history.switch("deletedNotes")

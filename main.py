@@ -5587,12 +5587,22 @@ class SideDock(DockBookmark):
             numbers = {identity: number for identity, number in previous.items()
                        if identity in retained_ids and type(number) is int and number > 0}
         if settings.get("sideDock", True):
-            next_number = max(numbers.values(), default=0) + 1
+            # 只有当前仍显示为“便签 N”的便签占号（含隐藏的）；回收站里的和已有标题、内容的不算。
+            # 新编号取占号中的最大值 + 1，一个都没有时从 1 开始；还原或重新变空的便签
+            # 原号未被占用时沿用，否则同样取最大值 + 1。
+            used, waiting = set(), []
             for note in data["notes"]:
-                identity = note["id"]
-                if identity not in numbers and not self.note_label(note):
-                    numbers[identity] = next_number
-                    next_number += 1
+                if self.note_label(note):
+                    continue
+                number = numbers.get(note["id"])
+                if number is not None and number not in used:
+                    used.add(number)
+                else:
+                    waiting.append(note["id"])
+            next_number = max(used, default=0) + 1
+            for identity in waiting:
+                numbers[identity] = next_number
+                next_number += 1
         if numbers != previous:
             settings["sideDockBlankNumbers"] = numbers
             self.app.schedule_save()
