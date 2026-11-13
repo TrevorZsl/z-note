@@ -13,7 +13,7 @@ import threading
 import webbrowser
 from pathlib import Path
 from _tkinter import DONT_WAIT, WINDOW_EVENTS
-from tkinter import font as tkfont, messagebox
+from tkinter import font as tkfont
 from ctypes import wintypes
 
 import pystray
@@ -27,6 +27,8 @@ from bundled_fonts import CLASSIC_FAMILY, FONT_CHOICES, FONT_FAMILIES, FONT_DIR,
 
 APP_NAME = "z-note"
 UI_FONT = CLASSIC_FAMILY
+# 内置 Classic 粗体里的中文仍是常规字重；标题沿用便签标题的系统字体，中文可真正加粗。
+UI_TITLE_FONT = "Times New Roman"
 
 NOTE_BG, NOTE_BORDER = "#FFFFFF", "#DFE2E6"
 T_COLOR = "#010203"   # 窗口透明色键（圆角外的部分透出去）
@@ -353,6 +355,13 @@ def round_rect(cv, x1, y1, x2, y2, r, **kw):
             a = math.radians(a0 + 90 * i / 12)
             pts += [cx + r * math.cos(a), cy + r * math.sin(a)]
     return cv.create_polygon(pts, **kw)
+
+def _round_popup(window):
+    """菜单类弹窗交给 DWM 裁圆角，边缘抗锯齿，并带系统细边框和阴影，与设置窗口一致。"""
+    window.update_idletasks()  # Tk 首次布局时才创建外层窗口，之前设置会落到别的句柄上。
+    hwnd = user32.GetParent(window.winfo_id()) or window.winfo_id()
+    preference = ctypes.c_int(2)  # DWMWCP_ROUND
+    dwmapi.DwmSetWindowAttribute(hwnd, 33, ctypes.byref(preference), ctypes.sizeof(preference))
 
 def smooth_round_rect(cv, x1, y1, x2, y2, r, fill, outline=""):
     # Tk 画布的多边形没有抗锯齿；这里用 4 倍超采样的 PIL 图片贴上去，圆角边缘才圆润。
@@ -2884,7 +2893,7 @@ class NoteWindow(tk.Toplevel):
         draw.rounded_rectangle((scale, scale, (w - 2) * scale, (h - 1) * scale),
                                radius=11 * scale,
                                fill="#EFF1F3" if pressed else "#FFFFFF",
-                               outline="#2B2F36", width=round(2.5 * scale))
+                               outline="#5B6472", width=round(2.5 * scale))
         img = img.resize((w, h), Image.Resampling.LANCZOS)
         if not hasattr(self, "_pill_icon"):
             with Image.open(os.path.join(ICON_DIR, "plus-normal.png")) as source:
@@ -3150,9 +3159,9 @@ class NoteWindow(tk.Toplevel):
         self._context_menu = p
         p.withdraw()
         p.overrideredirect(True)
-        p.configure(bg=T_COLOR)
-        p.attributes("-transparentcolor", T_COLOR)
+        p.configure(bg=NOTE_BG)
         p.attributes("-topmost", True)
+        _round_popup(p)
         font = tkfont.Font(family=UI_FONT, size=10)
         # compact：单项小菜单（收纳书签），去掉固定最小宽度并收紧行高与边距。
         min_width, min_row, side, bottom = (0, 0, 36, 8) if compact else (184, 34, 44, 9)
@@ -3160,11 +3169,9 @@ class NoteWindow(tk.Toplevel):
                                    for i, (label, _) in enumerate(actions)) + side)
         row_h = max(min_row, font.metrics("linespace") + (8 if compact else 12))
         height = (8 if compact else 16) + row_h * len(actions) + bottom
-        cv = tk.Canvas(p, width=width, height=height, bg=T_COLOR,
+        cv = tk.Canvas(p, width=width, height=height, bg=NOTE_BG,
                        highlightthickness=0, bd=0)
         cv.pack()
-        round_rect(cv, 1, 1, width - 2, height - 2, 11,
-                   fill="#FFFFFF", outline="#D9DCE1")
         highlights = []
         for i, (label, _) in enumerate(actions):
             top = 8 + i * row_h + (9 if i == 2 else 0)
@@ -3780,12 +3787,10 @@ class SettingsScale(tk.Canvas):
             draw.line((tick_x, 31 * scale, tick_x, 35 * scale),
                       fill="#8E9CAC" if 12 + 156 * index / count <= x else "#D8DEE5",
                       width=scale)
-        box((x - 9, 3, x + 9, 27), 6, fill="#E6EAF0")
-        box((x - 9, 1, x + 9, 25), 6, fill="#FFFFFF",
+        # 纯白圆形握柄，仍按刻度一格一格吸附。
+        box((x - 9, 6, x + 9, 24), 9, fill="#E6EAF0")
+        box((x - 9, 5, x + 9, 23), 9, fill="#FFFFFF",
             outline="#64748B" if self.focus_get() == self else "#9CA9B8", width=scale)
-        for offset in (-2, 2):
-            draw.line(((x + offset) * scale, 9 * scale,
-                       (x + offset) * scale, 17 * scale), fill="#7D8C9D", width=scale)
         self._image = ImageTk.PhotoImage(img.resize((180, 42), Image.Resampling.LANCZOS), master=self)
         self.delete("all")
         self.create_image(0, 0, image=self._image, anchor="nw")
@@ -3845,17 +3850,15 @@ class FontSelector(tk.Canvas):
         popup = self._popup = tk.Toplevel(self)
         popup.withdraw()
         popup.overrideredirect(True)
-        popup.configure(bg=T_COLOR)
-        popup.attributes("-transparentcolor", T_COLOR)
+        popup.configure(bg=NOTE_BG)
         popup.attributes("-topmost", True)
+        _round_popup(popup)
         labels = list(FONT_CHOICES.values())
         row_height = max(30, self._font.metrics("linespace") + 14)
         width, height = self.winfo_width(), 12 + row_height * len(labels)
-        canvas = tk.Canvas(popup, width=width, height=height, bg=T_COLOR,
+        canvas = tk.Canvas(popup, width=width, height=height, bg=NOTE_BG,
                            highlightthickness=0, bd=0)
         canvas.pack()
-        background = round_rect(canvas, 1, 1, width - 2, height - 2, 10,
-                                fill=NOTE_BG, outline=NOTE_BORDER)
         highlights = []
         for index, label in enumerate(labels):
             top = 6 + index * row_height
@@ -3870,7 +3873,6 @@ class FontSelector(tk.Canvas):
             canvas.itemconfigure(highlights[selected], state="hidden")
             selected = index
             canvas.itemconfigure(highlights[selected], state="normal")
-            canvas.tag_raise(highlights[selected], background)
 
         def activate(index):
             self._close()
@@ -3937,7 +3939,7 @@ class SettingsWindow(tk.Toplevel):
         header = tk.Frame(f, bg=NOTE_BG)
         header.pack(fill="x", pady=(0, 12))
         title = tk.Label(header, text="设置", bg=NOTE_BG, fg="#1F2328",
-                         font=(UI_FONT, 12, "bold"), cursor="fleur")
+                         font=(UI_TITLE_FONT, 12, "bold"), cursor="fleur")
         title.pack(side="left")
         _hook_move_cursor(title)
         title.bind("<Enter>", _cursor_small)
@@ -3963,7 +3965,7 @@ class SettingsWindow(tk.Toplevel):
             heading = tk.Frame(f, bg=NOTE_BG)
             heading.pack(fill="x", pady=(0, 8))
             tk.Label(heading, text=title, bg=NOTE_BG, fg="#1F2328",
-                     font=(UI_FONT, 11, "bold")).pack(side="left")
+                     font=(UI_TITLE_FONT, 11, "bold")).pack(side="left")
             return heading
 
         section("常规")
@@ -4571,7 +4573,7 @@ class HistoryWindow(tk.Toplevel):
         header = tk.Frame(shell, bg=NOTE_BG)
         header.pack(fill="x")
         title = tk.Label(header, text="清除记录与回收站", bg=NOTE_BG, fg="#1F2328",
-                         font=(UI_FONT, 12, "bold"), cursor="fleur")
+                         font=(UI_TITLE_FONT, 12, "bold"), cursor="fleur")
         title.pack(side="left")
         self._drag = None
         self._close_button = tk.Label(header, text="×", bg=NOTE_BG, fg=INK,
@@ -4598,6 +4600,8 @@ class HistoryWindow(tk.Toplevel):
         self.tabs = {}
         for key, label in (("archives", "已清除待办"), ("deletedNotes", "已删除便签")):
             self.tabs[key] = self.button(tab_buttons, label, lambda key=key: self.switch(key))
+            # 选中页签用与列表选中行相同的浅灰底，和普通按钮区分开。
+            self.tabs[key]._selected_image = self._button_image(label, "#E9EDF2")
             self.tabs[key].pack(side="left", padx=(0, 12))
         self._batch_actions = tk.Frame(tabs, bg=NOTE_BG)
         self._batch_actions.grid(row=0, column=1, sticky="e")
@@ -4652,12 +4656,12 @@ class HistoryWindow(tk.Toplevel):
         _show_after_layout(self)
         self.after(400, self._warm_inactive)
 
-    def _button_image(self, text):
+    def _button_image(self, text, fill=NOTE_BG):
         font = self._button_font
         width, height = font.measure(text) + 24, font.metrics("linespace") + 12
         image = Image.new("RGBA", (width * 4, height * 4))
         ImageDraw.Draw(image).rounded_rectangle((2, 2, width*4-3, height*4-3), radius=28,
-                                                fill=NOTE_BG, outline=NOTE_BORDER, width=4)
+                                                fill=fill, outline=NOTE_BORDER, width=4)
         return ImageTk.PhotoImage(image.resize((width, height), Image.Resampling.LANCZOS), master=self)
 
     def button(self, parent, text, command):
@@ -4896,7 +4900,8 @@ class HistoryWindow(tk.Toplevel):
 
     def _render_view(self):
         for key, tab in self.tabs.items():
-            tab.configure(fg="#1F2328" if key == self.mode else QUIET)
+            tab.configure(fg="#1F2328" if key == self.mode else QUIET,
+                          image=tab._selected_image if key == self.mode else tab._image)
         self.hint.configure(text="清除的已完成待办会保存在这里，按便签整理。" if self.mode == "archives"
                             else "彻底删除便签不会删除已清除待办的记录。")
         self.checked.intersection_update(self.ids)
@@ -5102,7 +5107,7 @@ class HistoryWindow(tk.Toplevel):
 
     def label(self, text, bold=False, parent=None):
         label = tk.Label(parent or self.content, text=text, bg=NOTE_BG, fg="#2B2F36",
-            font=(UI_FONT, 10, "bold") if bold else (UI_FONT, 10), justify="left", anchor="w")
+            font=(UI_TITLE_FONT, 10, "bold") if bold else (UI_FONT, 10), justify="left", anchor="w")
         label.pack(fill="x", pady=(6, 4), padx=4)
         label.bind("<Configure>", lambda e: label.configure(wraplength=max(1, e.width-8)))
 
@@ -5120,11 +5125,24 @@ class HistoryWindow(tk.Toplevel):
         text.pack(side="left", fill="x", expand=True)
         text.bind("<Configure>", lambda e: text.configure(wraplength=max(1, e.width-8)))
 
+    def _center_empty(self):
+        empty = getattr(self, "_empty_label", None)
+        if empty is not None and empty.winfo_exists():
+            top = max(0, (self.canvas.winfo_height() - empty.winfo_reqheight()) // 2)
+            empty.pack_configure(pady=(top, 0))
+
     def select(self, _event=None):
         for child in self.content.winfo_children():
             child.destroy()
         if self.selected_id is None:
-            self.label("请选择一条记录" if self.ids else "暂无记录")
+            # 占位提示用浅灰色，在预览区居中。
+            self._empty_label = tk.Label(self.content, text="请选择一条记录" if self.ids else "暂无记录",
+                                         bg=NOTE_BG, fg=QUIET, font=(UI_FONT, 10), anchor="center")
+            self._empty_label.pack(fill="x")
+            if not getattr(self, "_empty_centering", False):
+                self._empty_centering = True
+                self.canvas.bind("<Configure>", lambda _e: self._center_empty(), add="+")
+            self._center_empty()
             self.content.update_idletasks()
             self.right.update_region()
             return
@@ -6162,6 +6180,100 @@ class PopupFade:
                 then()
 
         cls._run(window, 0.0, done)
+
+
+class RoundMessageBox:
+    """代替系统消息框：圆角白底、浅灰边框按钮、淡入淡出，与设置和回收站同一风格。
+
+    接口与 tkinter.messagebox 的 askyesno / showinfo / showerror / showwarning 相同。
+    """
+
+    @staticmethod
+    def _button_image(master, font, text, fill):
+        width = max(76, font.measure(text) + 32)
+        height = font.metrics("linespace") + 14
+        image = Image.new("RGBA", (width*4, height*4))
+        ImageDraw.Draw(image).rounded_rectangle((2, 2, width*4-3, height*4-3), radius=32,
+                                                fill=fill, outline=NOTE_BORDER, width=4)
+        return ImageTk.PhotoImage(image.resize((width, height), Image.Resampling.LANCZOS), master=master)
+
+    @classmethod
+    def _ask(cls, title, message, buttons, parent=None):
+        load_fonts()
+        master = parent if parent is not None and parent.winfo_exists() else tk._default_root
+        win = tk.Toplevel(master)
+        win.withdraw()
+        win.overrideredirect(True)
+        win.configure(bg=NOTE_BG)
+        win.attributes("-topmost", True)
+        _round_popup(win)
+        scale = max(1, round(win.winfo_fpixels("1i")) / 96)
+        body = tk.Frame(win, bg=NOTE_BG, padx=24, pady=20)
+        body.pack(fill="both", expand=True)
+        # 固定内容宽度，短句也保持舒展的版面，换行按缩放后的像素计算。
+        tk.Frame(body, bg=NOTE_BG, width=round(340 * scale), height=0).pack()
+        tk.Label(body, text=title, bg=NOTE_BG, fg="#1F2328", font=(UI_TITLE_FONT, 11, "bold"),
+                 anchor="w").pack(fill="x")
+        tk.Label(body, text=message, bg=NOTE_BG, fg="#2B2F36", font=(UI_FONT, 10),
+                 justify="left", anchor="w", wraplength=round(340 * scale)).pack(fill="x", pady=(10, 18))
+        row = tk.Frame(body, bg=NOTE_BG)
+        row.pack(fill="x")
+        font = tkfont.Font(root=win, family=UI_FONT, size=10)
+        result, closing = [None], [False]
+
+        def choose(index):
+            if closing[0]:
+                return
+            closing[0], result[0] = True, index
+            win.grab_release()
+            PopupFade.hide(win, win.destroy)
+
+        win._images = []
+        # 第一个按钮是主操作：放在最右、浅灰底，回车确认；Esc 取消。
+        for index, text in enumerate(buttons):
+            primary = index == 0
+            image = cls._button_image(win, font, text, "#E9EDF2" if primary else NOTE_BG)
+            win._images.append(image)
+            tk.Button(row, text=text, image=image, compound="center", command=lambda i=index: choose(i),
+                      bg=NOTE_BG, activebackground=NOTE_BG, fg="#1F2328" if primary else "#475569",
+                      activeforeground="#1F2328", font=font, relief="flat", bd=0, padx=0, pady=0,
+                      highlightthickness=0, cursor="hand2").pack(side="right", padx=(8, 0))
+        win.bind("<Escape>", lambda _e: choose(None))
+        win.bind("<Return>", lambda _e: choose(0))
+
+        win.update_idletasks()
+        width, height = win.winfo_reqwidth(), win.winfo_reqheight()
+        if parent is not None and parent.winfo_exists() and parent.winfo_viewable():
+            cx = parent.winfo_rootx() + parent.winfo_width()//2
+            cy = parent.winfo_rooty() + parent.winfo_height()//2
+        else:
+            work = SettingsWindow._work_area(win)
+            cx, cy = (work.left+work.right)//2, (work.top+work.bottom)//2
+        win.geometry(f"+{cx - width//2}+{cy - height//2}")
+        win.attributes("-alpha", 0.0)
+        win._popup_alpha = 0.0
+        win.deiconify()
+        win.update_idletasks()
+        PopupFade.show(win)
+        win.focus_force()
+        win.grab_set()
+        master.wait_window(win)
+        return result[0]
+
+    @classmethod
+    def askyesno(cls, title, message, parent=None, **_options):
+        return cls._ask(title, message, ("确定", "取消"), parent) == 0
+
+    @classmethod
+    def showinfo(cls, title, message, parent=None, **_options):
+        cls._ask(title, message, ("知道了",), parent)
+        return "ok"
+
+    showerror = showwarning = showinfo
+
+
+# 现有调用处与测试沿用 messagebox.askyesno / showinfo 等名字，统一改用圆角对话框。
+messagebox = RoundMessageBox
 
 
 class App:

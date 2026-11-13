@@ -3681,7 +3681,7 @@ class NoteEditingTests(unittest.TestCase):
         popup = self.note._context_menu
         canvas = next(child for child in popup.winfo_children()
                       if isinstance(child, main.tk.Canvas))
-        self.assertEqual(canvas.cget("bg"), main.T_COLOR)
+        self.assertEqual(canvas.cget("bg"), main.NOTE_BG)  # 圆角交给 DWM，不再用透明色键。
         self.assertEqual([canvas.itemcget(item, "text") for item in canvas.find_all()
                           if canvas.type(item) == "text"],
                          ["转为文本行", "在下方插入新行", "删除此行"])
@@ -4512,8 +4512,9 @@ class NoteEditingTests(unittest.TestCase):
     def test_add_button_border_is_visibly_thick(self):
         image = main.ImageTk.getimage(self.note._pill_image).convert("RGB")
         middle = image.width // 2
-        self.assertLess(max(image.getpixel((middle, 1))), 100)
-        self.assertLess(max(image.getpixel((middle, 2))), 100)
+        # 中灰边框（#5B6472）：上沿两行像素都明显深于白底，线条依旧粗。
+        self.assertLess(max(image.getpixel((middle, 1))), 150)
+        self.assertLess(max(image.getpixel((middle, 2))), 150)
 
     def test_queued_result_replaces_pinyin_once(self):
         self.text.mark_set("insert", "2.end")
