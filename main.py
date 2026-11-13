@@ -3066,7 +3066,7 @@ class NoteWindow(tk.Toplevel):
         c.create_image(4, 13, anchor="nw", image=c._line_image)
 
     # ---- 编辑事件 ----
-    def _show_context_menu(self, x, y, actions, shortcuts=None):
+    def _show_context_menu(self, x, y, actions, shortcuts=None, compact=False, on_right_click=None):
         shortcuts = shortcuts or {}
         old = getattr(self, "_context_menu", None)
         if old and old.winfo_exists():
@@ -3079,10 +3079,12 @@ class NoteWindow(tk.Toplevel):
         p.attributes("-transparentcolor", T_COLOR)
         p.attributes("-topmost", True)
         font = tkfont.Font(family=UI_FONT, size=10)
-        width = max(184, max(font.measure(label) + (font.measure(shortcuts[i]) + 32 if i in shortcuts else 0)
-                             for i, (label, _) in enumerate(actions)) + 44)
-        row_h = max(34, font.metrics("linespace") + 12)
-        height = 16 + row_h * len(actions) + 9
+        # compact：单项小菜单（收纳书签），去掉固定最小宽度并收紧行高与边距。
+        min_width, min_row, side, bottom = (0, 0, 36, 8) if compact else (184, 34, 44, 9)
+        width = max(min_width, max(font.measure(label) + (font.measure(shortcuts[i]) + 32 if i in shortcuts else 0)
+                                   for i, (label, _) in enumerate(actions)) + side)
+        row_h = max(min_row, font.metrics("linespace") + (8 if compact else 12))
+        height = (8 if compact else 16) + row_h * len(actions) + bottom
         cv = tk.Canvas(p, width=width, height=height, bg=T_COLOR,
                        highlightthickness=0, bd=0)
         cv.pack()
@@ -3136,6 +3138,15 @@ class NoteWindow(tk.Toplevel):
         p.bind("<Key>", key)
         p.bind("<FocusOut>", close)
         p.bind("<Button-1>", close)
+        if on_right_click is not None:
+            # 菜单独占鼠标时，右键也要能关闭，并把点击交还给调用方处理。
+            def right_click(e):
+                close()
+                on_right_click(e)
+            p.bind("<Button-3>", right_click)
+        if compact:
+            # 小菜单以 (x, y) 为锚点：右缘贴在锚点左侧、垂直居中，不遮挡锚点处的书签。
+            x, y = max(0, x - width), max(0, y - height // 2)
         p.geometry(f"{width}x{height}+{min(x, p.winfo_screenwidth() - width)}+{min(y, p.winfo_screenheight() - height)}")
         p.deiconify()
         p.grab_set()
@@ -5150,6 +5161,7 @@ class DockBookmark(tk.Toplevel):
         self._compact_label = None
         self._note_visible = False
         self._hovered = False
+        self._menu_open = False
         self._extension = 0
         self._animation_job = None
         self._position_y = 0
@@ -5174,6 +5186,8 @@ class DockBookmark(tk.Toplevel):
         self.bar.bind("<ButtonPress-1>", self._drag_press)
         self.bar.bind("<B1-Motion>", self._drag_move)
         self.bar.bind("<ButtonRelease-1>", self._drag_release)
+        if self is not dock:
+            self.bar.bind("<Button-3>", self._show_delete_menu)
         self.bar.bind("<MouseWheel>", dock._wheel)
         self.tip = SideDockTooltip(self.bar, lambda: self.full_label) if self is not dock else None
         self.bind("<Map>", self._style_native)
@@ -5312,6 +5326,8 @@ class DockBookmark(tk.Toplevel):
             self._animate(self.HOVER_EXTENSION)
 
     def _leave(self, event=None):
+        if self._menu_open:
+            return
         self._hovered = False
         if self is self.dock:
             self._draw()
@@ -5348,6 +5364,53 @@ class DockBookmark(tk.Toplevel):
         elif self._press is not None:
             self._press = None
             self.dock.app.toggle_docked_note(self.note_id)
+
+    def _show_delete_menu(self, event):
+        if (self.dock._sorting_bookmark is not None or self.dock._scroll_job is not None
+                or self.dock._transition_job is not None):
+            return
+        self._press = None
+        self.tip._leave(None)
+        app, note_id = self.dock.app, self.note_id
+
+        def delete():
+            note = app.notes.get(note_id)
+            if note is not None:
+                app.remove_note(note)
+
+        # 复用便签右键菜单的自绘样式；以常驻的收纳入口作父窗口，便签隐藏时也能弹出。
+        def right_click_again(e):
+            # 菜单已关闭：再次右键本书签只关闭；右键其他书签则切换到它的菜单。
+            target = self.dock.winfo_containing(e.x_root, e.y_root)
+            other = next((b for b in self.dock.bookmarks.values()
+                          if b is not self and b.bar is target), None)
+            if other is not None:
+                other._show_delete_menu(e)
+
+        # 菜单弹在该书签左侧并与其垂直居中，避免盖住书签本身和相邻书签；
+        # 以书签完全左伸后的左缘为准，切换书签时位置一致。
+        anchor_x = user32.GetSystemMetrics(0) - self.base_width - self.HOVER_EXTENSION - 6
+        NoteWindow._show_context_menu(
+            self.dock, anchor_x, self.winfo_rooty() + self.winfo_height() // 2,
+            [("删除", delete)], compact=True, on_right_click=right_click_again)
+
+        # 菜单独占鼠标会让书签收到“离开”，这里保持左伸，菜单关闭后再按鼠标位置决定是否缩回。
+        menu = getattr(self.dock, "_context_menu", None)
+        if menu is None or not menu.winfo_exists():
+            return
+        self._menu_open, self._hovered = True, True
+        self._animate(self.HOVER_EXTENSION)
+
+        def closed(e):
+            if e.widget is not menu:
+                return
+            self._menu_open = False
+            if self.winfo_exists() and self.dock.winfo_containing(
+                    *self.dock.winfo_pointerxy()) is not self.bar:
+                self._hovered = False
+                self._animate(0)
+
+        menu.bind("<Destroy>", closed, add="+")
 
     def hide_bookmark(self):
         self._cancel_animation()

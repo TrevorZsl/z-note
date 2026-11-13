@@ -638,6 +638,55 @@ class SideDockTests(unittest.TestCase):
         self.root.update()
         self.assertIn(new_note.d["id"], self.dock.bookmarks)
 
+    def test_right_click_bookmark_deletes_note_to_history(self):
+        self.click_bar()
+        bookmark = self.dock.bookmarks["1"]
+        event = type("Event", (), {"x_root": 100, "y_root": 100})()
+        self.dock._sorting_bookmark = bookmark
+        bookmark._show_delete_menu(event)
+        self.assertIsNone(getattr(self.dock, "_context_menu", None))
+        self.dock._sorting_bookmark = None
+        bookmark._show_delete_menu(event)
+        self.root.update()
+        menu = self.dock._context_menu
+        self.assertTrue(menu.winfo_exists())
+        self.assertLess(menu.winfo_reqwidth(), 140)
+        self.assertLess(menu.winfo_reqheight(), 50)
+        # 菜单打开期间书签保持左伸；菜单关闭且鼠标不在其上时才缩回。
+        bookmark._leave()
+        deadline = time.monotonic() + 0.3
+        while time.monotonic() < deadline:
+            self.root.update()
+            time.sleep(0.01)
+        self.assertEqual(bookmark._extension, bookmark.HOVER_EXTENSION)
+        # 菜单打开时再次右键：本书签上只关闭；另一书签上则切换到它的菜单。
+        menu.event_generate("<Button-3>", x=5, y=5, rootx=bookmark.winfo_rootx() + 5,
+                            rooty=bookmark.winfo_rooty() + 5)
+        self.root.update()
+        self.assertFalse(menu.winfo_exists())
+        bookmark._show_delete_menu(event)
+        self.root.update()
+        menu = self.dock._context_menu
+        other = self.dock.bookmarks["2"]
+        menu.event_generate("<Button-3>", x=5, y=5, rootx=other.winfo_rootx() + 5,
+                            rooty=other.winfo_rooty() + 5)
+        self.root.update()
+        self.assertFalse(menu.winfo_exists())
+        self.assertIsNot(self.dock._context_menu, menu)
+        self.assertTrue(self.dock._context_menu.winfo_exists())
+        self.dock._context_menu.destroy()
+        calls = []
+        with patch.object(main.NoteWindow, "_show_context_menu",
+                          lambda _w, _x, _y, actions, **_kw: calls.append(actions)):
+            bookmark._show_delete_menu(event)
+        self.assertEqual([label for label, _ in calls[0]], ["删除"])
+        calls[0][0][1]()
+        self.root.update()
+        self.assertNotIn("1", self.app.notes)
+        self.assertNotIn("1", self.dock.bookmarks)
+        self.assertIn("1", [n["id"] for n in self.app.data["deletedNotes"]])
+        self.assertTrue(self.app.recover_note("1"))
+
     def test_renaming_and_editing_first_line_updates_label_in_place(self):
         self.click_bar()
         note, bookmark = self.app.notes["0"], self.dock.bookmarks["0"]
