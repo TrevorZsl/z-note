@@ -1744,7 +1744,12 @@ class NoteEditor:
                     break
                 stop = self.text.index(f"@{self.text.winfo_width()},{max(0, display[1])}")
                 first = self.text.bbox(start)
-                last = self.text.bbox(f"{end}-1c" if self.text.compare(stop, ">=", end) else stop)
+                last_index = f"{end}-1c" if self.text.compare(stop, ">=", end) else stop
+                last = self.text.bbox(last_index)
+                if last:
+                    # 软换行处 Tk 会把该显示行末字的 bbox 延伸到右边缘，按字形实际宽度截回。
+                    last = (last[0], last[1],
+                            min(last[2], self.done_font.measure(self.text.get(last_index))), last[3])
                 if first and last:
                     thickness = max(2, round(self.done_font.metrics("ascent") * 0.12))
                     if used_bars < len(self._strike_widgets):

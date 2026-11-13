@@ -4568,6 +4568,22 @@ class NoteEditingTests(unittest.TestCase):
         for bar in bars[:-1]:
             self.assertGreater(bar.winfo_width(), self.text.winfo_width() // 2)
 
+    def test_wrapped_strike_ends_at_last_glyph_not_right_edge(self):
+        # 软换行处 Tk 把显示行末字的 bbox 延伸到右边缘，横线不能跟着伸出去。
+        self.note.geometry("300x500")
+        self.note.d["lines"] = [{"type": "todo", "text": "选中文字拖动时无bug" * 4, "checked": True}]
+        self.note.render()
+        self.app.root.update()
+        bars = self.note._strike_widgets
+        self.assertGreater(len(bars), 1)
+        for bar in bars:
+            display = self.text.dlineinfo(bar._text_start)
+            last = self.text.index(f"@{self.text.winfo_width()},{display[1]}")
+            if self.text.compare(last, ">=", f"{bar._text_start} lineend"):
+                last = f"{bar._text_start} lineend-1c"
+            right = self.text.bbox(last)[0] + self.note.done_font.measure(self.text.get(last))
+            self.assertLessEqual(bar.winfo_x() + bar.winfo_width(), right)
+
     def test_selecting_newline_does_not_paint_the_empty_row_tail(self):
         self.text.tag_add("sel", "2.end", "3.0")
         self.app.root.update()
