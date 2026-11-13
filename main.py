@@ -48,6 +48,13 @@ user32 = ctypes.WinDLL("user32")
 kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
 user32.SetWindowPos.argtypes = [wintypes.HWND, wintypes.HWND, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int, wintypes.UINT]
 user32.SetWindowPos.restype = wintypes.BOOL
+user32.BeginDeferWindowPos.argtypes = [ctypes.c_int]
+user32.BeginDeferWindowPos.restype = wintypes.HANDLE
+user32.DeferWindowPos.argtypes = [wintypes.HANDLE, wintypes.HWND, wintypes.HWND, ctypes.c_int, ctypes.c_int,
+                                  ctypes.c_int, ctypes.c_int, wintypes.UINT]
+user32.DeferWindowPos.restype = wintypes.HANDLE
+user32.EndDeferWindowPos.argtypes = [wintypes.HANDLE]
+user32.EndDeferWindowPos.restype = wintypes.BOOL
 user32.SetLayeredWindowAttributes.argtypes = [wintypes.HWND, wintypes.DWORD, wintypes.BYTE, wintypes.DWORD]
 user32.SetLayeredWindowAttributes.restype = wintypes.BOOL
 user32.PostMessageW.argtypes = [wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM]
@@ -1635,9 +1642,14 @@ class NoteEditor:
                                int(self.text.cget("spacing1")) + int(self.text.cget("spacing3")) + pad)
         self._content_height = max(self.body.winfo_height(), self._document_height + 2 * pad)
         # Windows 子窗口坐标有范围限制；正文保留数屏缓冲，跨段时整组一起切换。
-        height = min(self._content_height, max(self.body.winfo_height(),
-                     min(16000, max(self.body.winfo_height() * 5,
-                                    self.body.winfo_height() + 4 * self._buffer_margin))))
+        if self.win._resizing:
+            # 拉伸时每帧都要重排、重画整个 Text；只保留可见区加上下各一行余量，
+            # 帧耗时不再随缓冲区和正文长度增长。松手后恢复数屏缓冲。
+            height = min(self._content_height, self.body.winfo_height() + 2 * self._buffer_margin)
+        else:
+            height = min(self._content_height, max(self.body.winfo_height(),
+                         min(16000, max(self.body.winfo_height() * 5,
+                                        self.body.winfo_height() + 4 * self._buffer_margin))))
         region = (0, 0, width, self._content_height)
         geometry_changed = self.text.winfo_height() != height
         region_changed = getattr(self, "_body_region", None) != region
@@ -3583,6 +3595,9 @@ class NoteWindow(tk.Toplevel):
                 surface.close()
             self._resize_surface = None
             self._resize_busy = self._resize_ending = self._resize_release_pending = self._resize_cancel_requested = False
+        # 拉伸期间正文只保留一屏缓冲，结束后在空闲时恢复数屏缓冲，滚动仍然顺滑。
+        for editor in self.editors:
+            editor._queue_strikes(measure=False)
         if not hidden and self.d["z"] == "bottom" and self.d.get("visible", True) and user32.IsIconic(self.hwnd):
             self.app._request_bottom_refresh()
         return "break"
@@ -3737,6 +3752,53 @@ def _show_after_layout(window):
     user32.SetWindowLongPtrW(hwnd, -20, style & ~0x80 | 0x40000)  # WS_EX_TOOLWINDOW / WS_EX_APPWINDOW
     user32.SetWindowPos(hwnd, None, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | 0x04 | 0x20)
     window.deiconify()
+
+
+class SmoothWheel:
+    """设置和回收站列表的滚轮，手感与便签正文一致：每格 27pt，按经过时间平滑逼近。"""
+
+    def __init__(self, canvas):
+        self.canvas = canvas
+        canvas.configure(yscrollincrement=1)  # “units” 以像素为单位，才能逐像素平滑移动。
+        self._remaining = 0.0
+        self._time = 0.0
+        self._job = None
+
+    def wheel(self, delta):
+        first, last = self.canvas.yview()
+        if last - first >= .999:
+            self.stop()
+            return
+        distance = -delta / 120 * self.canvas.winfo_fpixels("27p")
+        if distance * self._remaining < 0:
+            self._remaining = 0.0  # 反向滚动时丢弃尚未走完的旧方向。
+        self._remaining += distance
+        if self._job is None:
+            self._time = time.monotonic() - .016
+            self._step()
+
+    def _step(self):
+        self._job = None
+        remaining = self._remaining
+        first, last = self.canvas.yview()
+        if abs(remaining) < 1 or (remaining < 0 and first <= 0) or (remaining > 0 and last >= 1):
+            if abs(remaining) >= 1:
+                self._remaining = 0.0  # 到顶或到底后不再积攒。
+            return
+        now = time.monotonic()
+        progress = -math.expm1(-(now - self._time) / .04)
+        self._time = now
+        step = min(int(abs(remaining)), max(1, round(abs(remaining) * progress)))
+        step *= 1 if remaining > 0 else -1
+        self.canvas.yview_scroll(step, "units")
+        self._remaining -= step
+        self._job = self.canvas.after(16, self._step)
+
+    def stop(self):
+        if self._job is not None:
+            self.canvas.after_cancel(self._job)
+            self._job = None
+        self._remaining = 0.0
 
 
 class SettingsScale(tk.Canvas):
@@ -4188,7 +4250,8 @@ class SettingsWindow(tk.Toplevel):
         bottom_padding = 10
         height = min(content_height + RADIUS + bottom_padding, available_h)
         body.configure(yscrollcommand=scrollbar.set)
-        self.bind("<MouseWheel>", lambda e: body.yview_scroll(-int(e.delta / 120), "units"))
+        self._smooth_wheel = SmoothWheel(body)
+        self.bind("<MouseWheel>", lambda e: self._smooth_wheel.wheel(e.delta))
         border = cv.create_rectangle(0, 0, width - 1, height - 1,
                                      fill=NOTE_BG, outline=NOTE_BORDER)
 
@@ -4517,6 +4580,7 @@ class HistoryPane(tk.Canvas):
         self.content.bind("<Configure>", self.update_region)
         self.viewport.bind("<Configure>", self.update_region)
         self.viewport.bind("<MouseWheel>", self.wheel)
+        self._smooth_wheel = SmoothWheel(self.viewport)
 
     def suspend_region(self):
         self._region_suspended += 1
@@ -4528,8 +4592,9 @@ class HistoryPane(tk.Canvas):
 
     def wheel(self, event):
         if self.content.winfo_reqheight() > self.viewport.winfo_height():
-            self.viewport.yview_scroll(-int(event.delta/120), "units")
+            self._smooth_wheel.wheel(event.delta)
         else:
+            self._smooth_wheel.stop()
             self.viewport.yview_moveto(0)
         return "break"
 
@@ -5352,15 +5417,16 @@ class DockBookmark(tk.Toplevel):
             self.bar.create_image(19, dot_y, image=self.dock.note_visible_dot,
                                   tags="dock-note-visible")
 
-    def place_at(self, y):
-        self.lift()
-        self.move_to(y)
+    def place_at(self, y, batch=None, *, lift=True):
+        if lift or not self.winfo_ismapped():
+            self.lift()
+        self.move_to(y, batch=batch)
         if not self.winfo_ismapped():
             self.deiconify()
 
-    def move_to(self, y, *, viewport=None):
+    def move_to(self, y, *, viewport=None, batch=None):
         self._position_y = round(y)
-        self._position(viewport)
+        self._position(viewport, batch)
 
     def set_motion_opacity(self, opacity):
         previous = self.attributes("-alpha")
@@ -5378,7 +5444,7 @@ class DockBookmark(tk.Toplevel):
             style = user32.GetWindowLongPtrW(hwnd, -20)
             user32.SetWindowLongPtrW(hwnd, -20, style & ~0x00080000)
 
-    def _position(self, viewport=None):
+    def _position(self, viewport=None, batch=None):
         width = self.base_width + self._extension
         edge = user32.GetSystemMetrics(0)
         top, bottom = self._position_y, self._position_y+self.height
@@ -5389,7 +5455,11 @@ class DockBookmark(tk.Toplevel):
             self._canvas_y = canvas_y
             self.bar.place_configure(y=canvas_y)
         # 原生窗口右端伸出屏幕，让可见部分只保留 DWM 抗锯齿左圆角。
-        self.geometry(f"{width+24}x{bottom-top}+{edge-width}+{top}")
+        geometry = (width+24, bottom-top, edge-width, top)
+        if batch is not None and self.winfo_ismapped():
+            batch.append((self, geometry))  # 已显示的窗口留给 _commit_moves 一次性提交。
+        else:
+            self.geometry("%dx%d+%d+%d" % geometry)
         if viewport is None:
             self._draw()
 
@@ -5704,10 +5774,28 @@ class SideDock(DockBookmark):
         if animate:
             self._animate_layout(slots)
         else:
-            self.place_at(self._bar_y)
+            batch = []
+            # 拖动主入口时窗口层级不变，已显示的书签不必每次移动都重新置顶。
+            lift = y is None
+            self.place_at(self._bar_y, batch, lift=lift)
             for window, target in slots:
                 window.set_motion_opacity(1)
-                window.place_at(target)
+                window.place_at(target, batch, lift=lift)
+            self._commit_moves(batch)
+
+    @staticmethod
+    def _commit_moves(batch):
+        """一次提交多个书签窗口的位置：逐个经 Tk 移动十几个窗口约 19ms，批量提交约 2ms。"""
+        if not batch:
+            return
+        handle = user32.BeginDeferWindowPos(len(batch))
+        for window, (width, height, x, y) in batch:
+            if handle:
+                hwnd = user32.GetParent(window.winfo_id()) or window.winfo_id()
+                handle = user32.DeferWindowPos(handle, hwnd, None, x, y, width, height, 0x0004 | 0x0010)
+        if not handle or not user32.EndDeferWindowPos(handle):
+            for window, geometry in batch:  # 批量提交失败时退回逐个移动。
+                window.geometry("%dx%d+%d+%d" % geometry)
 
     def _bookmark_for(self, note):
         identity = note.d["id"]
@@ -5753,10 +5841,12 @@ class SideDock(DockBookmark):
                 return
             # 展开先拉开间距再减速，收起时向入口加速并淡出。
             progress = 1-(1-elapsed)**3 if opening else elapsed**2
-            self.move_to(bar_start+(bar_target-bar_start)*progress)
+            batch = []
+            self.move_to(bar_start+(bar_target-bar_start)*progress, batch=batch)
             for window, origin, target, opacity in motion:
                 window.set_motion_opacity(opacity+(opacity_target-opacity)*progress)
-                window.move_to(origin+(target-origin)*progress)
+                window.move_to(origin+(target-origin)*progress, batch=batch)
+            self._commit_moves(batch)
             self._transition_job = self.after(VISIBILITY_TICK_MS, frame)
 
         self._transition_job = self.after(VISIBILITY_TICK_MS, frame)
@@ -5808,6 +5898,7 @@ class SideDock(DockBookmark):
         viewport = top, bottom
         visible = set()
         entering = []
+        batch = []
         for i, note in enumerate(self._rows[first:first+self._capacity+1], start=first):
             y = top+i*step-shift
             if y >= bottom or y+self.bookmark_height <= top:
@@ -5818,7 +5909,8 @@ class SideDock(DockBookmark):
             if window is None:
                 entering.append((note, y))
             else:
-                window.move_to(y, viewport=viewport)
+                window.move_to(y, viewport=viewport, batch=batch)
+        self._commit_moves(batch)
 
         def commit():
             for identity in self.bookmarks.keys()-visible:
@@ -5864,13 +5956,15 @@ class SideDock(DockBookmark):
     def _preview_sort(self, bookmark, event):
         first_y = self._bar_y+self.bar_height+self.ENTRY_GAP
         step = self.bookmark_height+self.ROW_GAP
+        batch = []
         for i, note in enumerate(self._page_at_drop(bookmark, event)):
             window = self.bookmarks[note.d["id"]]
             y = first_y+i*step
             if window is not bookmark and window._position_y != y:
-                window.move_to(y)
+                window.move_to(y, batch=batch)
         _, _, offset_y = bookmark._press
-        bookmark.move_to(max(0, event.y_root-offset_y))
+        bookmark.move_to(max(0, event.y_root-offset_y), batch=batch)
+        self._commit_moves(batch)
 
     def _finish_sort(self, bookmark, event):
         page = self._page_at_drop(bookmark, event)
