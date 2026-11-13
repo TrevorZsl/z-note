@@ -352,6 +352,25 @@ def round_rect(cv, x1, y1, x2, y2, r, **kw):
             pts += [cx + r * math.cos(a), cy + r * math.sin(a)]
     return cv.create_polygon(pts, **kw)
 
+def smooth_round_rect(cv, x1, y1, x2, y2, r, fill, outline=""):
+    # Tk 画布的多边形没有抗锯齿；这里用 4 倍超采样的 PIL 图片贴上去，圆角边缘才圆润。
+    # 图片带透明通道，阴影可以与下层内容正常混合；图片缓存在画布上，避免拖动时每帧重画。
+    w, h = max(2, round(x2-x1)), max(2, round(y2-y1))
+    r = max(0, min(r, w/2, h/2))
+    cache = cv.__dict__.setdefault("_smooth_rects", {})
+    key = (w, h, round(r, 1), fill, outline)
+    photo = cache.get(key)
+    if photo is None:
+        if len(cache) > 64:
+            cache.clear()
+        scale = 4
+        image = Image.new("RGBA", (w*scale, h*scale), (0, 0, 0, 0))
+        ImageDraw.Draw(image).rounded_rectangle(
+            (0, 0, w*scale-1, h*scale-1), radius=r*scale, fill=fill or None,
+            outline=outline or None, width=scale)
+        photo = cache[key] = ImageTk.PhotoImage(image.resize((w, h), Image.Resampling.LANCZOS), master=cv)
+    return cv.create_image(round(x1), round(y1), image=photo, anchor="nw")
+
 
 def check_images(master, size):
     images = {}
@@ -1224,18 +1243,18 @@ class NoteEditor:
             height = drag["rows"][i][0]
             if y < viewport and y+height > 0:
                 if i == drag["source"]:
-                    round_rect(cv, 5, y+2, width-5, y+height-2, min(9, height/3),
-                               fill=mix(self._bg, "#B6C4D7", .22), outline="")
+                    smooth_round_rect(cv, 5, y+2, width-5, y+height-2, min(9, height/3),
+                                      mix(self._bg, "#B6C4D7", .22))
                     self._draw_drag_row(cv, i, y, muted=True)
                 else:
                     self._draw_drag_row(cv, i, y)
             y += height
         height = drag["rows"][drag["source"]][0]
         y = pointer_y-drag["offset"]
-        round_rect(cv, 6, y+5, width-4, y+height, min(10, height/3),
-                   fill=mix(self._bg, "#677588", .18), outline="")
-        round_rect(cv, 3, y+1, width-7, y+height-4, min(10, height/3),
-                   fill=self._bg, outline="#AAB7C8")
+        smooth_round_rect(cv, 6, y+5, width-4, y+height, min(10, height/3),
+                          mix(self._bg, "#677588", .18))
+        smooth_round_rect(cv, 3, y+1, width-7, y+height-4, min(10, height/3),
+                          self._bg, "#AAB7C8")
         self._draw_drag_row(cv, drag["source"], y)
 
     def _drag_destination(self, pointer):
@@ -1292,8 +1311,8 @@ class NoteEditor:
                 height = layout[0]
                 if y < viewport and y+height > 0:
                     if placeholder:
-                        round_rect(canvas, 5, y+2, width-5, y+height-2, min(9, height/3),
-                                   fill=mix(self._bg, "#B6C4D7", .22), outline="")
+                        smooth_round_rect(canvas, 5, y+2, width-5, y+height-2, min(9, height/3),
+                                          mix(self._bg, "#B6C4D7", .22))
                     editor._draw_drag_row(canvas, index, y, muted=placeholder, line=row_line, layout=layout)
                 y += height
         editor = destination or self
@@ -1313,10 +1332,10 @@ class NoteEditor:
                      y=y, width=width, height=bottom-y)
         tk.Misc.lift(canvas)
         y = raw_y-y
-        round_rect(canvas, 6, y+5, width-4, y+height, min(10, height/3),
-                   fill=mix(self._bg, "#677588", .18), outline="")
-        round_rect(canvas, 3, y+1, width-7, y+height-4, min(10, height/3),
-                   fill=self._bg, outline="#AAB7C8")
+        smooth_round_rect(canvas, 6, y+5, width-4, y+height, min(10, height/3),
+                          mix(self._bg, "#677588", .18))
+        smooth_round_rect(canvas, 3, y+1, width-7, y+height-4, min(10, height/3),
+                          self._bg, "#AAB7C8")
         editor._draw_drag_row(canvas, None, y, line=line, layout=(height, segments))
 
     def _draw_drag_row(self, cv, index, y, muted=False, line=None, layout=None):
