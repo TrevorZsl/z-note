@@ -914,6 +914,7 @@ class SideDockTests(unittest.TestCase):
 
     def test_scroll_moves_real_windows_and_clips_rows_at_the_edges(self):
         self.add_many()
+        self.app.notes["1"].d["title"] = "很长的标题需要截断显示" * 3  # 只有被截断的标题才有全名提示。
         self.click_bar()
         dock = self.dock
         top = dock.bookmarks["0"].winfo_rooty()
@@ -1255,6 +1256,22 @@ class SideDockTests(unittest.TestCase):
         self.assertEqual(restored["settings"]["sideDockY"], 0.8)
         self.assertEqual(restored["settings"]["sideDockOrder"], ["1", "0", "2"])
         self.assertEqual(restored["settings"]["sideDockBlankNumbers"], {"1": 3})
+
+    def test_tooltip_only_for_truncated_titles_after_longer_dwell(self):
+        self.app.notes["0"].d["title"] = "短标题"
+        self.app.notes["1"].d["title"] = "很长的中文标题，需要完整显示。" * 3
+        self.click_bar()
+        short, long = self.dock.bookmarks["0"], self.dock.bookmarks["1"]
+        self.assertNotIn("…", self.label(short))
+        self.assertIn("…", self.label(long))
+        self.assertEqual(long.tip._delay, 800)
+        short.tip._show()
+        self.assertIsNone(main.Tooltip._cur)
+        long.tip._show()
+        canvas, = main.Tooltip._cur.winfo_children()
+        label = next(item for item in canvas.find_all() if canvas.type(item) == "text")
+        self.assertEqual(canvas.itemcget(label, "text"), long.full_label)
+        main.Tooltip._hide()
 
     def test_long_tooltip_stays_on_screen_and_destruction_cancels_it(self):
         self.app.notes["0"].d["title"] = "很长的中文标题，需要完整显示。" * 12

@@ -5191,6 +5191,8 @@ class SideDockTooltip(Tooltip):
     def _show(self):
         self._aid = None
         dock = self._w.master.dock
+        if not self._gt():
+            return  # 标题已完整显示时不再重复提示。
         if dock._sorting_bookmark is None and dock._scroll_job is None:
             self.show_at(self._w, self._gt(), beside=True)
 
@@ -5233,6 +5235,7 @@ class DockBookmark(tk.Toplevel):
         self.base_width = dock.bar_width if self is dock else dock.bookmark_width
         self.full_label = ""
         self._compact_label = None
+        self._label_truncated = False
         self._note_visible = False
         self._hovered = False
         self._menu_open = False
@@ -5263,7 +5266,9 @@ class DockBookmark(tk.Toplevel):
         if self is not dock:
             self.bar.bind("<Button-3>", self._show_delete_menu)
         self.bar.bind("<MouseWheel>", dock._wheel)
-        self.tip = SideDockTooltip(self.bar, lambda: self.full_label) if self is not dock else None
+        # 只有标题被截断或缩写时才提示全名，并多停留一会儿再出现。
+        self.tip = SideDockTooltip(self.bar, lambda: self.full_label if self._label_truncated else "",
+                                   delay=800) if self is not dock else None
         self.bind("<Map>", self._style_native)
 
     def _style_native(self, event):
@@ -5301,6 +5306,7 @@ class DockBookmark(tk.Toplevel):
             while text and self.dock.font.measure(text + "…") > limit:
                 text = text[:-1]
             text += "…"
+        self._label_truncated = is_note and text != self.full_label
         bg = "#F0F3F7" if is_note and not self._note_visible else NOTE_BG
         if self._drawn == (text, bg, width):
             return
