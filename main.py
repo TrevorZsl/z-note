@@ -887,6 +887,8 @@ class NoteEditor:
         self._wheel_job = None
         self._wheel_remaining = 0
         self._selection_scroll_job = None
+        self._selection_carry = 0.0
+        self._selection_time = 0.0
         self._strike_job = None
         self._edge_fade = EdgeFade(self.body)
         self._row_drag = None
@@ -1030,9 +1032,9 @@ class NoteEditor:
             self._drag_handle.place_forget()
         self.scroll_thumb.set(first, last)
         self._edge_fade.update(first, last)
+        self._edge_fade.schedule_repaint()
         if self._layout_busy:
             return
-        self._edge_fade.schedule_repaint()
         top = round(self.body.canvasy(0))
         if ((self._chunk_start > 0 and top < self._chunk_start + self._buffer_margin) or
                 (self.text.yview()[1] < 1 and
@@ -1515,23 +1517,47 @@ class NoteEditor:
         return "break"
 
     def _selection_scroll(self, event=None):
-        self._stop_selection_scroll()
+        # 拖选出界后按时间连续滚动，离边缘越远越快；鼠标事件只更新位置，速度与事件频率无关。
         if event is not None:
             self._selection_x = event.x
             self._selection_y = event.y_root - self.body.winfo_rooty()
         height = self.body.winfo_height()
-        direction = -1 if self._selection_y < 0 else (1 if self._selection_y >= height else 0)
-        if not direction:
+        pointer_y = self._selection_y
+        outside = -pointer_y if pointer_y < 0 else (pointer_y - height + 1 if pointer_y >= height else 0)
+        if not outside:
+            self._stop_selection_scroll()
             return
+        if event is not None and self._selection_scroll_job is not None:
+            return "break"  # 计时器已在运行，下一帧会用最新的鼠标位置。
+        now = time.monotonic()
+        if event is not None:
+            self._selection_carry = 0.0
+            self._selection_time = now - .016
+        scale = self.text.winfo_fpixels("1i") / 96
+        speed = min(3000, 150 + 12 * outside / scale) * scale  # 像素/秒
+        elapsed = min(.05, now - self._selection_time)
+        self._selection_time = now
+        self._selection_carry += (-1 if pointer_y < 0 else 1) * speed * elapsed
+        step = int(self._selection_carry)
+        self._selection_carry -= step
+        # 先登记下一帧，处理窗口事件时重入也不会再启动第二个计时器。
+        self._stop_selection_scroll()
+        self._selection_scroll_job = self.win.after(16, self._selection_scroll)
+        if not step:
+            return "break"
         before = self.body.yview()
-        self.body.yview_scroll(direction * 8, "units")
+        self.body.yview_scroll(step, "units")
         self.body.update_idletasks()
-        y = self.body.canvasy(max(0, min(height - 1, self._selection_y))) - self._chunk_start
+        while self.tk.dooneevent(WINDOW_EVENTS | DONT_WAIT):
+            pass
+        self.body.update_idletasks()
+        y = self.body.canvasy(max(0, min(height - 1, pointer_y))) - self._chunk_start
         self.text.tk.call("tk::TextSelectTo", self.text, self._selection_x, round(y))
         self._clamp_todo_cursor()
         if self.body.yview() != before:
             self.scroll_thumb.reveal()
-            self._selection_scroll_job = self.win.after(30, self._selection_scroll)
+        else:
+            self._stop_selection_scroll()
         return "break"
 
     def _make_check_images(self):
@@ -1997,7 +2023,8 @@ class NoteEditor:
         if not selected:
             return
         first, last = selected
-        for row in range(int(str(first).split(".")[0]), int(str(last).split(".")[0]) + 1):
+        first_row, last_row = int(str(first).split(".")[0]), int(str(last).split(".")[0])
+        for row in range(first_row, last_row + 1):
             start = first if t.compare(first, ">", f"{row}.0") else f"{row}.0"
             if row <= len(self.lines) and self.lines[row-1]["type"] == "todo":
                 text_start = f"{row}.{self._prefix_len(self.lines[row-1])}"
@@ -2006,6 +2033,11 @@ class NoteEditor:
             end = last if t.compare(last, "<", f"{row}.end") else f"{row}.end"
             if t.compare(start, "<", end):
                 t.tag_add("selection_fill", start, end)
+            elif row <= len(self.lines) and not self.lines[row-1]["text"] and (
+                    row < last_row or (t.compare(last, ">", f"{row}.0")
+                                       and (row > first_row or t.compare(first, "<", f"{row}.end")))):
+                # 空行没有文字可画：只给被选中的空行补一个换行符大小的标记，其余行不变。
+                t.tag_add("selection_fill", f"{row}.end", f"{row}.end+1c")
 
     def _sync_lines_from_text(self):
         # 选区删除和粘贴都可能改变多行，不能只保存光标所在行。
@@ -2055,11 +2087,6 @@ class NoteEditor:
         if _e is None or _e.keysym not in ("Shift_L", "Shift_R", "Control_L", "Control_R", "Alt_L", "Alt_R"):
             self._see_text("insert")
         self.app.schedule_save()
-            elif row <= len(self.lines) and not self.lines[row-1]["text"] and (
-                    row < last_row or (t.compare(last, ">", f"{row}.0")
-                                       and (row > first_row or t.compare(first, "<", f"{row}.end")))):
-                # 空行没有文字可画：只给被选中的空行补一个换行符大小的标记，其余行不变。
-                t.tag_add("selection_fill", f"{row}.end", f"{row}.end+1c")
 
     def _on_enter(self, _e):
         if self.win._ime_composing(self.text):
