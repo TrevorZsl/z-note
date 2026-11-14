@@ -4568,6 +4568,17 @@ class NoteEditingTests(unittest.TestCase):
         for bar in bars[:-1]:
             self.assertGreater(bar.winfo_width(), self.text.winfo_width() // 2)
 
+    def test_checkbox_to_text_gap_is_045_of_box_and_keeps_caret_clear(self):
+        self.app.root.update()
+        box = self.note._checkbox_widgets[0]
+        size = box.winfo_width()
+        text_x = self.text.bbox("2.3")[0]
+        # 框图右侧 1px 透明边计入可见间距。
+        self.assertLessEqual(abs(text_x - (box.winfo_x() + size) + 1 - round(size * .45)), 1)
+        self.assertGreaterEqual(text_x - (box.winfo_x() + size), self.note._check_margin)
+        self.assertEqual(int(self.text.tag_cget("todo_indent", "lmargin2")) + int(self.text.cget("padx")),
+                         text_x)
+
     def test_wrapped_strike_ends_at_last_glyph_not_right_edge(self):
         # 软换行处 Tk 把显示行末字的 bbox 延伸到右边缘，横线不能跟着伸出去。
         self.note.geometry("300x500")

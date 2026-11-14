@@ -1583,7 +1583,10 @@ class NoteEditor:
         self._check_images = check_images(self.text, size)
         # 原生插入光标跨在字符边界上，勾选框子窗口不能覆盖占位符的左右边界。
         self._check_margin = max(1, int(self.text.cget("insertwidth")))
-        slot_width = size + 2 * self._check_margin
+        # 框线到文字的可见间距取框宽的 0.45：收窄占位图，勾选框盖住前缀空格的左侧一段。
+        # 框图右侧有 1px 透明边，光标仍停在空格之后，不被勾选框遮住。
+        natural_gap = 1 + self._check_margin + self.app.base_font.measure(PREFIX_PAD)
+        slot_width = size + 2 * self._check_margin - max(0, natural_gap - round(size * .45))
         self._check_slots = {checked: ImageTk.PhotoImage(Image.new("RGBA", (slot_width, size)), master=self.text)
                              for checked in (False, True)}
         # Text 在左内边距处裁切光标，首行也要留出半个光标的绘制宽度。
