@@ -5244,9 +5244,21 @@ class HistoryWindow(tk.Toplevel):
                             return
                         header_h = title.winfo_y() + title.winfo_height()
                         canvas.delete("all")
-                        round_rect(canvas, 1, 1, w-1, h-1, 12, fill=NOTE_BG, outline=NOTE_BORDER)
-                        round_rect(canvas, 2, 2, w-2, header_h+12, 11, fill="#F5F7FA", outline="")
-                        canvas.create_rectangle(2, header_h, w-2, header_h+13, fill=NOTE_BG, outline="")
+                        # 底色、标题底和边框画在同一张超采样图里，圆角处两层抗锯齿边缘不会透出白缝。
+                        scale, cw, ch = 4, w-2, h-2
+                        box = (0, 0, cw*scale-1, ch*scale-1)
+                        mask = Image.new("L", (cw*scale, ch*scale), 0)
+                        ImageDraw.Draw(mask).rounded_rectangle(box, radius=12*scale, fill=255)
+                        fill = Image.new("RGBA", mask.size, NOTE_BG)
+                        if header_h > 1:
+                            ImageDraw.Draw(fill).rectangle((0, 0, cw*scale, (header_h-1)*scale-1), fill="#F5F7FA")
+                        image = Image.new("RGBA", mask.size, (0, 0, 0, 0))
+                        image.paste(fill, (0, 0), mask)
+                        ImageDraw.Draw(image).rounded_rectangle(box, radius=12*scale, outline=NOTE_BORDER, width=scale)
+                        # 按面积平均缩小：LANCZOS 会让圆弧比直边浅，并在弧线内侧留下发白的亮边。
+                        canvas._card_image = ImageTk.PhotoImage(
+                            image.resize((cw, ch), Image.Resampling.BOX), master=canvas)
+                        canvas.create_image(1, 1, image=canvas._card_image, anchor="nw")
                     section.bind("<Configure>", draw_section)
                     heading.bind("<Configure>", draw_section)
                     lines = note.get(key) or []
