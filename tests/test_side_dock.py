@@ -1335,5 +1335,62 @@ class SideDockTests(unittest.TestCase):
             self.assertEqual(window.winfo_x()+window.bar.winfo_width(), main.user32.GetSystemMetrics(0))
 
 
+class HiddenNoteRevealPaintTests(unittest.TestCase):
+    """启动时隐藏的便签经一键显示淡入后，底栏状态文字必须画出来，不能透出下层窗口。"""
+
+    def setUp(self):
+        self.errors = []
+        note = dict(w=440, h=477, opacity=1.0, color="白", editedAt="2026-11-14T12:00:00")
+        self.data = {"schemaVersion": 3, "welcomeVersion": main.APP_VERSION,
+                     "settings": dict(main.DEFAULT_SETTINGS, showOnStartup=False),
+                     "notes": [dict(note, id="shown", x=900, y=200, z="normal", visible=True,
+                                    lines=[dict(type="text", text="a", checked=False)]),
+                               dict(note, id="hidden", x=2036, y=524, z="top", visible=False,
+                                    lines=[dict(type="todo", text="", checked=False)])]}
+        self.enterContext(patch.object(main, "save_data"))
+        self.enterContext(patch.object(main, "load_data", side_effect=lambda: deepcopy(self.data)))
+        self.enterContext(patch.object(main.App, "_start_tray"))
+        self.enterContext(patch.object(main.App, "_start_hotkeys"))
+        self.enterContext(patch.object(main.tk.Tk, "report_callback_exception",
+                                     side_effect=lambda kind, value, trace: self.errors.append(str(value))))
+        self.app = main.App()
+        self.app.icon = Mock()
+        self.root = self.app.root
+
+    def tearDown(self):
+        self.app._stop_bottom_guard()
+        for job in self.root.tk.call("after", "info"):
+            self.root.tk.call("after", "cancel", job)
+        self.root.destroy()
+        self.assertFalse(self.errors, self.errors)
+
+    def wait(self, seconds):
+        end = time.monotonic() + seconds
+        while time.monotonic() < end:
+            self.root.update()
+            time.sleep(0.01)
+
+    def test_show_all_paints_footer_status_of_note_hidden_at_startup(self):
+        note = self.app.notes["hidden"]
+        d = note.d
+        # 洋红底板先放在便签位置并压在最底层，缺画处会直接显示成洋红。
+        backdrop = main.tk.Toplevel(self.root, bg="#FF00FF")
+        backdrop.overrideredirect(True)
+        backdrop.geometry(f"{d['w']}x{d['h']}+{d['x']}+{d['y']}")
+        self.root.update()
+        main.user32.SetWindowPos(main.user32.GetParent(backdrop.winfo_id()), 1,
+                                 0, 0, 0, 0, 0x0001 | 0x0002 | 0x0010)
+        self.wait(1.0)
+        with patch.object(self.app._note_motion, "enabled", return_value=True):
+            self.app.show_all(animate=True)
+            self.wait(0.6)
+        self.assertEqual(note.status.cget("text"), "待办 0/1")
+        x, y = note.status.winfo_rootx(), note.status.winfo_rooty()
+        image = ImageGrab.grab((x, y, x+note.status.winfo_width(), y+note.status.winfo_height()),
+                               all_screens=True).convert("RGB")
+        holes = sum(1 for r, g, b in image.get_flattened_data() if r > 200 and g < 60 and b > 200)
+        self.assertEqual(holes, 0)
+
+
 if __name__ == "__main__":
     unittest.main()

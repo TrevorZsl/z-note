@@ -6102,6 +6102,13 @@ class NoteVisibilityMotion:
         return user32.SetLayeredWindowAttributes(note.hwnd, 0, round(opacity*255), 2)
 
     @staticmethod
+    def _repaint(note):
+        # 切换分层样式或在分层状态下映射后，系统不会补画所有子窗口（如底栏状态文字），
+        # 缺画处会透出桌面。按 Win32 文档整窗连同子窗口重绘一次：
+        # RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN | RDW_UPDATENOW | RDW_FRAME。
+        user32.RedrawWindow(note.hwnd, None, None, 0x0585)
+
+    @staticmethod
     def _move(note, x, y):
         return user32.SetWindowPos(note.hwnd, None, x, y, 0, 0, SWP_NOSIZE | 0x0004 | 0x0010)
 
@@ -6162,6 +6169,7 @@ class NoteVisibilityMotion:
                 return
             if show_window:
                 note.show(temporary_raise=temporary_raise)
+            self._repaint(note)
         else:
             note._cancel_dock_reveal()
             note.d["visible"] = False
@@ -6218,6 +6226,7 @@ class NoteVisibilityMotion:
             user32.SetLayeredWindowAttributes(note.hwnd, 0, round(opacity*255), 2)
             if opacity == 1 and not layered:
                 user32.SetWindowLongPtrW(note.hwnd, -20, style & ~self._LAYERED)
+                self._repaint(note)
 
     def finish_all(self):
         return {note: self.finish(note) for note in tuple(self._active)}
