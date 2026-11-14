@@ -221,5 +221,6 @@ $giteePage
 | v2.2.5 | 构建和 GitHub 草稿成功后取消尚未完成的云端 Gitee 任务，原 Artifact 由本机接手。补传任务约 95 秒；留存的原产物及两平台下载文件逐一验过 SHA-256。 [原运行](https://github.com/TrevorZsl/z-note/actions/runs/42842280972) · [本机补传](https://github.com/TrevorZsl/z-note/actions/runs/42843004016) |
 | v2.2.6 | 本机补传成功，下载 Artifact 约 10 分 50 秒，Gitee 安装包上传约 14 秒。旧验收目录里有两种同名安装包哈希，其中一份 GitHub 下载副本和清单不匹配。这正是验收时使用全新目录并以原 Artifact 为准的原因。 [原运行](https://github.com/TrevorZsl/z-note/actions/runs/43061724935) · [本机补传](https://github.com/TrevorZsl/z-note/actions/runs/43062112625) |
 | v2.2.7 | 查阅记录时，原构建成功，GitHub 草稿有两份附件，云端 Gitee 步骤报 30 秒 HTTP 请求超时。后续接手时先查两平台现状，原构建编号为 `43258186176`。 [原运行](https://github.com/TrevorZsl/z-note/actions/runs/43258186176) |
+| v2.2.8 | 构建与 GitHub 草稿一次成功。第一次本机补传在 checkout 失败：全局 git 配置的代理指向已停止的本机代理；改为给 Runner 进程注入 `GIT_CONFIG_COUNT` 覆盖 `http.proxy`/`https.proxy`（不动全局配置）后重新派发。Artifact 下载约 26 分钟，任务被 15 分钟超时取消时 Gitee 上传已完成，匿名回读两份附件哈希一致。验收下载的教训：草稿安装包的浏览器 URL 匿名返回 404，须用登录后的 API 附件端点（`Accept: application/octet-stream`）下载；gh 下载先写临时文件再解压，目录为空不代表未开始。 [原运行](https://github.com/TrevorZsl/z-note/actions/runs/43566619819) · [本机补传](https://github.com/TrevorZsl/z-note/actions/runs/43567272849) |
 
 跨项目复用时，替换源码仓、两个发布仓、版本来源、附件名称和构建命令即可沿用这条链路。发布仓应先初始化默认分支，公开发行说明与附件放在发布仓，工作流和构建产物留在源码仓。
