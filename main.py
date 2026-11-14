@@ -588,7 +588,7 @@ def load_icon(master, name, size=22, active=False):
 
 
 class ToolButton(tk.Canvas):
-    """圆形悬浮底 + Lucide 图标；置顶、置底激活时保留浅灰圆角底。"""
+    """圆角方形悬浮底 + Lucide 图标；置顶、置底激活时保留浅灰圆角底。"""
 
     def __init__(self, master, icon, get_tip, cmd, bg, size=30):
         super().__init__(master, width=size, height=size, bg=bg,
@@ -596,9 +596,8 @@ class ToolButton(tk.Canvas):
         self._bg, self._active = bg, False
         self._image = load_icon(self, icon)
         self._active_image = load_icon(self, icon, active=True) if icon in ("pin", "arrow-down-to-line", "columns-2") else self._image
-        r = 13
-        self._pill = self.create_oval(size/2 - r, size/2 - r, size/2 + r, size/2 + r,
-                                      state="hidden", outline="")
+        # 悬停底与置顶、置底激活底同形状，只靠深浅区分状态。
+        self._pill = round_rect(self, 0, 0, size, size, 7, fill="", outline="", state="hidden")
         self._active_pill = (round_rect(self, 0, 0, size, size, 7, fill="#E5E9EF", outline="", state="hidden")
                              if icon in ("pin", "arrow-down-to-line") else None)
         self._icon = self.create_image(size/2, size/2 + 1, image=self._image)
