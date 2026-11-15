@@ -1847,6 +1847,53 @@ class NoteEditor:
             if t.compare("insert", "<", target):
                 t.mark_set("insert", target)
 
+    def _text_body(self, row):
+        # 按文本中的勾选框图片判断，连续按键时行数据可能还没同步。
+        t = self.text
+        start = f"{row}.0"
+        if (t.dump(start, f"{start}+1c", image=True) and
+                t.image_cget(start, "image") in {str(i) for i in self._check_slots.values()}):
+            return t.index(f"{row}.{1 + len(PREFIX_PAD)}")
+        return start
+
+    def _trim_selection(self):
+        """删除、输入、剪贴前把选区收到高亮的文字上：勾选框和两端的换行属于行结构。
+        与 _paint_selection 的高亮范围一致；选区里没有可删的内容时取消选区并返回 False。"""
+        t = self.text
+        if not t.tag_ranges("sel"):
+            return True
+        first, last = t.index("sel.first"), t.index("sel.last")
+        first_row, last_row = int(first.split(".")[0]), int(last.split(".")[0])
+        if last_row > first_row:
+            body = self._text_body(last_row)
+            if t.compare(body, "<", f"{last_row}.end"):
+                excluded = t.compare(last, "<=", body)  # 末行一个字都没选中
+            else:
+                # 空行有高亮标记才算选中；选到文末（如全选）时也包括最后的空行。
+                excluded = (t.compare(last, "==", f"{last_row}.0") and
+                            t.compare(last, "!=", "end-1c"))
+            if excluded:
+                last_row -= 1
+                last = t.index(f"{last_row}.end")
+        body = self._text_body(last_row)
+        if t.compare(last, "<", body):
+            last = body
+        body = self._text_body(first_row)
+        if t.compare(first, "<", body):
+            first = body
+        if (first_row < last_row and t.compare(body, "<", first) and
+                t.compare(first, "==", f"{first_row}.end")):
+            first = self._text_body(first_row + 1)  # 起点在有字行的行尾：这行没有被高亮
+        if t.compare(first, ">=", last):
+            t.tag_remove("sel", "1.0", "end")
+            return False
+        if (first, last) != (t.index("sel.first"), t.index("sel.last")):
+            t.tag_remove("sel", "1.0", "end")
+            t.tag_add("sel", first, last)
+        if not (t.compare(first, "<=", "insert") and t.compare("insert", "<=", last)):
+            t.mark_set("insert", last)  # Tk 只在光标位于选区内时删除整个选区
+        return True
+
     # ---- 底部添加条 ----
     def add_todo(self):
         row = int(self.text.index("insert").split(".")[0])
@@ -1952,6 +1999,7 @@ class NoteEditor:
             return "break"
         self._sync_lines_from_text()
         self._clamp_todo_cursor()
+        self._trim_selection()
         t = self.text
         if command in ("tk_textCopy", "tk_textCut"):
             if not t.tag_ranges("sel"):
@@ -2190,6 +2238,9 @@ class NoteEditor:
             self.app.schedule_save()
             return "break"
         if ln["type"] == "todo" and at_line_start:
+            # 第一行没有可合并的上一行，退格去掉勾选框、保留正文，与右键「转为文字」一致。
+            self._remember_edit()
+            self.convert_rows([0], "text")
             return "break"
         return None
 
@@ -2207,6 +2258,15 @@ class NoteEditor:
             if event.type == tk.EventType.KeyRelease:
                 return "break"  # 转换已保存，松键不再走普通输入的同步和保存流程。
             return self.toggle_line_type()
+        # 会替换选区的按键先收拢选区，勾选框和行尾换行不随选区删除。
+        deleting = event.keysym in ("BackSpace", "Delete")
+        typing = bool(event.char) and (event.char == "\t" or event.char.isprintable()) and (
+            not event.state & 4 or bool(event.state & 0x20000))  # AltGr 在 Windows 上是 Ctrl+Alt
+        if (event.type == tk.EventType.KeyPress and self.text.tag_ranges("sel") and
+                (deleting or typing or event.keysym in ("Return", "KP_Enter")) and
+                not self.win._ime_composing(self.text)):
+            if not self._trim_selection() and deleting:
+                return "break"  # 选区里只有勾选框或换行，没有可删的文字
 
     def _conversion_rows(self):
         selected = self.text.tag_ranges("sel")
@@ -2790,6 +2850,7 @@ class NoteWindow(tk.Toplevel):
         self._ime_selected_images = []
         if editor is not None:
             editor._clamp_todo_cursor()
+            editor._trim_selection()
             selection = widget.tag_ranges("sel")
             if selection:
                 widget.mark_set("insert", selection[0])

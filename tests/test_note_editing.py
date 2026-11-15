@@ -1880,8 +1880,9 @@ class NoteEditingTests(unittest.TestCase):
             text.clipboard_clear()
             text.clipboard_append("替换所有内容")
             text.event_generate("<Control-v>")
+            # 选区不删勾选框：首行保留原来的待办和完成状态，其余行被替换。
             self.assertEqual(note.d["lines"], [
-                {"type": "text", "text": "替换所有内容", "checked": False}])
+                {"type": "todo", "text": "替换所有内容", "checked": True}])
             text.event_generate("<Control-z>")
             self.assertEqual(note.d["lines"], pasted)
         finally:
@@ -3945,7 +3946,7 @@ class NoteEditingTests(unittest.TestCase):
                 self.assertTrue(all(not manager for frame in snapshots for manager in frame), snapshots)
                 self.assertFalse(note._strike_widgets)
 
-    def test_first_todo_backspace_does_not_delete_checkbox(self):
+    def test_first_todo_backspace_removes_checkbox_of_new_note(self):
         note = self.app.new_note()
         text = note.text
         text.focus_force()
@@ -3954,10 +3955,14 @@ class NoteEditingTests(unittest.TestCase):
         for _ in range(4):
             text.event_generate("<BackSpace>")
             text.event_generate("<KeyRelease-BackSpace>")
-        self.assertEqual(text.index("insert"), "1.3")
+        self.assertEqual(text.index("insert"), "1.0")
         self.assertEqual(note.d["lines"], [
-            {"type": "todo", "text": "", "checked": False}])
-        self.assertEqual(len(text.dump("1.0", "end", image=True)), 1)
+            {"type": "text", "text": "", "checked": False}])
+        self.assertEqual(len(text.dump("1.0", "end", image=True)), 0)
+        text.event_generate("<KeyPress-x>")
+        text.event_generate("<KeyRelease-x>")
+        self.assertEqual(note.d["lines"], [
+            {"type": "text", "text": "x", "checked": False}])
 
     def test_mouse_and_home_keep_cursor_in_todo_body_before_typing(self):
         note, text = self.note, self.text
@@ -4619,6 +4624,140 @@ class NoteEditingTests(unittest.TestCase):
         self.app.root.update()
         self.assertFalse(self.text.tag_ranges("selection_fill"))
 
+    def _selection_case(self, editor, lines, first, last, insert=None):
+        if editor is self.note:
+            editor = self.note.editors[0]
+        editor.lines = main.deepcopy(lines)
+        editor.render(keep_cursor=False)
+        editor.text.focus_force()
+        self.app.root.update()
+        editor._remember_edit()
+        editor.text.tag_remove("sel", "1.0", "end")
+        editor.text.tag_add("sel", first, last)
+        editor.text.mark_set("insert", insert or last)
+        editor._clamp_todo_cursor()
+
+    def test_deleting_whole_row_selection_keeps_its_checkbox_however_it_was_selected(self):
+        lines = [{"type": "todo", "text": "sdf", "checked": False},
+                 {"type": "todo", "text": "dsf", "checked": False},
+                 {"type": "todo", "text": "sdfs", "checked": True},
+                 {"type": "todo", "text": "abc", "checked": False}]
+        expected = [lines[0], lines[1], {"type": "todo", "text": "", "checked": False}, lines[3]]
+        # 只选文字、拖过勾选框、三击整行、从上一行行尾开始：高亮都只有本行文字，结果应一致。
+        for first, last in (("3.3", "3.end"), ("3.0", "3.end"), ("3.0", "4.0"), ("2.end", "3.end")):
+            for key in ("BackSpace", "Delete"):
+                with self.subTest(selection=(first, last), key=key):
+                    self._selection_case(self.note, lines, first, last)
+                    self.text.event_generate(f"<KeyPress-{key}>")
+                    self.text.event_generate(f"<KeyRelease-{key}>")
+                    self.assertEqual(self.note.d["lines"], expected)
+                    self.assertEqual(self.text.index("insert"), "3.3")
+                    self.assertEqual(len(self.text.dump("1.0", "end", image=True)), 4)
+                    self.note._undo_edit()
+                    self.assertEqual(self.note.d["lines"], lines)
+
+    def test_cross_row_selection_delete_keeps_head_checkbox_and_skips_unhighlighted_rows(self):
+        lines = [{"type": "todo", "text": "sdf", "checked": False},
+                 {"type": "todo", "text": "dsf", "checked": True},
+                 {"type": "text", "text": "说明", "checked": False},
+                 {"type": "todo", "text": "abc", "checked": False}]
+        cases = (
+            # 头行留下勾选框与完成状态，尾行剩下的文字接上。
+            (("2.4", "4.4"), [lines[0], {"type": "todo", "text": "dbc", "checked": True}]),
+            # 尾行只碰到勾选框，没有高亮文字：尾行原样保留。
+            (("2.3", "4.2"), [lines[0], {"type": "todo", "text": "", "checked": False}, lines[3]]),
+            (("2.0", "4.0"), [lines[0], {"type": "todo", "text": "", "checked": False}, lines[3]]),
+        )
+        for (first, last), expected in cases:
+            with self.subTest(selection=(first, last)):
+                self._selection_case(self.note, lines, first, last)
+                self.text.event_generate("<KeyPress-BackSpace>")
+                self.text.event_generate("<KeyRelease-BackSpace>")
+                self.assertEqual(self.note.d["lines"], expected)
+                self.assertEqual(self.text.index("insert"), first if first != "2.0" else "2.3")
+
+    def test_selection_without_highlighted_text_deletes_nothing(self):
+        lines = [{"type": "todo", "text": "sdf", "checked": False},
+                 {"type": "todo", "text": "", "checked": False},
+                 {"type": "todo", "text": "abc", "checked": True}]
+        # 只选中勾选框、空行三击、只有换行：都没有可删的文字。
+        for first, last in (("3.0", "3.3"), ("2.0", "3.0"), ("1.end", "2.0")):
+            for key in ("BackSpace", "Delete"):
+                with self.subTest(selection=(first, last), key=key):
+                    self._selection_case(self.note, lines, first, last)
+                    self.text.event_generate(f"<KeyPress-{key}>")
+                    self.text.event_generate(f"<KeyRelease-{key}>")
+                    self.assertEqual(self.note.d["lines"], lines)
+                    self.assertFalse(self.text.tag_ranges("sel"))
+
+    def test_select_all_delete_leaves_first_row_type_and_includes_final_empty_row(self):
+        for lines, expected in (
+                ([{"type": "todo", "text": "sdf", "checked": True},
+                  {"type": "todo", "text": "abc", "checked": False}],
+                 [{"type": "todo", "text": "", "checked": False}]),
+                ([{"type": "todo", "text": "sdf", "checked": False},
+                  {"type": "text", "text": "", "checked": False}],
+                 [{"type": "todo", "text": "", "checked": False}]),
+                ([{"type": "text", "text": "说明", "checked": False},
+                  {"type": "todo", "text": "", "checked": False}],
+                 [{"type": "text", "text": "", "checked": False}])):
+            with self.subTest(lines=lines):
+                self._selection_case(self.note, lines, "1.0", "end-1c")
+                self.text.event_generate("<KeyPress-Delete>")
+                self.text.event_generate("<KeyRelease-Delete>")
+                self.assertEqual(self.note.d["lines"], expected)
+
+    def test_typing_cut_paste_and_ime_over_whole_row_selection_keep_checkbox(self):
+        lines = [{"type": "todo", "text": "sdf", "checked": False},
+                 {"type": "todo", "text": "sdfs", "checked": False},
+                 {"type": "todo", "text": "abc", "checked": True}]
+        try:
+            clipboard = self.text.clipboard_get()
+        except main.tk.TclError:
+            clipboard = None
+        try:
+            self._selection_case(self.note, lines, "2.0", "3.0")
+            self.text.event_generate("<KeyPress-x>")
+            self.text.event_generate("<KeyRelease-x>")
+            self.assertEqual(self.note.d["lines"],
+                             [lines[0], {"type": "todo", "text": "x", "checked": False}, lines[2]])
+
+            self._selection_case(self.note, lines, "2.0", "3.0")
+            self.text.event_generate("<<Cut>>")
+            self.assertEqual(self.text.clipboard_get(), "sdfs")
+            self.assertEqual(self.note.d["lines"],
+                             [lines[0], {"type": "todo", "text": "", "checked": False}, lines[2]])
+
+            self.text.clipboard_clear()
+            self.text.clipboard_append("粘贴")
+            self._selection_case(self.note, lines, "2.0", "3.0")
+            self.text.event_generate("<<Paste>>")
+            self.assertEqual(self.note.d["lines"],
+                             [lines[0], {"type": "todo", "text": "粘贴", "checked": False}, lines[2]])
+
+            self._selection_case(self.note, lines, "2.0", "3.0")
+            self.note._begin_preedit(self.text)
+            self.note._replace_preedit("ni", 2)
+            self.note._finish_preedit("你")
+            self.app.root.update()
+            self.assertEqual(self.note.d["lines"],
+                             [lines[0], {"type": "todo", "text": "你", "checked": False}, lines[2]])
+        finally:
+            self.text.clipboard_clear()
+            if clipboard is not None:
+                self.text.clipboard_append(clipboard)
+
+    def test_whole_row_selection_delete_keeps_checkbox_in_each_column(self):
+        self.note.toggle_columns()
+        lines = [{"type": "todo", "text": "月报", "checked": False},
+                 {"type": "todo", "text": "生息", "checked": True}]
+        for editor in self.note.editors:
+            with self.subTest(column=editor.col):
+                self._selection_case(editor, lines, "1.0", "2.0")
+                editor.text.event_generate("<KeyPress-BackSpace>")
+                editor.text.event_generate("<KeyRelease-BackSpace>")
+                self.assertEqual(editor.lines, [{"type": "todo", "text": "", "checked": False}, lines[1]])
+
     def test_cross_row_delete_stays_deleted_after_redraw(self):
         first, second = self.note.d["lines"][1:3]
         expected = first["text"][:2] + second["text"][2:]
@@ -4784,14 +4923,31 @@ class NoteEditingTests(unittest.TestCase):
                         self.assertEqual(editor.lines, original[1:])
                         self.assertEqual(editor.text.index("insert"), caret)
 
-    def test_backspace_at_nonempty_first_todo_keeps_its_checkbox_and_text(self):
-        original = [{"type": "todo", "text": "月报", "checked": True},
-                    {"type": "todo", "text": "生息", "checked": True}]
-        self.note.d["lines"] = main.deepcopy(original)
-        self.note.render()
-        self.text.mark_set("insert", "1.3")
-        self.assertEqual(self.note._on_backspace(None), "break")
-        self.assertEqual(self.note.d["lines"], original)
+    def test_backspace_at_nonempty_first_todo_converts_it_to_text(self):
+        for two_column in (False, True):
+            if two_column:
+                self.note.toggle_columns()
+            for editor in self.note.editors:
+                with self.subTest(two_column=two_column, column=editor.col):
+                    original = [{"type": "todo", "text": "月报", "checked": True},
+                                {"type": "todo", "text": "生息", "checked": True}]
+                    converted = [{"type": "text", "text": "月报", "checked": False}, original[1]]
+                    editor.lines = main.deepcopy(original)
+                    editor.render()
+                    editor.text.mark_set("insert", "1.3")
+                    editor._remember_edit()
+                    self.assertEqual(editor._on_backspace(None), "break")
+                    editor._on_keyrelease(None)
+                    self.app.root.update()
+                    self.assertEqual(editor.lines, converted)
+                    self.assertEqual(editor.text.index("insert"), "1.0")
+                    self.assertEqual(editor.text.get("1.0", "1.end"), "月报")
+                    self.assertEqual(len(editor._strike_widgets), 1)
+                    editor._undo_edit()
+                    self.assertEqual(editor.lines, original)
+                    self.assertEqual(editor.text.index("insert"), "1.3")
+                    editor._undo_edit(redo=True)
+                    self.assertEqual(editor.lines, converted)
 
     def test_backspace_merge_keeps_cursor_before_current_text(self):
         for previous_type in ("todo", "text"):
