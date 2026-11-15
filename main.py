@@ -5614,6 +5614,52 @@ class DockBookmark(tk.Toplevel):
         super().destroy()
 
 
+class DockHideAllButton(DockBookmark):
+    """书签组最下面的一键隐藏按钮，复用书签的贴边窗口，点击等同“隐藏所有便签”。"""
+    WIDTH = 40
+    HOVER_EXTENSION = 0  # 悬停不伸出，只显示提示。
+
+    def __init__(self, dock):
+        super().__init__(dock, dock.bookmark_height)
+        self.base_width = self.WIDTH
+        # 复用书签的悬停提示：标题按“已截断”处理，停留后在左侧显示中文说明。
+        self.full_label, self._label_truncated = "收纳所有", True
+        # 深色图标与灰字书签区分开。
+        self.icon = load_icon(self.bar, "panel-right-close", 20, active=True)
+
+    def _draw(self):
+        width = self.base_width + self._extension
+        if self._drawn == width:
+            return
+        self._drawn = width
+        self.bar.place_configure(width=width, height=self.height)
+        self.bar.delete("all")
+        # 左侧有 DWM 阴影，视觉中心偏左，图标右移 2px 补偿。
+        self.bar.create_image(width/2+2, self.height/2, image=self.icon,
+                              tags="dock-hide-all")
+
+    def _show_delete_menu(self, event):
+        pass
+
+    def _idle(self):
+        dock = self.dock
+        return (dock._transition_job is None and dock._sorting_bookmark is None
+                and dock._scroll_job is None)
+
+    def _drag_press(self, event):
+        self._press = (event.x_root, event.y_root) if self._idle() else None
+
+    def _drag_move(self, event):
+        if self._press and max(abs(event.x_root-self._press[0]),
+                               abs(event.y_root-self._press[1])) >= 5:
+            self._press = None
+
+    def _drag_release(self, event):
+        pressed, self._press = self._press, None
+        if pressed is not None and self._idle():
+            self.dock.app.hide_all(animate=True)
+
+
 class SideDock(DockBookmark):
     """主入口和有限数量的独立书签，不使用共同的弹出面板。"""
     ENTRY_GAP = 10
@@ -5646,6 +5692,7 @@ class SideDock(DockBookmark):
         self._scroll_job = None
         self._scroll_position = 0.0
         super().__init__(self, self.bar_height)
+        self.hide_all_button = DockHideAllButton(self)
         self.update_label("z-note")
 
     @staticmethod
@@ -5732,6 +5779,7 @@ class SideDock(DockBookmark):
         for window in self.bookmarks.values():
             window.destroy()
         self.bookmarks.clear()
+        self.hide_all_button.hide_bookmark()
 
     def _show_empty_tip(self):
         self._hide_empty_tip()
@@ -5767,17 +5815,23 @@ class SideDock(DockBookmark):
         if not self.expanded:
             self._bar_y = int(min(work.bottom-8-self.bar_height, max(work.top+8, self._anchor_y)))
             if animate:
-                self._animate_layout([(window, self._bar_y) for window in self.bookmarks.values()])
+                windows = list(self.bookmarks.values())
+                if self.hide_all_button.winfo_ismapped():
+                    windows.append(self.hide_all_button)
+                self._animate_layout([(window, self._bar_y) for window in windows])
                 return
             self._offset = 0
             self._clear_bookmarks()
             self.place_at(self._bar_y)
             return
-        room = work.bottom-work.top-16-self.bar_height-entry_gap
+        # 一键隐藏按钮固定占书签组最下面一行；按钮出现或消失时书签容量和位置都不变。
+        button = self.hide_all_button
+        button_room = entry_gap+button.height
+        room = work.bottom-work.top-16-self.bar_height-entry_gap-button_room
         self._capacity = max(1, min(self.MAX_BOOKMARKS, (room+row_gap)//row_step))
         self._offset = min(max(0, self._offset), max(0, len(self._rows)-self._capacity))
         page = self._rows[self._offset:self._offset+self._capacity]
-        group_height = self.bar_height+entry_gap+len(page)*row_step-row_gap
+        group_height = self.bar_height+entry_gap+len(page)*row_step-row_gap+button_room
         self._bar_y = int(max(work.top+8, min(self._anchor_y, work.bottom-8-group_height)))
         if y is not None:
             self._anchor_y = self._bar_y
@@ -5790,6 +5844,10 @@ class SideDock(DockBookmark):
         for note in page:
             slots.append((self._bookmark_for(note), next_y))
             next_y += row_step
+        if any(note.d.get("visible", True) for note in self._rows):
+            slots.append((button, next_y-row_gap+entry_gap))
+        else:
+            button.hide_bookmark()
         if animate:
             self._animate_layout(slots)
         else:
@@ -6036,6 +6094,7 @@ class SideDock(DockBookmark):
         self._hide_empty_tip()
         self._cancel_transition()
         self._clear_bookmarks()
+        self.hide_all_button.destroy()
         super().destroy()
 
 

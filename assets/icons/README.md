@@ -10,4 +10,6 @@ columns-2 = toggle single/double column layout; PNGs are rendered from the offic
 
 arrow-down-to-line = toggle always-on-bottom; pin and arrow-down-to-line are mutually exclusive. Arrow PNGs are rendered from the straight SVG paths with Pillow at 4x resolution and downsampled to 64 px.
 
+panel-right-close = side dock hide-all button; only the active PNG (#1F2328) is used, rendered from the official SVG geometry with Pillow at 4x and downsampled to 64 px.
+
 The dock disclosure indicator uses the filled [Lucide Play path](https://lucide.dev/icons/play) in the darker icon color (#1F2328). The down PNG rotates the right indicator by 90° clockwise.

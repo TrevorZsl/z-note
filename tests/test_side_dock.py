@@ -89,6 +89,9 @@ class SideDockTests(unittest.TestCase):
         self.root, self.dock = self.app.root, self.app.dock
         self.root.update()
 
+    def button_room(self):
+        return self.dock.ENTRY_GAP+self.dock.hide_all_button.height
+
     def add_many(self):
         template = self.app.data["notes"][0]
         for i in range(3, 24):
@@ -924,7 +927,8 @@ class SideDockTests(unittest.TestCase):
     def test_scroll_caps_at_fifteen_and_reorders_only_visible_bookmarks(self):
         self.add_many()
         work = self.dock.work_area()
-        work.bottom = work.top+16+self.dock.bar_height+10+16*(self.dock.bookmark_height+4)
+        work.bottom = (work.top+16+self.dock.bar_height+10+16*(self.dock.bookmark_height+4)
+                       + self.button_room())
         with patch.object(self.dock, "work_area", return_value=work):
             self.click_bar()
             self.assertEqual(self.bookmark_order(), [str(i) for i in range(15)])
@@ -1080,17 +1084,22 @@ class SideDockTests(unittest.TestCase):
     def test_two_rows_fit_exactly_and_scroll_in_short_work_area(self):
         self.add_many()
         work = self.dock.work_area()
-        work.bottom = work.top+16+self.dock.bar_height+10+2*self.dock.bookmark_height+4
+        room = self.button_room()
+        work.bottom = work.top+16+self.dock.bar_height+10+2*self.dock.bookmark_height+4+room
+        button = self.dock.hide_all_button
         with patch.object(self.dock, "work_area", return_value=work):
             self.click_bar()
             self.assertEqual(list(self.dock.bookmarks), ["0", "1"])
+            # 一键隐藏按钮固定占最下面一行，书签底边在它上方。
             self.assertEqual(self.dock.bookmarks["1"].winfo_y()+self.dock.bookmark_height,
-                             work.bottom-8)
+                             work.bottom-8-room)
+            self.assertEqual(button.winfo_y()+button.height, work.bottom-8)
             self.dock._wheel(SimpleNamespace(delta=-120))
             self.wait(0.16)
             self.assertEqual(list(self.dock.bookmarks), ["1", "2"])
             self.assertEqual(self.dock.bookmarks["2"].winfo_y()+self.dock.bookmark_height,
-                             work.bottom-8)
+                             work.bottom-8-room)
+            self.assertEqual(button.winfo_y()+button.height, work.bottom-8)
 
     def test_drag_saves_collapsed_position_and_does_not_expand(self):
         y = self.dock._bar_y
@@ -1320,6 +1329,121 @@ class SideDockTests(unittest.TestCase):
         self.assertLessEqual(popup.winfo_x()+popup.winfo_width(), work.right)
         self.assertGreater(popup.winfo_height(), 30)
         self.click_bar()
+        self.assertIsNone(main.Tooltip._cur)
+
+    def test_hide_all_button_shows_only_while_expanded_with_visible_notes(self):
+        button = self.dock.hide_all_button
+        self.assertFalse(button.winfo_ismapped())
+        self.click_bar()
+        order = self.bookmark_order()
+        last = self.dock.bookmarks[order[-1]]
+        self.assertTrue(button.winfo_ismapped())
+        self.assertEqual(button.winfo_y(), last.winfo_y()+self.dock.bookmark_height+self.dock.ENTRY_GAP)
+        self.assertEqual(button.winfo_x()+button.bar.winfo_width(), main.user32.GetSystemMetrics(0))
+        self.assertEqual(button.bar.winfo_width(), button.WIDTH)
+        self.assertTrue(button.bar.find_withtag("dock-hide-all"))
+        hwnd = main.user32.GetParent(button.winfo_id()) or button.winfo_id()
+        preference = ctypes.c_int()
+        main.dwmapi.DwmGetWindowAttribute(hwnd, 33, ctypes.byref(preference), ctypes.sizeof(preference))
+        self.assertEqual(preference.value, 3)
+        self.assertTrue(button.attributes("-topmost"))
+        positions = {key: window.winfo_y() for key, window in self.dock.bookmarks.items()}
+
+        with patch.object(self.app, "hide_all", wraps=self.app.hide_all) as hide_all:
+            self.click(button)
+            self.wait(0.2)
+        hide_all.assert_called_once_with(animate=True)
+        self.assertFalse(any(note.d["visible"] for note in self.app.notes.values()))
+        self.assertTrue(self.dock.expanded)
+        self.assertFalse(button.winfo_ismapped())
+        self.assertEqual({key: window.winfo_y() for key, window in self.dock.bookmarks.items()}, positions)
+        self.assertFalse(any(window._note_visible for window in self.dock.bookmarks.values()))
+
+        self.click_bar()
+        self.click_bar()
+        self.assertFalse(button.winfo_ismapped())  # 全部隐藏时展开也不显示。
+        self.click(self.dock.bookmarks["0"])
+        self.root.update()
+        self.assertTrue(button.winfo_ismapped())
+        self.assertEqual({key: window.winfo_y() for key, window in self.dock.bookmarks.items()}, positions)
+
+        self.click_bar()
+        self.assertFalse(button.winfo_ismapped())
+        self.click_bar()
+        self.app.toggle_side_dock()
+        self.root.update()
+        self.assertFalse(button.winfo_ismapped())
+        self.app.toggle_side_dock()
+        self.root.update()
+        self.assertFalse(button.winfo_ismapped())
+        self.click_bar()
+        self.assertTrue(button.winfo_ismapped())
+
+    def test_hide_all_button_ignores_clicks_while_dock_is_busy(self):
+        button = self.dock.hide_all_button
+        press = SimpleNamespace(x_root=10, y_root=10)
+        with patch.object(self.app, "hide_all") as hide_all:
+            self.click_bar(settle=False)
+            self.assertIsNotNone(self.dock._transition_job)
+            button._drag_press(press)
+            button._drag_release(press)
+            self.wait(0.24)
+            button._drag_press(press)
+            self.dock._sorting_bookmark = self.dock.bookmarks["0"]
+            button._drag_release(press)
+            self.dock._sorting_bookmark = None
+            button._drag_press(press)
+            button._drag_move(SimpleNamespace(x_root=10, y_root=20))
+            button._drag_release(SimpleNamespace(x_root=10, y_root=20))
+            hide_all.assert_not_called()
+            self.click_bar()
+            self.add_many()
+            self.click_bar()
+            self.dock._wheel(SimpleNamespace(delta=-120))
+            self.assertIsNotNone(self.dock._scroll_job)
+            button._drag_press(press)
+            button._drag_release(press)
+            hide_all.assert_not_called()
+
+    def test_hide_all_button_stays_put_below_scrolling_bookmarks(self):
+        self.add_many()
+        self.click_bar()
+        button = self.dock.hide_all_button
+        work = self.dock.work_area()
+        self.assertEqual(len(self.dock.bookmarks), self.dock._capacity)
+        self.assertLessEqual(button.winfo_y()+button.height, work.bottom-8)
+        y = button.winfo_y()
+        self.dock._wheel(SimpleNamespace(delta=-120))
+        self.wait(0.16)
+        self.assertEqual(self.bookmark_order()[0], "1")
+        self.assertEqual(button.winfo_y(), y)
+        self.assertTrue(button.winfo_ismapped())
+
+    def test_hide_all_button_hover_keeps_size_and_tooltip_appears_on_left(self):
+        self.click_bar()
+        button = self.dock.hide_all_button
+        edge = main.user32.GetSystemMetrics(0)
+        self.assertEqual(self.dock.bookmarks["0"].HOVER_EXTENSION, 12)
+        icon_x, _ = button.bar.coords(button.bar.find_withtag("dock-hide-all")[0])
+        self.assertEqual(icon_x, button.WIDTH/2+2)  # 略偏右，补偿左侧阴影。
+        button.bar.event_generate("<Enter>")
+        self.wait(0.15)
+        self.assertEqual(button.bar.winfo_width(), button.WIDTH)  # 悬停不伸出。
+        self.assertEqual(button.winfo_x()+button.bar.winfo_width(), edge)
+        button.bar.event_generate("<Leave>")
+        self.wait(0.15)
+        self.assertEqual(button.bar.winfo_width(), button.WIDTH)
+        self.assertEqual(button.tip._delay, 800)
+        button.tip._cancel()
+        button.tip._show()
+        self.root.update()
+        popup = main.Tooltip._cur
+        canvas, = popup.winfo_children()
+        label = next(item for item in canvas.find_all() if canvas.type(item) == "text")
+        self.assertEqual(canvas.itemcget(label, "text"), "收纳所有")
+        self.assertLessEqual(popup.winfo_x()+popup.winfo_width(), button.winfo_rootx())
+        button.bar.event_generate("<ButtonPress-1>", x=20, y=15)
+        self.root.update()
         self.assertIsNone(main.Tooltip._cur)
 
     def test_native_corners_and_topmost_tool_windows(self):
