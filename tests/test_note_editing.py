@@ -4987,7 +4987,8 @@ class NoteEditingTests(unittest.TestCase):
                 time.sleep(0.005)
                 self.app.root.update()
             self.assertIsNone(editor._removal)
-            self.assertFalse(self.text.tag_ranges("row_removal"))
+            self.assertFalse([name for name in self.text.tag_names()
+                              if name.startswith("row_removal") and self.text.tag_ranges(name)])
 
         def backspace_empty_row():
             empty = main.deepcopy(lines)
@@ -5037,6 +5038,135 @@ class NoteEditingTests(unittest.TestCase):
                 self.assertIsNone(editor._removal)  # 系统关闭动画时仍直接删除
                 self.assertEqual(box_tops(), before[:len(expected)])
                 self.assertEqual(editor.lines, expected)
+
+    def test_row_removal_frames_do_not_remeasure_whole_note(self):
+        import time
+        editor = self.note.editors[0]
+        text = editor.text
+        lines = [{"type": "todo", "text": f"第{i}项", "checked": i % 4 == 0} for i in range(1, 41)]
+        lines[5]["text"] = ""
+        for attempt in range(2):  # 第二次删除复用已配置的间距 tag
+            with self.subTest(attempt=attempt):
+                self._selection_case(self.note, lines, "6.3", "6.3")
+                text.tag_remove("sel", "1.0", "end")
+                self.app.root.update()
+                calls, ticks = [], []
+                state = {"finishing": False}
+                configure, tag_add, tag_remove = text.tag_configure, text.tag_add, text.tag_remove
+                finish, after = editor._finish_removal, editor.win.after
+
+                def animating():
+                    return editor._removal is not None or state["finishing"]
+
+                def record_configure(name, *args, **kwargs):
+                    if animating() and kwargs:
+                        calls.append(("configure", name, name in text.tag_names()))
+                    return configure(name, *args, **kwargs)
+
+                def record_add(name, *args):
+                    if animating():
+                        calls.append(("add", name, args))
+                    return tag_add(name, *args)
+
+                def record_remove(name, *args):
+                    if animating():
+                        calls.append(("remove", name, args))
+                    return tag_remove(name, *args)
+
+                def record_finish(**kwargs):
+                    state["finishing"] = True
+                    try:
+                        return finish(**kwargs)
+                    finally:
+                        state["finishing"] = False
+
+                def record_after(delay, func=None, *args):
+                    if func == editor._removal_frame:
+                        ticks.append(delay)
+                    return after(delay, func, *args)
+
+                with patch.object(main.NoteVisibilityMotion, "enabled", return_value=True), \
+                        patch.object(text, "tag_configure", record_configure), \
+                        patch.object(text, "tag_add", record_add), \
+                        patch.object(text, "tag_remove", record_remove), \
+                        patch.object(editor, "_finish_removal", record_finish), \
+                        patch.object(editor.win, "after", record_after):
+                    text.event_generate("<KeyPress-BackSpace>")
+                    text.event_generate("<KeyRelease-BackSpace>")
+                    self.assertIsNotNone(editor._removal)
+                    deadline = time.perf_counter() + 2
+                    while editor._removal is not None and time.perf_counter() < deadline:
+                        time.sleep(0.002)
+                        self.app.root.update()
+                self.assertIsNone(editor._removal)
+                self.assertGreaterEqual(len(ticks), 3)
+                self.assertEqual(set(ticks), {main.VISIBILITY_TICK_MS})
+                # 逐帧只在一个字符上换 tag：不重配已用过的 tag，也不整段增删 tag。
+                self.assertFalse([c for c in calls if c[0] == "configure" and c[2]])
+                self.assertFalse([c for c in calls if c[0] == "add" and c[1] == "drag_margin"])
+                self.assertFalse([c for c in calls if c[0] in ("add", "remove") and
+                                  c[1].startswith("row_removal") and
+                                  (len(c[2]) != 2 or
+                                   text.index(f"{c[2][0]}+1c") != text.index(c[2][1]))])
+                self.assertEqual(editor.lines, [line for i, line in enumerate(lines) if i != 5])
+
+    def test_removing_rows_at_scrolled_bottom_moves_rows_above_down_smoothly(self):
+        import time
+        editor = self.note.editors[0]
+        text = editor.text
+        lines = [{"type": "todo", "text": f"第{i}项", "checked": False} for i in range(1, 41)]
+
+        def positions(rows):
+            self.app.root.update()
+            return [text.bbox(f"{row}.3")[1] + text.winfo_y() if text.bbox(f"{row}.3") else None
+                    for row in rows]
+
+        for deleted in (37, 40):
+            with self.subTest(deleted=deleted):
+                case = main.deepcopy(lines)
+                case[deleted - 1]["text"] = ""
+                above, below = range(deleted - 3, deleted), range(deleted + 1, 41)
+                results = {}
+                for motion in (False, True):
+                    self._selection_case(self.note, case, f"{deleted}.3", f"{deleted}.3")
+                    text.tag_remove("sel", "1.0", "end")
+                    editor._scroll_to(10 ** 6)
+                    for _ in range(40):
+                        self.app.root.update()
+                    before_above, before_below = positions(above), positions(below)
+                    frames = []
+                    with patch.object(main.NoteVisibilityMotion, "enabled", return_value=motion):
+                        text.event_generate("<KeyPress-BackSpace>")
+                        text.event_generate("<KeyRelease-BackSpace>")
+                        deadline = time.perf_counter() + 2
+                        while editor._removal is not None and time.perf_counter() < deadline:
+                            frames.append(positions(range(deleted - 3, deleted)))
+                            time.sleep(0.005)
+                    self.assertIsNone(editor._removal)
+                    results[motion] = positions(range(deleted - 3, deleted)), round(editor.body.canvasy(0))
+                    if motion:
+                        self.assertGreaterEqual(len(frames), 3)
+                        # 上面的行从原位置单向下移，不先往回跳；下面的行（新行号少 1）始终不动。
+                        tops = [before_above[0], *(frame[0] for frame in frames), results[True][0][0]]
+                        self.assertEqual(tops, sorted(tops))
+                        self.assertLessEqual(frames[0][0] - before_above[0], 10)
+                        self.assertEqual(positions(range(deleted, 40)), before_below)
+                # 动画结束后的位置与直接删除完全一致。
+                self.assertEqual(results[True], results[False])
+
+    def test_removing_more_than_a_screen_of_rows_deletes_without_animation(self):
+        editor = self.note.editors[0]
+        lines = [{"type": "todo", "text": f"第{i}项", "checked": False} for i in range(1, 41)]
+        self._selection_case(self.note, lines, "2.0", "30.end")
+        with patch.object(main.NoteVisibilityMotion, "enabled", return_value=True):
+            self.text.event_generate("<KeyPress-BackSpace>")
+            self.text.event_generate("<KeyRelease-BackSpace>")
+        self.assertIsNone(editor._removal)
+        self.assertEqual(editor.lines, [lines[0], {"type": "todo", "text": "", "checked": False},
+                                        *lines[30:]])
+        self.app.root.update()
+        self.assertFalse([name for name in self.text.tag_names()
+                          if name.startswith("row_removal") and self.text.tag_ranges(name)])
 
     def test_backspace_into_empty_todo_keeps_current_completion_and_undo_in_each_column(self):
         self.note.toggle_columns()

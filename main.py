@@ -898,6 +898,7 @@ class NoteEditor:
         self._checkbox_widgets = []
         self._pending_removal = None  # 删整行前记下的旧布局，由下一次 render 播放收起
         self._removal = None
+        self._removal_tags = set()  # 已配置的收起间距 tag；重配或删除会让 Tk 重测全文
         self._document_height = 0
         self._content_height = 1
         self._chunk_start = 0
@@ -1485,6 +1486,19 @@ class NoteEditor:
         return "break" if drag is not None else None
 
     def _scroll_to(self, y):
+        removal = self._removal
+        if removal is not None and removal["began"] is None:
+            box = self.text.bbox("insert")
+            top = box and box[1] + self.text.winfo_y()
+            if box and 0 <= top and top + box[3] <= self.body.winfo_height():
+                # 删除整行时立即滚动会让还没收起的空位把下面的行顶下去，交给收起动画逐帧完成。
+                removal["scroll_request"] = y
+                return
+            # 光标不在可见区时照旧立即滚过去，收起从滚动后的位置开始。
+            removal["scroll_request"] = None
+            self.body.yview_moveto(y / self._content_height)
+            removal["top_start"] = round(self.body.canvasy(0))
+            return
         self.body.yview_moveto(y / self._content_height)
 
     def _see_text(self, index):
@@ -1627,7 +1641,9 @@ class NoteEditor:
             self._queue_strikes(measure=measure)
 
     def _layout_text(self):
-        self.text.tag_add("drag_margin", "1.0", "end")
+        # 全文重加 tag 会让 Tk 重测每一行；收起动画逐帧布局时正文结构不变，render 已加过。
+        if self._removal is None:
+            self.text.tag_add("drag_margin", "1.0", "end")
         if getattr(self, "_strike_job", None):
             self.win.after_cancel(self._strike_job)
         self._strike_job = None
@@ -1647,7 +1663,9 @@ class NoteEditor:
         pad = int(self.text.cget("pady"))
         self._buffer_margin = (max(self.app.base_font.metrics("linespace"), self._check_images[False].width()) +
                                int(self.text.cget("spacing1")) + int(self.text.cget("spacing3")) + pad)
-        self._content_height = max(self.body.winfo_height(), self._document_height + 2 * pad)
+        self._content_height = max(self.body.winfo_height(), self._document_height + 2 * pad +
+                                   (self._removal["extra"] if self._removal and self._removal["below"]
+                                    else 0))  # 删掉末尾的行时，空出的高度逐帧收回
         # Windows 子窗口坐标有范围限制；正文保留数屏缓冲，跨段时整组一起切换。
         if self.win._resizing:
             # 拉伸时每帧都要重排、重画整个 Text；只保留可见区加上下各一行余量，
@@ -1694,7 +1712,7 @@ class NoteEditor:
                     self._row_layout[row] = (row_height, offset[0] if offset else 0)
                 row_height, offset = self._row_layout[row]
                 row_top = pad + offset - self._chunk_start
-                if self._removal and self._removal["row"] == row:
+                if self._removal and not self._removal["below"] and self._removal["row"] == row:
                     # 收起中的行上方多出的间距不属于这一行，勾选框跟着文字走。
                     row_top += self._removal["extra"]
                     row_height -= self._removal["extra"]
@@ -1959,6 +1977,7 @@ class NoteEditor:
         self._remember_edit()
 
     # ---- 删除整行的收起动画 ----
+    # 被删的勾选框随空位一起压扁、变淡，下面的行顶上来时正好消失，中间不留空格。
     ROW_REMOVAL_DURATION = 0.15
 
     def _ypixels(self, start, end):
@@ -1990,24 +2009,54 @@ class NoteEditor:
             return
         t = self.text
         row = snap["top"] + snap["survivors"]
-        gap = 0
-        if row <= int(t.index("end-1c").split(".")[0]):
-            gap = max(0, snap["height"] - self._ypixels(f"{snap['top']}.0", f"{row}.0"))
+        # 删的是末尾几行时下面没有行托住空位，空出的高度暂时留在正文末尾之下。
+        below = row > int(t.index("end-1c").split(".")[0])
+        kept = (self._ypixels(f"{snap['top']}.0", "end" if below else f"{row}.0")
+                if snap["survivors"] else 0)
+        gap = max(0, snap["height"] - kept)
         if not gap and not snap["ghosts"]:
             return
-        if gap:
-            spacing = int(t.cget("spacing1"))
-            t.tag_configure("row_removal", spacing1=spacing + gap)
-            t.tag_add("row_removal", f"{row}.0", f"{row}.0+1c")
+        if gap > self.body.winfo_height():
+            return  # 一次删掉超过一屏：滑动整屏只会闪一下，按原来的方式直接删除
+        full = self._check_images[False].width()
+        if getattr(self, "_ghost_sources", {}).get("size") != full:
+            # 首次绘制前备好原图，第一帧不再多花时间画图。
+            self._ghost_sources = {"size": full, True: check_source(full, True),
+                                   False: check_source(full, False)}
         ghosts = []
         for _ in snap["ghosts"]:
             ghost = tk.Label(t, bg=self._bg, bd=0, highlightthickness=0)
             ghost.bind("<MouseWheel>", self._text_wheel)
             ghosts.append(ghost)
         # 计时从第一帧开始：此前补齐高度的画面已经画出，重排耗时不会吃掉开头几帧。
-        self._removal = dict(snap, row=row, gap=gap, extra=gap, labels=ghosts, began=None, job=None)
+        # 删除时要求的滚动（保持视图、露出光标、到底回弹）先记下，由各帧和空位一起完成。
+        self._removal = dict(snap, row=row, gap=gap, below=below, extra=0, tag=None,
+                             labels=ghosts, began=None, job=None,
+                             top_start=round(self.body.canvasy(0)), scroll_request=None,
+                             scroll_target=None)
+        self._set_removal_spacing(gap)
         self._place_removal_ghosts(1.0)
-        self._removal["job"] = self.win.after(16, self._removal_frame)
+        self._removal["job"] = self.win.after(VISIBILITY_TICK_MS, self._removal_frame)
+
+    def _set_removal_spacing(self, extra):
+        """只在收起行的第一个字符上换 tag。每个间距值的 tag 只配置一次：
+        重配已用过的 tag、整段 tag_remove 或 tag_delete 都会让 Tk 重测全文。"""
+        removal, t = self._removal, self.text
+        removal["extra"] = extra
+        if removal["below"]:
+            return  # 末尾的空位由 _layout_text 加在滚动区域里
+        start = f"{removal['row']}.0"
+        if removal["tag"]:
+            t.tag_remove(removal["tag"], start, f"{start}+1c")
+            removal["tag"] = None
+        if extra:
+            spacing = int(t.cget("spacing1")) + extra
+            name = f"row_removal_{spacing}"
+            if name not in self._removal_tags:
+                t.tag_configure(name, spacing1=spacing)
+                self._removal_tags.add(name)
+            t.tag_add(name, start, f"{start}+1c")
+            removal["tag"] = name
 
     def _removal_frame(self):
         removal = self._removal
@@ -2016,42 +2065,49 @@ class NoteEditor:
         removal["job"] = None
         now = time.perf_counter()
         if removal["began"] is None:
-            removal["began"] = now - 0.016
+            removal["began"] = now - VISIBILITY_TICK_MS / 1000
+        if removal["scroll_target"] is None:
+            # 删除后的最终滚动位置：按要求的位置，再按收起后的正文高度回弹到底。
+            pad, view = int(self.text.cget("pady")), self.body.winfo_height()
+            document = self._document_height or self._ypixels("1.0", "end")
+            final = max(view, document - (0 if removal["below"] else removal["extra"]) + 2 * pad)
+            request = removal["scroll_request"]
+            removal["scroll_target"] = max(0, min(removal["top_start"] if request is None else request,
+                                                  final - view))
         progress = min(1.0, (now - removal["began"]) / self.ROW_REMOVAL_DURATION)
-        left = (1 - progress) ** 3  # 先快后慢
         if progress >= 1:
-            self._finish_removal()
+            self._finish_removal(settle=True)
             return
+        left = (1 - progress) ** 2  # 先快后慢，首帧位移比三次方平缓
+        start, target = removal["top_start"], removal["scroll_target"]
         if removal["gap"]:
-            removal["extra"] = round(removal["gap"] * left)
-            self.text.tag_configure("row_removal",
-                                    spacing1=int(self.text.cget("spacing1")) + removal["extra"])
+            self._set_removal_spacing(round(removal["gap"] * left))
+        if start != target:
+            # 滚动与空位同步收拢：中间删除时下面的行上移；滚到底时下面不动、上面下移。
+            self.body.yview_moveto((target + (start - target) * left) / self._content_height)
+        if removal["gap"]:
             self._queue_strikes()
             self._draw_strikes()  # 勾选框和删除线与正文同一帧移动
         self._place_removal_ghosts(left)
-        removal["job"] = self.win.after(16, self._removal_frame)
+        removal["job"] = self.win.after(VISIBILITY_TICK_MS, self._removal_frame)
 
     def _place_removal_ghosts(self, left):
-        """被删的勾选框边缩小边淡出，并随空出的高度一起收向下一行。"""
+        """被删的勾选框随空位一起压扁、变淡，下面的行顶上来时正好消失。"""
         removal = self._removal
         full = self._check_images[False].width()
         size = round(full * left)
         if removal["gap"]:
             pad = int(self.text.cget("pady"))
-            # 下一行正文此刻的起点；旧位置到它的距离按剩余高度等比收拢。
-            bottom = (pad + self._ypixels("1.0", f"{removal['row']}.0") - self._chunk_start +
-                      round(removal["gap"] * left))
+            # 空位此刻的下沿；旧位置到它的距离按剩余高度等比收拢。
+            edge = "end" if removal["below"] else f"{removal['row']}.0"
+            bottom = pad + self._ypixels("1.0", edge) - self._chunk_start + removal["extra"]
         for label, (x, y, checked) in zip(removal["labels"], removal["ghosts"]):
             if size < 2:
                 label.place_forget()
                 continue
             if removal["gap"]:
                 y = bottom - (removal["next_top"] - y) * left
-            source = getattr(self, "_ghost_sources", {})
-            if source.get("size") != full:
-                source = self._ghost_sources = {"size": full, True: check_source(full, True),
-                                                False: check_source(full, False)}
-            image = source[checked].resize((size, size), Image.Resampling.LANCZOS)
+            image = self._ghost_sources[checked].resize((size, size), Image.Resampling.LANCZOS)
             image.putalpha(image.getchannel("A").point(lambda a: round(a * left)))
             label._image = ImageTk.PhotoImage(image, master=self.text)
             label.configure(image=label._image)
@@ -2059,7 +2115,7 @@ class NoteEditor:
                         bordermode="ignore")
             label.lower()
 
-    def _finish_removal(self):
+    def _finish_removal(self, settle=False):
         removal, self._removal = self._removal, None
         if removal is None:
             return
@@ -2068,7 +2124,15 @@ class NoteEditor:
         for label in removal["labels"]:
             label.destroy()
         if self.text.winfo_exists():
-            self.text.tag_remove("row_removal", "1.0", "end")
+            if removal["tag"]:
+                # 按 tag 实际所在的范围移除，不做整段 tag_remove。
+                ranges = self.text.tag_ranges(removal["tag"])
+                for start, end in zip(ranges[::2], ranges[1::2]):
+                    self.text.tag_remove(removal["tag"], start, end)
+            if settle and removal["scroll_target"] is not None:
+                self.body.yview_moveto(removal["scroll_target"] / self._content_height)
+            elif removal["scroll_request"] is not None:
+                self._scroll_to(removal["scroll_request"])  # 第一帧前就被打断：补上删除时要求的滚动
             if removal["gap"]:
                 self._queue_strikes()
 
