@@ -390,24 +390,27 @@ def smooth_round_rect(cv, x1, y1, x2, y2, r, fill, outline=""):
     return cv.create_image(round(x1), round(y1), image=photo, anchor="nw")
 
 
-def check_images(master, size):
-    images = {}
+def check_source(size, checked):
+    """勾选框的 4 倍原图；缩到 size 即为显示用图。"""
     scale = 4
-    for checked in (False, True):
-        img = Image.new("RGBA", (size * scale, size * scale))
-        draw = ImageDraw.Draw(img)
-        color = "#596575" if checked else "#9EA8B5"
-        draw.rounded_rectangle((scale, scale, (size - 1) * scale, (size - 1) * scale),
-                               radius=round(size * .25 * scale), outline=color,
-                               width=max(5, round(size * .09 * scale)))
-        if checked:
-            draw.line([(size * .27 * scale, size * .51 * scale),
-                       (size * .44 * scale, size * .68 * scale),
-                       (size * .75 * scale, size * .34 * scale)],
-                      fill=color, width=max(5, round(size * .09 * scale)), joint="curve")
-        images[checked] = ImageTk.PhotoImage(
-            img.resize((size, size), Image.Resampling.LANCZOS), master=master)
-    return images
+    img = Image.new("RGBA", (size * scale, size * scale))
+    draw = ImageDraw.Draw(img)
+    color = "#596575" if checked else "#9EA8B5"
+    draw.rounded_rectangle((scale, scale, (size - 1) * scale, (size - 1) * scale),
+                           radius=round(size * .25 * scale), outline=color,
+                           width=max(5, round(size * .09 * scale)))
+    if checked:
+        draw.line([(size * .27 * scale, size * .51 * scale),
+                   (size * .44 * scale, size * .68 * scale),
+                   (size * .75 * scale, size * .34 * scale)],
+                  fill=color, width=max(5, round(size * .09 * scale)), joint="curve")
+    return img
+
+
+def check_images(master, size):
+    return {checked: ImageTk.PhotoImage(
+                check_source(size, checked).resize((size, size), Image.Resampling.LANCZOS), master=master)
+            for checked in (False, True)}
 
 # ---------- 开机启动 ----------
 AUTOSTART_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
@@ -893,6 +896,8 @@ class NoteEditor:
         self._strike_widgets = []
         self._selection_masks = []
         self._checkbox_widgets = []
+        self._pending_removal = None  # 删整行前记下的旧布局，由下一次 render 播放收起
+        self._removal = None
         self._document_height = 0
         self._content_height = 1
         self._chunk_start = 0
@@ -1689,6 +1694,10 @@ class NoteEditor:
                     self._row_layout[row] = (row_height, offset[0] if offset else 0)
                 row_height, offset = self._row_layout[row]
                 row_top = pad + offset - self._chunk_start
+                if self._removal and self._removal["row"] == row:
+                    # 收起中的行上方多出的间距不属于这一行，勾选框跟着文字走。
+                    row_top += self._removal["extra"]
+                    row_height -= self._removal["extra"]
                 # Tk 会把软换行的选区背景画进左边距，盖回勾选框旁的留白。
                 if self.text.tag_nextrange("selection_fill", f"{row}.0", f"{row}.end"):
                     top, bottom = max(0, row_top), min(content_height, row_top + row_height)
@@ -1908,6 +1917,7 @@ class NoteEditor:
     # ---- 渲染 ----
     def render(self, keep_cursor=True):
         self._stop_wheel()
+        self._finish_removal()  # 重建正文前结束上一段收起，旧行号已不再对应
         cur = self.text.index("insert")
         view = self._body_index()
         scroll_y = self.body.canvasy(0)
@@ -1940,12 +1950,127 @@ class NoteEditor:
             self.text.mark_set("insert", cur)
         self._clamp_todo_cursor()
         self.win.update_status()
+        self._begin_removal()  # 在首次重绘前补上被删行的高度，下面的行不会先跳上去
         self._queue_strikes()
         self.body.update_idletasks()
         restored = self.text.dlineinfo(view)
         if top and restored:
             self._scroll_to(scroll_y + restored[1] + self._chunk_start - top[1] - old_chunk)
         self._remember_edit()
+
+    # ---- 删除整行的收起动画 ----
+    ROW_REMOVAL_DURATION = 0.15
+
+    def _ypixels(self, start, end):
+        return self.text.count(start, end, "update", "ypixels") or 0
+
+    def _snapshot_removal(self, top, bottom, survivors):
+        """删除前记下旧的第 top..bottom 行（从 1 起），删除后前 survivors 行仍在。
+        其余行的勾选框淡出，下面的行从原位置滑上来。"""
+        self._pending_removal = None
+        if not NoteVisibilityMotion.enabled():
+            return
+        t = self.text
+        pad = int(t.cget("pady"))
+        size = self._check_images[False].width()
+        checked = str(self._check_images[True])
+        ghosts = [(box._layout_bounds[0] + size / 2, box._layout_bounds[1] + size / 2,
+                   str(box.cget("image")) == checked)
+                  for box in self._checkbox_widgets
+                  if box.winfo_ismapped() and getattr(box, "_layout_bounds", None) and
+                  top + survivors <= getattr(box, "_todo_row", 0) <= bottom]
+        self._pending_removal = {
+            "top": top, "survivors": survivors, "ghosts": ghosts,
+            "height": self._ypixels(f"{top}.0", f"{bottom + 1}.0"),
+            "next_top": pad + self._ypixels("1.0", f"{bottom + 1}.0") - self._chunk_start}
+
+    def _begin_removal(self):
+        snap, self._pending_removal = self._pending_removal, None
+        if snap is None:
+            return
+        t = self.text
+        row = snap["top"] + snap["survivors"]
+        gap = 0
+        if row <= int(t.index("end-1c").split(".")[0]):
+            gap = max(0, snap["height"] - self._ypixels(f"{snap['top']}.0", f"{row}.0"))
+        if not gap and not snap["ghosts"]:
+            return
+        if gap:
+            spacing = int(t.cget("spacing1"))
+            t.tag_configure("row_removal", spacing1=spacing + gap)
+            t.tag_add("row_removal", f"{row}.0", f"{row}.0+1c")
+        ghosts = []
+        for _ in snap["ghosts"]:
+            ghost = tk.Label(t, bg=self._bg, bd=0, highlightthickness=0)
+            ghost.bind("<MouseWheel>", self._text_wheel)
+            ghosts.append(ghost)
+        # 计时从第一帧开始：此前补齐高度的画面已经画出，重排耗时不会吃掉开头几帧。
+        self._removal = dict(snap, row=row, gap=gap, extra=gap, labels=ghosts, began=None, job=None)
+        self._place_removal_ghosts(1.0)
+        self._removal["job"] = self.win.after(16, self._removal_frame)
+
+    def _removal_frame(self):
+        removal = self._removal
+        if removal is None or not self.text.winfo_exists():
+            return
+        removal["job"] = None
+        now = time.perf_counter()
+        if removal["began"] is None:
+            removal["began"] = now - 0.016
+        progress = min(1.0, (now - removal["began"]) / self.ROW_REMOVAL_DURATION)
+        left = (1 - progress) ** 3  # 先快后慢
+        if progress >= 1:
+            self._finish_removal()
+            return
+        if removal["gap"]:
+            removal["extra"] = round(removal["gap"] * left)
+            self.text.tag_configure("row_removal",
+                                    spacing1=int(self.text.cget("spacing1")) + removal["extra"])
+            self._queue_strikes()
+            self._draw_strikes()  # 勾选框和删除线与正文同一帧移动
+        self._place_removal_ghosts(left)
+        removal["job"] = self.win.after(16, self._removal_frame)
+
+    def _place_removal_ghosts(self, left):
+        """被删的勾选框边缩小边淡出，并随空出的高度一起收向下一行。"""
+        removal = self._removal
+        full = self._check_images[False].width()
+        size = round(full * left)
+        if removal["gap"]:
+            pad = int(self.text.cget("pady"))
+            # 下一行正文此刻的起点；旧位置到它的距离按剩余高度等比收拢。
+            bottom = (pad + self._ypixels("1.0", f"{removal['row']}.0") - self._chunk_start +
+                      round(removal["gap"] * left))
+        for label, (x, y, checked) in zip(removal["labels"], removal["ghosts"]):
+            if size < 2:
+                label.place_forget()
+                continue
+            if removal["gap"]:
+                y = bottom - (removal["next_top"] - y) * left
+            source = getattr(self, "_ghost_sources", {})
+            if source.get("size") != full:
+                source = self._ghost_sources = {"size": full, True: check_source(full, True),
+                                                False: check_source(full, False)}
+            image = source[checked].resize((size, size), Image.Resampling.LANCZOS)
+            image.putalpha(image.getchannel("A").point(lambda a: round(a * left)))
+            label._image = ImageTk.PhotoImage(image, master=self.text)
+            label.configure(image=label._image)
+            label.place(x=round(x - size / 2), y=round(y - size / 2), width=size, height=size,
+                        bordermode="ignore")
+            label.lower()
+
+    def _finish_removal(self):
+        removal, self._removal = self._removal, None
+        if removal is None:
+            return
+        if removal["job"] is not None:
+            self.win.after_cancel(removal["job"])
+        for label in removal["labels"]:
+            label.destroy()
+        if self.text.winfo_exists():
+            self.text.tag_remove("row_removal", "1.0", "end")
+            if removal["gap"]:
+                self._queue_strikes()
 
     @staticmethod
     def _prefix_len(ln):
@@ -2148,6 +2273,8 @@ class NoteEditor:
                 self.app.request_dock_refresh()
         structure_changed = (len(old) != len(lines) or
                              any(a["type"] != b["type"] for a, b in zip(old, lines)))
+        if not (structure_changed and len(lines) < len(old)):
+            self._pending_removal = None  # 选区删除最终没有减少行数，不播放收起
         if structure_changed:
             self.render()
         else:
@@ -2227,8 +2354,10 @@ class NoteEditor:
             target = self.text.index(f"{row}.end")
             self._remember_edit()
             if prev["type"] == ln["type"] == "todo" and not prev["text"] and ln["text"]:
+                self._snapshot_removal(row, row, 0)  # 空的上一行收起，当前行滑上去
                 lines[row - 1] = ln
             else:
+                self._snapshot_removal(row, row + 1, 1)  # 当前行并入上一行
                 prev["text"] += ln["text"]
             del lines[row]
             self.render(keep_cursor=False)
@@ -2265,8 +2394,13 @@ class NoteEditor:
         if (event.type == tk.EventType.KeyPress and self.text.tag_ranges("sel") and
                 (deleting or typing or event.keysym in ("Return", "KP_Enter")) and
                 not self.win._ime_composing(self.text)):
-            if not self._trim_selection() and deleting:
-                return "break"  # 选区里只有勾选框或换行，没有可删的文字
+            if not self._trim_selection():
+                if deleting:
+                    return "break"  # 选区里只有勾选框或换行，没有可删的文字
+            elif deleting:
+                first, last = (int(str(i).split(".")[0]) for i in self.text.tag_ranges("sel"))
+                if last > first:  # 首行保留，尾行剩下的文字接上去，中间各行收起
+                    self._snapshot_removal(first, last, 1)
 
     def _conversion_rows(self):
         selected = self.text.tag_ranges("sel")
@@ -2372,6 +2506,7 @@ class NoteEditor:
         if len(self.lines) <= 1:
             self.lines = [{"type": "text", "text": "", "checked": False}]
         else:
+            self._snapshot_removal(row + 1, row + 1, 0)
             del self.lines[row]
         self.render(keep_cursor=False)
         row = min(row, len(self.lines) - 1)

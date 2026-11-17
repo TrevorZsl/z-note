@@ -4972,6 +4972,72 @@ class NoteEditingTests(unittest.TestCase):
                     self.assertEqual(self.note.d["lines"][0]["text"],
                                      previous_text + "插入当前待办文字")
 
+    def test_removing_rows_collapses_from_old_position_and_respects_system_motion(self):
+        import time
+        editor = self.note.editors[0]
+        lines = [{"type": "todo", "text": f"第{i}项", "checked": i == 4} for i in range(1, 6)]
+
+        def box_tops():
+            self.app.root.update()
+            return sorted(box.winfo_y() for box in editor._checkbox_widgets if box.winfo_ismapped())
+
+        def finish():
+            deadline = time.perf_counter() + 2
+            while editor._removal is not None and time.perf_counter() < deadline:
+                time.sleep(0.005)
+                self.app.root.update()
+            self.assertIsNone(editor._removal)
+            self.assertFalse(self.text.tag_ranges("row_removal"))
+
+        def backspace_empty_row():
+            empty = main.deepcopy(lines)
+            empty[2]["text"] = ""
+            self._selection_case(self.note, empty, "3.3", "3.3")
+            self.text.tag_remove("sel", "1.0", "end")
+            self.text.event_generate("<KeyPress-BackSpace>")
+            self.text.event_generate("<KeyRelease-BackSpace>")
+
+        def select_delete():
+            self._selection_case(self.note, lines, "2.0", "4.end")
+            self.text.event_generate("<KeyPress-BackSpace>")
+            self.text.event_generate("<KeyRelease-BackSpace>")
+
+        def menu_delete():
+            self._selection_case(self.note, lines, "1.3", "1.3")
+            editor.delete_line(2)
+
+        cases = (
+            # 操作，删除后的行，被删的旧行（淡出），滑上来的行：(新行号, 旧行号)
+            (backspace_empty_row, [lines[0], lines[1], lines[3], lines[4]], [3], (3, 4)),
+            (select_delete, [lines[0], {"type": "todo", "text": "", "checked": False}, lines[4]],
+             [3, 4], (3, 5)),
+            (menu_delete, [lines[0], lines[1], lines[3], lines[4]], [3], (3, 4)),
+        )
+        for action, expected, removed, (new_row, old_row) in cases:
+            with self.subTest(action=action.__name__):
+                editor.lines = main.deepcopy(lines)
+                editor.render(keep_cursor=False)
+                before = box_tops()
+                with patch.object(main.NoteVisibilityMotion, "enabled", return_value=True):
+                    action()
+                self.assertEqual(editor.lines, expected)
+                # 删除后第一帧：滑上来的行仍在旧位置，被删行的勾选框留在原处等待淡出。
+                self.assertEqual(box_tops()[new_row - 1], before[old_row - 1])
+                self.assertEqual(sorted(label.winfo_y() for label in editor._removal["labels"]),
+                                 [before[row - 1] for row in removed])
+                finish()
+                self.assertEqual(box_tops(), before[:len(expected)])
+                self.assertEqual(editor.lines, expected)
+
+                editor.lines = main.deepcopy(lines)
+                editor.render(keep_cursor=False)
+                box_tops()
+                with patch.object(main.NoteVisibilityMotion, "enabled", return_value=False):
+                    action()
+                self.assertIsNone(editor._removal)  # 系统关闭动画时仍直接删除
+                self.assertEqual(box_tops(), before[:len(expected)])
+                self.assertEqual(editor.lines, expected)
+
     def test_backspace_into_empty_todo_keeps_current_completion_and_undo_in_each_column(self):
         self.note.toggle_columns()
         for editor in self.note.editors:
