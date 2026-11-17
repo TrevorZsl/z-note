@@ -2509,10 +2509,17 @@ class NoteEditor:
         label = "转为文字" if target == "text" else "转为待办"
         if len(rows) > 1:
             label = f"全部{label}（{len(rows)} 行）"
+        # 选中的几行每行文字都完整选上时叫「删除 n 行」，否则叫「删除选中内容」；删法都和删除键一样。
+        t = self.text
+        whole = (len(rows) > 1 and t.tag_ranges("sel") and
+                 t.compare("sel.first", "<=", self._text_body(rows[0] + 1)) and
+                 t.compare("sel.last", ">=", f"{rows[-1] + 1}.end"))
+        delete_label = f"删除 {len(rows)} 行" if whole else "删除选中内容"
         actions = [
             (label, lambda: self.convert_rows(rows, target)),
             ("在下方插入新行", lambda: self.insert_line(row)),
-            ("删除此行", lambda: self.delete_line(row)),
+            (delete_label, self.delete_selection) if self.text.tag_ranges("sel")
+            else ("删除此行", lambda: self.delete_line(row)),
         ]
         self.win._show_context_menu(e.x_root, e.y_root, actions, shortcuts={0: self.app.hotkey_text("convert")})
 
@@ -2578,6 +2585,12 @@ class NoteEditor:
         self._see_text("insert")
         self.d["editedAt"] = datetime.now().isoformat(timespec="microseconds")
         self.app.schedule_save()
+
+    def delete_selection(self):
+        """右键「删除选中内容」：重放 Delete 键，和按键删选区走同一条流程。"""
+        self.text.focus_force()  # 菜单关掉后焦点可能不在正文上，按键事件要发给有焦点的正文
+        self.text.event_generate("<KeyPress-Delete>")
+        self.text.event_generate("<KeyRelease-Delete>")
 
 
 class NoteWindow(tk.Toplevel):

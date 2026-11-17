@@ -3570,6 +3570,75 @@ class NoteEditingTests(unittest.TestCase):
         call.args[2][0][1]()
         self.assertEqual(note.d["lines"][2]["type"], "todo")
 
+    def test_delete_menu_matches_delete_keys(self):
+        note, text = self.note, self.text
+        editor = note.editors[0]
+        mixed = [{"type": "todo", "text": "sdf", "checked": False},
+                 {"type": "todo", "text": "dsf", "checked": True},
+                 {"type": "text", "text": "说明", "checked": False},
+                 {"type": "todo", "text": "abc", "checked": False}]
+        shot = [{"type": "todo", "text": text, "checked": False}
+                for text in ("ljkl", "hjuhi", "", "jiuhu", "hi")]
+        def rightclick(index):
+            box = text.bbox(index)
+            event = type("Event", (), {"x": box[0] + 1, "y": box[1] + 1,
+                                      "x_root": 100, "y_root": 100})()
+            with patch.object(note, "_show_context_menu") as menu:
+                note._on_rightclick(event)
+            return menu.call_args.args[2][2]
+        def result():
+            return (main.deepcopy(note.d["lines"]), text.index("insert"),
+                    tuple(map(str, text.tag_ranges("sel"))))
+        partial = "删除选中内容"
+        cases = (
+            (shot, "2.5", "4.4", partial),        # 跨行，首尾行各选一部分，中间是空待办
+            (shot, "2.3", "4.end", "删除 3 行"),  # 同样三行，每行文字都完整选上
+            (mixed, "2.4", "4.4", partial),
+            (mixed, "2.3", "4.2", partial),       # 尾行只碰到勾选框
+            (mixed, "2.3", "3.end", "删除 2 行"),
+            (mixed, "2.0", "4.0", "删除 2 行"),   # 拖过勾选框，停在下一行行首
+            (mixed, "2.3", "3.1", partial),       # 尾行只选了一个字
+            (mixed, "2.0", "3.0", partial),       # 三击整行（已勾选的待办），只有一行
+            (mixed, "1.end", "2.end", partial),   # 从上一行行尾开始
+            (mixed, "2.4", "2.5", partial),       # 单行里的几个字
+            (mixed, "2.0", "2.3", partial),       # 只选中勾选框
+            (mixed, "1.end", "2.0", partial),     # 只有换行
+            (mixed, "3.1", "4.0", partial),       # 停在下一行行首
+            (mixed, "1.0", "end-1c", "删除 4 行"),  # 全选
+        )
+        for lines, first, last, menu_label in cases:
+            row = first.split(".")[0]
+            with self.subTest(selection=(first, last)):
+                expected = None
+                for key in ("Delete", "BackSpace"):
+                    self._selection_case(note, lines, first, last)
+                    text.event_generate(f"<KeyPress-{key}>")
+                    text.event_generate(f"<KeyRelease-{key}>")
+                    self.app.root.update()
+                    expected = expected or result()
+                    self.assertEqual(result(), expected)
+                self._selection_case(note, lines, first, last)
+                label, action = rightclick(f"{row}.0")
+                self.assertEqual(label, menu_label)
+                action()
+                self.app.root.update()
+                self.assertEqual(result(), expected)
+                if expected[0] != lines:  # 没有可删的内容时两边都不改，也就没有可撤销的
+                    editor._undo_edit()
+                    self.assertEqual(note.d["lines"], lines)
+        # 截图里的情况：只删高亮部分，尾行剩下的文字接到首行后面
+        self._selection_case(note, shot, "2.5", "4.4")
+        rightclick("2.0")[1]()
+        self.assertEqual(note.d["lines"], [shot[0], dict(shot[1], text="hjiuhu"), shot[4]])
+        self.assertEqual(text.index("insert"), "2.5")
+        # 右键点在选区外：选区清掉，只删点到的那一行
+        self._selection_case(note, mixed, "1.1", "2.4")
+        label, action = rightclick("4.4")
+        self.assertEqual(label, "删除此行")
+        self.assertFalse(text.tag_ranges("sel"))
+        action()
+        self.assertEqual(note.d["lines"], mixed[:3])
+
     def test_convert_hotkey_is_local_live_configurable_and_rejects_conflicts(self):
         from copy import deepcopy
         self.assertEqual(self.app.hotkey_text("convert"), "Ctrl+Shift+L")
