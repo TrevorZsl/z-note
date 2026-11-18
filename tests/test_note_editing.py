@@ -4951,6 +4951,38 @@ class NoteEditingTests(unittest.TestCase):
                     self.assertEqual(editor.text.index("insert"), editor.text.index(expected))
                     self.assertFalse(editor.text.tag_ranges("sel"))
 
+    def test_drag_within_single_empty_row_selects_nothing(self):
+        # 单行空待办和空文字行一样：行内拖选没有文字可选，不留选区也不画标记；拖到别的行照常选中。
+        editor = self.note.editors[0]
+        self._load_lines(editor, [{"type": "text", "text": "abc", "checked": False},
+                                  {"type": "todo", "text": "", "checked": False},
+                                  {"type": "text", "text": "", "checked": False},
+                                  {"type": "text", "text": "xyz", "checked": False}])
+        text = editor.text
+        for row in (2, 3):
+            for start, end in (("left", "right"), ("right", "left")):
+                with self.subTest(row=row, drag=(start, end)):
+                    self._mouse_drag(editor, (row, start), (row, end))
+                    self.assertFalse(text.tag_ranges("sel"))
+                    self.assertFalse(text.tag_ranges("selection_fill"))
+                    self.assertEqual(text.index("insert linestart"), text.index(f"{row}.0"))
+            # 右键和空文字行一样给「删除此行」，不再出现点了没反应的「删除选中内容」
+            box = text.bbox(f"{row}.end")
+            event = type("Event", (), {"x": box[0] + 1, "y": box[1] + 1, "x_root": 100, "y_root": 100})()
+            with patch.object(self.note, "_show_context_menu") as menu:
+                self.note._on_rightclick(event)
+            self.assertEqual(menu.call_args.args[2][2][0], "删除此行")
+        self._mouse_drag(editor, (1, "left"), (2, "right"))
+        self.assertEqual(self._painted_rows(editor), [1, 2])
+
+    def test_single_row_prefix_selection_on_empty_todo_paints_nothing(self):
+        editor = self.note.editors[0]
+        self._load_lines(editor, [{"type": "text", "text": "abc", "checked": False},
+                                  {"type": "todo", "text": "", "checked": False}])
+        editor.text.tag_add("sel", "2.0", "2.end")
+        self.app.root.update()
+        self.assertFalse(editor.text.tag_ranges("selection_fill"))
+
     def test_drag_down_stops_at_pointer_row_even_from_far_right(self):
         editor = self.note.editors[0]
         lines = [{"type": "text", "text": "第一行文字", "checked": False},

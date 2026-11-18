@@ -1604,6 +1604,10 @@ class NoteEditor:
         下端只会是按下或指到的那一行，向上、向下拖都能选中起点或终点的空行，不会多选下一行。"""
         t = self.text
         t.tk.call("tk::TextSelectTo", t, x, y)
+        if (t.tk.call("set", "::tk::Priv(selectMode)") == "char" and t.tag_ranges("sel") and
+                t.compare("sel.first linestart", "==", "sel.last linestart") and not self._trimmed_range()):
+            # 单行里只盖到勾选框（如空待办）：和空文字行一样不算选中，继续拖到别的行时按锚点重算。
+            t.tag_remove("sel", "1.0", "end")
         if t.tk.call("set", "::tk::Priv(selectMode)") in ("char", "word") and t.tag_ranges("sel"):
             last = t.index("sel.last")
             row = int(last.split(".")[0])
@@ -2418,8 +2422,7 @@ class NoteEditor:
                 if t.compare(start, "<", end):
                     ranges.append((t.index(start), t.index(end)))
                 elif row <= len(self.lines) and not self.lines[row-1]["text"] and (
-                        row < last_row or (t.compare(last, ">", f"{row}.0")
-                                           and (row > first_row or t.compare(first, "<", f"{row}.end")))
+                        row < last_row or (t.compare(last, ">", f"{row}.0") and row > first_row)
                         or (row > first_row and self._reaches_note_end(first, last))):
                     # 空行没有文字可画：只给被选中的空行补一个换行符大小的标记，其余行不变。
                     markers.append(row)
