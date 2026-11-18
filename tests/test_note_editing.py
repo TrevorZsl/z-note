@@ -4772,18 +4772,18 @@ class NoteEditingTests(unittest.TestCase):
                  {"type": "todo", "text": "abc", "checked": False}]
         cases = (
             # 头行留下勾选框与完成状态，尾行剩下的文字接上。
-            (("2.4", "4.4"), [lines[0], {"type": "todo", "text": "dbc", "checked": True}]),
-            # 尾行只碰到勾选框，没有高亮文字：尾行原样保留。
-            (("2.3", "4.2"), [lines[0], {"type": "todo", "text": "", "checked": False}, lines[3]]),
-            (("2.0", "4.0"), [lines[0], {"type": "todo", "text": "", "checked": False}, lines[3]]),
+            (("2.4", "4.4"), [lines[0], {"type": "todo", "text": "dbc", "checked": True}], "2.4"),
+            # 尾行只碰到勾选框，没有高亮文字：尾行原样保留；第 2、3 行整行删掉，光标回到上一行行尾。
+            (("2.3", "4.2"), [lines[0], lines[3]], "1.6"),
+            (("2.0", "4.0"), [lines[0], lines[3]], "1.6"),
         )
-        for (first, last), expected in cases:
+        for (first, last), expected, insert in cases:
             with self.subTest(selection=(first, last)):
                 self._selection_case(self.note, lines, first, last)
                 self.text.event_generate("<KeyPress-BackSpace>")
                 self.text.event_generate("<KeyRelease-BackSpace>")
                 self.assertEqual(self.note.d["lines"], expected)
-                self.assertEqual(self.text.index("insert"), first if first != "2.0" else "2.3")
+                self.assertEqual(self.text.index("insert"), insert)
 
     def test_selection_without_highlighted_text_deletes_nothing(self):
         lines = [{"type": "todo", "text": "sdf", "checked": False},
@@ -5178,20 +5178,19 @@ class NoteEditingTests(unittest.TestCase):
         text.event_generate("<KeyRelease-Delete>")
         self.assertEqual(editor.lines, [dict(lines[0], text="aef"), lines[1]])
 
-    def test_whole_row_delete_removes_text_rows_and_keeps_one_todo_in_each_column(self):
+    def test_whole_row_delete_removes_rows_in_each_column(self):
         self.note.toggle_columns()
         lines = [{"type": "todo", "text": "买牛奶", "checked": False},
                  {"type": "text", "text": "说明", "checked": False},
                  {"type": "text", "text": "", "checked": False},
                  {"type": "text", "text": "备注", "checked": False},
                  {"type": "todo", "text": "交房租", "checked": True}]
-        empty_todo = {"type": "todo", "text": "", "checked": False}
         cases = (
-            # 全是文字（含空行）：整行删掉，光标回到上一行行尾。
+            # 待办和文字一样整行删掉，不留空待办；光标回到上一行行尾。
             ("2.0", "4.end", [lines[0], lines[4]], "1.6", "说明\n\n备注"),
-            # 含有待办：原位留一个空待办。
-            ("3.0", "5.end", [lines[0], lines[1], empty_todo], "3.3", "\n备注\n交房租"),
-            ("1.3", "2.end", [empty_todo, *lines[2:]], "1.3", "买牛奶\n说明"),
+            ("3.0", "5.end", [lines[0], lines[1]], "2.2", "\n备注\n交房租"),
+            # 从第一行删起，上面没有行：光标放到顶上来那一行的开头。
+            ("1.3", "2.end", lines[2:], "1.0", "买牛奶\n说明"),
         )
         try:
             clipboard = self.text.clipboard_get()
@@ -5229,6 +5228,17 @@ class NoteEditingTests(unittest.TestCase):
             self.text.clipboard_clear()
             if clipboard is not None:
                 self.text.clipboard_append(clipboard)
+
+    def test_whole_row_delete_of_todos_leaves_no_empty_todo(self):
+        lines = [{"type": "todo", "text": text, "checked": text == "c"} for text in ("aaaa", "b", "c", "d")]
+        for key in ("Delete", "BackSpace"):
+            with self.subTest(key=key):
+                self._selection_case(self.note, lines, "2.3", "3.end")
+                self.text.event_generate(f"<KeyPress-{key}>")
+                self.text.event_generate(f"<KeyRelease-{key}>")
+                self.app.root.update()
+                self.assertEqual(self.note.d["lines"], [lines[0], lines[3]])
+                self.assertEqual(self.text.index("insert"), self.text.index("1.end"))
 
     def test_deleting_empty_rows_between_todos_puts_caret_at_upper_row_end(self):
         editor = self.note.editors[0]
@@ -5591,7 +5601,7 @@ class NoteEditingTests(unittest.TestCase):
             self.text.event_generate("<KeyRelease-BackSpace>")
 
         def select_delete():
-            self._selection_case(self.note, lines, "2.0", "4.end")
+            self._selection_case(self.note, lines, "3.0", "4.end")
             self.text.event_generate("<KeyPress-BackSpace>")
             self.text.event_generate("<KeyRelease-BackSpace>")
 
@@ -5602,8 +5612,7 @@ class NoteEditingTests(unittest.TestCase):
         cases = (
             # 操作，删除后的行，被删的旧行（淡出），滑上来的行：(新行号, 旧行号)
             (backspace_empty_row, [lines[0], lines[1], lines[3], lines[4]], [3], (3, 4)),
-            (select_delete, [lines[0], {"type": "todo", "text": "", "checked": False}, lines[4]],
-             [3, 4], (3, 5)),
+            (select_delete, [lines[0], lines[1], lines[4]], [3, 4], (3, 5)),
             (menu_delete, [lines[0], lines[1], lines[3], lines[4]], [3], (3, 4)),
         )
         for action, expected, removed, (new_row, old_row) in cases:
@@ -5754,8 +5763,7 @@ class NoteEditingTests(unittest.TestCase):
             self.text.event_generate("<KeyPress-BackSpace>")
             self.text.event_generate("<KeyRelease-BackSpace>")
         self.assertIsNone(editor._removal)
-        self.assertEqual(editor.lines, [lines[0], {"type": "todo", "text": "", "checked": False},
-                                        *lines[30:]])
+        self.assertEqual(editor.lines, [lines[0], *lines[30:]])
         self.app.root.update()
         self.assertFalse([name for name in self.text.tag_names()
                           if name.startswith("row_removal") and self.text.tag_ranges(name)])

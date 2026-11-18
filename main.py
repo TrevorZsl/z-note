@@ -2723,14 +2723,13 @@ class NoteEditor:
         self.app.schedule_save()
 
     def delete_rows(self, top, bottom):
-        """删除选中的整行（行号从 1 起）：全是文字就整行删掉；含有待办时原位留一个空待办。"""
+        """删除选中的整行（行号从 1 起），待办和文字一样整行删掉；整篇删光时留一行，含有待办时留空待办。"""
         self._sync_lines_from_text()
         lines = self.lines
         removed = lines[top - 1:bottom]
-        if any(line["type"] == "todo" for line in removed):
-            keep = [dict(removed[0], type="todo", text="", checked=False)]
-        elif len(removed) == len(lines):
-            keep = [dict(removed[0], text="", checked=False)]  # 全删光时留一个空行
+        if len(removed) == len(lines):
+            todo = any(line["type"] == "todo" for line in removed)
+            keep = [dict(removed[0], type="todo" if todo else "text", text="", checked=False)]
         else:
             keep = []
         self._snapshot_removal(top, bottom, len(keep))
