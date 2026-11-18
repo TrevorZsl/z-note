@@ -1699,6 +1699,27 @@ class NoteEditor:
         if view_changed:
             self.body.update_idletasks()
         used_masks = used_boxes = used_bars = 0
+
+        def selection_mask(cursor):
+            nonlocal used_masks
+            if used_masks < len(self._selection_masks):
+                mask = self._selection_masks[used_masks]
+            else:
+                mask = tk.Frame(self.text, bg=self._bg)
+                mask.bind("<MouseWheel>", self._text_wheel)
+                mask.bind("<Control-MouseWheel>", self.win._ctrl_wheel)
+                mask.bind("<Motion>", self._hover_row)
+                for event in ("<Button-1>", "<B1-Motion>", "<ButtonRelease-1>", "<Button-3>"):
+                    mask.bind(event, lambda e, sequence=event: self.text.event_generate(
+                        sequence, x=e.x_root - self.text.winfo_rootx(),
+                        y=e.y_root - self.text.winfo_rooty(), time=e.time, state=e.state))
+                self._selection_masks.append(mask)
+            used_masks += 1
+            if mask.cget("cursor") != cursor:
+                mask.configure(cursor=cursor)
+            return mask
+
+        empty_marker = max(1, self.app.base_font.measure(" "))
         content_height = self.text.winfo_height()
         visible_start = self.text.index("@0,0")
         first_row = int(visible_start.split(".")[0])
@@ -1720,18 +1741,7 @@ class NoteEditor:
                 if self.text.tag_nextrange("selection_fill", f"{row}.0", f"{row}.end"):
                     top, bottom = max(0, row_top), min(content_height, row_top + row_height)
                     if top is not None:
-                        if used_masks < len(self._selection_masks):
-                            mask = self._selection_masks[used_masks]
-                        else:
-                            mask = tk.Frame(self.text, bg=self._bg)
-                            mask.bind("<MouseWheel>", self._text_wheel)
-                            mask.bind("<Control-MouseWheel>", self.win._ctrl_wheel)
-                            for event in ("<Button-1>", "<B1-Motion>", "<ButtonRelease-1>"):
-                                mask.bind(event, lambda e, sequence=event: self.text.event_generate(
-                                    sequence, x=e.x_root - self.text.winfo_rootx(),
-                                    y=e.y_root - self.text.winfo_rooty(), time=e.time, state=e.state))
-                            self._selection_masks.append(mask)
-                        used_masks += 1
+                        mask = selection_mask("")
                         mask.place(x=int(self.text.cget("padx")), y=top,
                                    width=int(self.text.tag_cget("todo_indent", "lmargin2")),
                                    height=bottom - top, bordermode="ignore")
@@ -1761,6 +1771,17 @@ class NoteEditor:
                     if getattr(box, "_todo_row", None) != row:
                         box._todo_row = row
                         box.bind("<Button-1>", lambda _e, r=row-1: self.toggle_done(r))
+            if not line["text"] and "selection_fill" in self.text.tag_names(f"{row}.end"):
+                # Tk 把换行符的高亮一直画到行尾；空行只留一个空格宽的标记，其余盖回底色。
+                box, display = self.text.bbox(f"{row}.end"), self.text.dlineinfo(f"{row}.end")
+                if box and display:
+                    left = box[0] + empty_marker
+                    right = self._drag_gutter.winfo_x()
+                    if right > left:
+                        mask = selection_mask("xterm")
+                        mask.place(x=left, y=display[1], width=right - left,
+                                   height=display[3], bordermode="ignore")
+                        mask.lift()
             if line["type"] != "todo" or not line["checked"]:
                 continue
             start = f"{row}.{self._prefix_len(line)}"

@@ -4693,6 +4693,46 @@ class NoteEditingTests(unittest.TestCase):
         self.app.root.update()
         self.assertFalse(self.text.tag_ranges("selection_fill"))
 
+    def test_empty_row_selection_marker_stays_narrow_in_each_column(self):
+        lines = [{"type": "todo", "text": "买牛奶", "checked": False},
+                 {"type": "todo", "text": "", "checked": False},
+                 {"type": "text", "text": "", "checked": False},
+                 {"type": "todo", "text": "写周报", "checked": False}]
+        self.note.d["lines"] = main.deepcopy(lines)
+        self.note.render()
+        self.note.toggle_columns()
+        self.app.root.update()
+        self.assertEqual(len(self.note.editors), 2)
+        for editor in self.note.editors:
+            editor.lines = main.deepcopy(lines)
+            editor.render(keep_cursor=False)
+        self.app.root.update()
+        marker = self.app.base_font.measure(" ")
+        for editor in self.note.editors:
+            text = editor.text
+            # 从空待办行往上拖到第一行，和全选：Tk 会把空行换行符的高亮画到行尾。
+            for first, last in (("1.4", "2.3"), ("1.0", "end-1c")):
+                with self.subTest(column=editor.col, selection=(first, last)):
+                    text.tag_remove("sel", "1.0", "end")
+                    text.tag_add("sel", first, last)
+                    self.app.root.update()
+                    rows = (2,) if first == "1.4" else (2, 3)
+                    for row in rows:
+                        box, display = text.bbox(f"{row}.end"), text.dlineinfo(f"{row}.end")
+                        self.assertIn("selection_fill", text.tag_names(f"{row}.end"))
+                        covering = [m for m in editor._selection_masks
+                                    if m.winfo_ismapped() and m.winfo_x() == box[0] + marker]
+                        self.assertEqual(len(covering), 1, f"第 {row} 行高亮没有收成小标记")
+                        mask = covering[0]
+                        self.assertEqual(mask.winfo_x() + mask.winfo_width(),
+                                         editor._drag_gutter.winfo_x())
+                        self.assertLessEqual(mask.winfo_y(), display[1])
+                        self.assertGreaterEqual(mask.winfo_y() + mask.winfo_height(),
+                                                display[1] + display[3])
+            text.tag_remove("sel", "1.0", "end")
+            self.app.root.update()
+            self.assertFalse([m for m in editor._selection_masks if m.winfo_ismapped()])
+
     def _selection_case(self, editor, lines, first, last, insert=None):
         if editor is self.note:
             editor = self.note.editors[0]
