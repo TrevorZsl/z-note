@@ -11,6 +11,7 @@ from fontTools import subset
 from fontTools.merge import Merger
 from fontTools.ttLib import TTFont
 from fontTools.ttLib.scaleUpem import scale_upem
+from fontTools.ttLib.tables import ttProgram
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -26,6 +27,15 @@ def rename(font, family, bold=False):
     for name_id, text in {1: family, 2: style, 3: f"{family}-{style}",
                           4: f"{family} {style}", 6: f"{family.replace(' ', '')}-{style}"}.items():
         names.setName(text, name_id, 3, 1, 0x409)
+    return font
+
+
+def unhint_thin_glyphs(font):
+    # Times' hinting draws regular "z" with a 1px diagonal at 10-12pt, lighter
+    # than neighbouring letters. Without instructions it renders smoothed.
+    glyph = font["glyf"][font.getBestCmap()[ord("z")]]
+    glyph.program = ttProgram.Program()
+    glyph.program.fromBytecode(b"")
     return font
 
 
@@ -68,6 +78,8 @@ def prepare():
             setattr(font["hhea"], attr, getattr(latin["hhea"], attr))
         for attr in ("sTypoAscender", "sTypoDescender", "sTypoLineGap", "usWinAscent", "usWinDescent"):
             setattr(font["OS/2"], attr, getattr(latin["OS/2"], attr))
+        if not bold:
+            unhint_thin_glyphs(font)
         rename(font, "ZNote Classic", bold).save(OUTPUT / output)
         font.close()
         latin.close()
