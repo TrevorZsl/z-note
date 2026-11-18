@@ -3594,7 +3594,7 @@ class NoteEditingTests(unittest.TestCase):
             (shot, "2.5", "4.4", partial),        # 跨行，首尾行各选一部分，中间是空待办
             (shot, "2.3", "4.end", "删除 3 行"),  # 同样三行，每行文字都完整选上
             (mixed, "2.4", "4.4", partial),
-            (mixed, "2.3", "4.2", partial),       # 尾行只碰到勾选框
+            (mixed, "2.3", "4.2", "删除 2 行"),   # 尾行只碰到勾选框，高亮正好是第 2、3 两整行
             (mixed, "2.3", "3.end", "删除 2 行"),
             (mixed, "2.0", "4.0", "删除 2 行"),   # 拖过勾选框，停在下一行行首
             (mixed, "2.3", "3.1", partial),       # 尾行只选了一个字
@@ -4799,7 +4799,8 @@ class NoteEditingTests(unittest.TestCase):
                     self.assertEqual(self.note.d["lines"], lines)
                     self.assertFalse(self.text.tag_ranges("sel"))
 
-    def test_select_all_delete_leaves_first_row_type_and_includes_final_empty_row(self):
+    def test_select_all_delete_keeps_one_row_and_includes_final_empty_row(self):
+        # 全选整篇删除：含有待办时留一个空待办，全是文字时留一个空文字行。
         for lines, expected in (
                 ([{"type": "todo", "text": "sdf", "checked": True},
                   {"type": "todo", "text": "abc", "checked": False}],
@@ -4809,9 +4810,13 @@ class NoteEditingTests(unittest.TestCase):
                  [{"type": "todo", "text": "", "checked": False}]),
                 ([{"type": "text", "text": "说明", "checked": False},
                   {"type": "todo", "text": "", "checked": False}],
+                 [{"type": "todo", "text": "", "checked": False}]),
+                ([{"type": "text", "text": "说明", "checked": False},
+                  {"type": "text", "text": "", "checked": False}],
                  [{"type": "text", "text": "", "checked": False}])):
             with self.subTest(lines=lines):
-                self._selection_case(self.note, lines, "1.0", "end-1c")
+                self._selection_case(self.note, lines, "1.0", "1.0")
+                self.text.event_generate("<Control-a>")
                 self.text.event_generate("<KeyPress-Delete>")
                 self.text.event_generate("<KeyRelease-Delete>")
                 self.assertEqual(self.note.d["lines"], expected)
@@ -4878,6 +4883,341 @@ class NoteEditingTests(unittest.TestCase):
         self.assertEqual(self.note.d["lines"][1]["text"], expected)
         self.note.render()
         self.assertEqual(self.text.get("2.3", "2.end"), expected)
+
+    def _row_point(self, editor, row, where):
+        text = editor.text
+        display = text.dlineinfo(f"{row}.0")
+        # "right" 落在短行行尾右半边的空白里，Tk 原本会把它算成下一行开头；避开右侧拖动手柄。
+        x = {"left": int(text.cget("padx")) + 1, "right": text.winfo_width() - 90}.get(where, where)
+        return x, display[1] + display[3] // 2
+
+    def _mouse_drag(self, editor, start, end=None):
+        """在 start=(行, 位置) 按下，拖到 end 后松开；end 为空时只点击。"""
+        text = editor.text
+        text.focus_force()
+        self.app.root.update()
+        self._press_time = getattr(self, "_press_time", 0) + 1000  # 间隔够长，不被当成双击
+        x, y = self._row_point(editor, *start)
+        text.event_generate("<Button-1>", x=x, y=y, time=self._press_time)
+        if end is not None:
+            x, y = self._row_point(editor, *end)
+            text.event_generate("<B1-Motion>", x=x, y=y, state=256, time=self._press_time + 10)
+        text.event_generate("<ButtonRelease-1>", x=x, y=y, state=256, time=self._press_time + 20)
+        self.app.root.update()
+
+    def _painted_rows(self, editor):
+        # 相邻行的高亮会连成一段，行首可能落在上一行开始的那段里。
+        text = editor.text
+        return [row for row in range(1, len(editor.lines) + 1)
+                if "selection_fill" in text.tag_names(f"{row}.0") or
+                text.tag_nextrange("selection_fill", f"{row}.0", f"{row+1}.0")]
+
+    def _load_lines(self, editor, lines):
+        editor.lines = main.deepcopy(lines)
+        editor.render(keep_cursor=False)
+        editor.text.tag_remove("sel", "1.0", "end")
+        self.app.root.update()
+
+    def test_click_beyond_short_row_end_keeps_caret_on_that_row(self):
+        editor = self.note.editors[0]
+        self._load_lines(editor, [{"type": "text", "text": "abc", "checked": False},
+                                  {"type": "text", "text": "", "checked": False},
+                                  {"type": "todo", "text": "买", "checked": False},
+                                  {"type": "text", "text": "xyz", "checked": False}])
+        for row in (1, 2, 3):
+            for where in ("left", "right"):
+                with self.subTest(row=row, where=where):
+                    self._mouse_drag(editor, (row, where))
+                    expected = f"{row}.end" if where == "right" else editor._text_body(row)
+                    self.assertEqual(editor.text.index("insert"), editor.text.index(expected))
+                    self.assertFalse(editor.text.tag_ranges("sel"))
+
+    def test_drag_down_stops_at_pointer_row_even_from_far_right(self):
+        editor = self.note.editors[0]
+        lines = [{"type": "text", "text": "第一行文字", "checked": False},
+                 {"type": "text", "text": "短", "checked": False},
+                 {"type": "text", "text": "", "checked": False},
+                 {"type": "text", "text": "末行", "checked": False}]
+        self._load_lines(editor, lines)
+        self._mouse_drag(editor, (1, "left"), (2, "right"))
+        text = editor.text
+        self.assertEqual(text.index("sel.last"), text.index("2.end"))
+        self.assertEqual(text.index("insert"), text.index("2.end"))
+        self.assertEqual(self._painted_rows(editor), [1, 2])
+        self.assertEqual(editor._whole_rows(), (1, 2))
+        text.event_generate("<KeyPress-Delete>")
+        text.event_generate("<KeyRelease-Delete>")
+        self.assertEqual(editor.lines, lines[2:])
+        self.assertEqual(text.index("insert"), "1.0")
+        editor._undo_edit()
+        self.assertEqual(editor.lines, lines)
+
+    def test_drag_selects_empty_text_row_from_either_direction_without_overshoot(self):
+        editor = self.note.editors[0]
+        text = editor.text
+        lines = [{"type": "text", "text": "甲行", "checked": False},
+                 {"type": "text", "text": "", "checked": False},
+                 {"type": "text", "text": "", "checked": False},
+                 {"type": "text", "text": "乙行", "checked": False}]
+        cases = (
+            # 往下拖到空行：指针在左边或行尾右边，都选中这一行、光标留在这一行，不碰下一行。
+            ((1, "left"), (2, "left"), [1, 2], (1, 2), "2.0"),
+            ((1, "left"), (2, "right"), [1, 2], (1, 2), "2.0"),
+            # 往上拖到空行。
+            ((4, "right"), (2, "left"), [2, 3, 4], (2, 4), "2.0"),
+            ((4, "right"), (3, "right"), [3, 4], (3, 4), "3.0"),
+            # 从空行按下往上拖、往下拖，都包含按下的这一行。
+            ((3, "left"), (1, "left"), [1, 2, 3], (1, 3), "1.0"),
+            ((3, "right"), (1, "left"), [1, 2, 3], (1, 3), "1.0"),
+            ((2, "left"), (4, "right"), [2, 3, 4], (2, 4), "4.end"),
+        )
+        for start, end, painted, whole, insert in cases:
+            with self.subTest(start=start, end=end):
+                self._load_lines(editor, lines)
+                self._mouse_drag(editor, start, end)
+                self.assertEqual(self._painted_rows(editor), painted)
+                self.assertEqual(editor._whole_rows(), whole)
+                self.assertEqual(text.index("insert"), text.index(insert))
+        # 拖出窗口左边时 Tk 自带的扫描不再用旧坐标改写选区。
+        self._load_lines(editor, lines)
+        self._mouse_drag(editor, (3, "left"), (1, "left"))
+        selected = tuple(map(str, text.tag_ranges("sel")))
+        text.event_generate("<B1-Leave>", x=-20, y=self._row_point(editor, 1, "left")[1], state=256)
+        self.app.root.update()
+        main.time.sleep(.12)  # Tk 的扫描每 50ms 重算一次选区
+        self.app.root.update()
+        self.assertEqual(tuple(map(str, text.tag_ranges("sel"))), selected)
+        # 删除整行文字：被选中的空行一起删掉，不留空行。
+        text.event_generate("<KeyPress-BackSpace>")
+        text.event_generate("<KeyRelease-BackSpace>")
+        self.assertEqual(editor.lines, lines[3:])
+
+    def test_drag_to_second_last_empty_row_spares_final_empty_row(self):
+        editor = self.note.editors[0]
+        text = editor.text
+        lines = [{"type": "text", "text": "甲", "checked": False},
+                 {"type": "text", "text": "乙", "checked": False},
+                 {"type": "text", "text": "丙", "checked": False},
+                 {"type": "text", "text": "", "checked": False},
+                 {"type": "text", "text": "", "checked": False}]
+        self._load_lines(editor, lines)
+        self._mouse_drag(editor, (2, "left"), (4, "right"))
+        self.assertEqual(self._painted_rows(editor), [2, 3, 4])
+        self.assertEqual(editor._whole_rows(), (2, 4))
+        self.assertEqual(text.index("insert"), "4.0")
+        text.event_generate("<KeyPress-Delete>")
+        text.event_generate("<KeyRelease-Delete>")
+        self.assertEqual(editor.lines, [lines[0], lines[4]])
+        # 拖到最后一个空行时，它也被选中。
+        self._load_lines(editor, lines)
+        self._mouse_drag(editor, (2, "left"), (5, "left"))
+        self.assertEqual(self._painted_rows(editor), [2, 3, 4, 5])
+        self.assertEqual(editor._whole_rows(), (2, 5))
+        self.assertEqual(text.index("insert"), "5.0")
+        # 全选也包括最后的空行。
+        self._load_lines(editor, lines)
+        text.event_generate("<Control-a>")
+        self.app.root.update()
+        self.assertEqual(self._painted_rows(editor), [1, 2, 3, 4, 5])
+        self.assertEqual(editor._whole_rows(), (1, 5))
+
+    def test_drag_within_text_row_still_selects_characters(self):
+        editor = self.note.editors[0]
+        text = editor.text
+        lines = [{"type": "text", "text": "abcdef", "checked": False},
+                 {"type": "text", "text": "", "checked": False}]
+        self._load_lines(editor, lines)
+        box1, box4 = text.bbox("1.1"), text.bbox("1.4")
+        self._mouse_drag(editor, (1, box1[0] + 1), (1, box4[0] + 1))
+        self.assertEqual(tuple(map(str, text.tag_ranges("sel"))), ("1.1", "1.4"))
+        self.assertIsNone(editor._whole_rows())
+        text.event_generate("<KeyPress-Delete>")
+        text.event_generate("<KeyRelease-Delete>")
+        self.assertEqual(editor.lines, [dict(lines[0], text="aef"), lines[1]])
+
+    def test_whole_row_delete_removes_text_rows_and_keeps_one_todo_in_each_column(self):
+        self.note.toggle_columns()
+        lines = [{"type": "todo", "text": "买牛奶", "checked": False},
+                 {"type": "text", "text": "说明", "checked": False},
+                 {"type": "text", "text": "", "checked": False},
+                 {"type": "text", "text": "备注", "checked": False},
+                 {"type": "todo", "text": "交房租", "checked": True}]
+        empty_todo = {"type": "todo", "text": "", "checked": False}
+        cases = (
+            # 全是文字（含空行）：整行删掉，光标回到上一行行尾。
+            ("2.0", "4.end", [lines[0], lines[4]], "1.6", "说明\n\n备注"),
+            # 含有待办：原位留一个空待办。
+            ("3.0", "5.end", [lines[0], lines[1], empty_todo], "3.3", "\n备注\n交房租"),
+            ("1.3", "2.end", [empty_todo, *lines[2:]], "1.3", "买牛奶\n说明"),
+        )
+        try:
+            clipboard = self.text.clipboard_get()
+        except main.tk.TclError:
+            clipboard = None
+        try:
+            for editor in self.note.editors:
+                for first, last, expected, insert, copied in cases:
+                    for how in ("Delete", "BackSpace", "menu", "cut"):
+                        with self.subTest(column=editor.col, selection=(first, last), how=how):
+                            self._selection_case(editor, lines, first, last)
+                            text = editor.text
+                            if how == "menu":
+                                box = text.bbox(first)
+                                event = type("Event", (), {"x": box[0] + 1, "y": box[1] + 1,
+                                                          "x_root": 100, "y_root": 100})()
+                                with patch.object(self.note, "_show_context_menu") as menu:
+                                    editor._on_rightclick(event)
+                                label, action = menu.call_args.args[2][2]
+                                rows = int(last.split(".")[0]) - int(first.split(".")[0]) + 1
+                                self.assertEqual(label, f"删除 {rows} 行")
+                                action()
+                            elif how == "cut":
+                                text.event_generate("<<Cut>>")
+                                self.assertEqual(text.clipboard_get(), copied)
+                            else:
+                                text.event_generate(f"<KeyPress-{how}>")
+                                text.event_generate(f"<KeyRelease-{how}>")
+                            self.app.root.update()
+                            self.assertEqual(editor.lines, expected)
+                            self.assertEqual(text.index("insert"), insert)
+                            editor._undo_edit()
+                            self.assertEqual(editor.lines, lines)
+        finally:
+            self.text.clipboard_clear()
+            if clipboard is not None:
+                self.text.clipboard_append(clipboard)
+
+    def test_deleting_empty_rows_between_todos_puts_caret_at_upper_row_end(self):
+        editor = self.note.editors[0]
+        text = editor.text
+        lines = [{"type": "todo", "text": "上面待办", "checked": False},
+                 {"type": "text", "text": "", "checked": False},
+                 {"type": "text", "text": "", "checked": False},
+                 {"type": "text", "text": "", "checked": False},
+                 {"type": "todo", "text": "下面待办", "checked": False}]
+        try:
+            clipboard = text.clipboard_get()
+        except main.tk.TclError:
+            clipboard = None
+        try:
+            for how in ("Delete", "BackSpace", "menu", "cut"):
+                with self.subTest(how=how):
+                    self._load_lines(editor, lines)
+                    editor._remember_edit()
+                    self._mouse_drag(editor, (2, "left"), (4, "right"))
+                    self.assertEqual(editor._whole_rows(), (2, 4))
+                    if how == "menu":
+                        box = text.bbox("2.0")
+                        event = type("Event", (), {"x": box[0] + 1, "y": box[1] + 1,
+                                                  "x_root": 100, "y_root": 100})()
+                        with patch.object(self.note, "_show_context_menu") as menu:
+                            editor._on_rightclick(event)
+                        label, action = menu.call_args.args[2][2]
+                        self.assertEqual(label, "删除 3 行")
+                        action()
+                    elif how == "cut":
+                        text.event_generate("<<Cut>>")
+                        self.assertEqual(text.clipboard_get(), "\n\n")
+                    else:
+                        text.event_generate(f"<KeyPress-{how}>")
+                        text.event_generate(f"<KeyRelease-{how}>")
+                    self.app.root.update()
+                    self.assertEqual(editor.lines, [lines[0], lines[4]])
+                    self.assertEqual(text.index("insert"), text.index("1.end"))
+                    editor._undo_edit()
+                    self.assertEqual(editor.lines, lines)
+        finally:
+            text.clipboard_clear()
+            if clipboard is not None:
+                text.clipboard_append(clipboard)
+
+    def _tail_masks(self, editor):
+        return {mask._mask_key[1]: mask for mask in editor._selection_masks
+                if mask._mask_key[0] == "tail" and mask.place_info()}
+
+    def test_drag_keeps_each_selected_empty_row_on_its_own_mask(self):
+        editor = self.note.editors[0]
+        text = editor.text
+        lines = [{"type": "text", "text": "甲行", "checked": False}] + \
+                [{"type": "text", "text": "", "checked": False} for _ in range(4)] + \
+                [{"type": "text", "text": "乙行", "checked": False}]
+        for start, path in ((5, (4, 3, 2, 1)), (2, (3, 4, 5, 6))):
+            with self.subTest(start=start):
+                self._load_lines(editor, lines)
+                text.focus_force()
+                self.app.root.update()
+                self._press_time = getattr(self, "_press_time", 0) + 1000
+                x, y = self._row_point(editor, start, "left")
+                text.event_generate("<Button-1>", x=x, y=y, time=self._press_time)
+                previous = {}
+                for i, row in enumerate(path):
+                    x, y = self._row_point(editor, row, "left")
+                    text.event_generate("<B1-Motion>", x=x, y=y, state=256, time=self._press_time + 10 + i)
+                    self.app.root.update()
+                    masks = self._tail_masks(editor)
+                    # 选区变大时，已经盖好的空行仍由原来的遮罩盖着，不跟着换行挪动。
+                    for covered, mask in previous.items():
+                        self.assertIs(masks.get(covered), mask, f"第 {covered} 行的遮罩被换掉了")
+                    previous = masks
+                text.event_generate("<ButtonRelease-1>", x=x, y=y, state=256, time=self._press_time + 50)
+                self.assertEqual(sorted(previous), [2, 3, 4, 5])
+
+    def test_empty_row_tail_is_covered_before_its_marker_is_painted(self):
+        editor = self.note.editors[0]
+        text = editor.text
+        lines = [{"type": "text", "text": "甲行", "checked": False},
+                 {"type": "text", "text": "乙行", "checked": False},
+                 {"type": "text", "text": "", "checked": False},
+                 {"type": "text", "text": "", "checked": False},
+                 {"type": "text", "text": "丙行", "checked": False}]
+        seen = []
+
+        def paint(event=None):
+            editor._paint_selection(event)
+            # 刚打完标记、还没处理 idle：每个有标记的空行都已经有放好的尾部遮罩。
+            marked = [row for row in (3, 4) if "selection_fill" in text.tag_names(f"{row}.end")]
+            seen.append((marked, sorted(self._tail_masks(editor))))
+
+        text.bind("<<Selection>>", paint)
+        # 从空行出发拖到相邻的有字行、空行，往上和往下。
+        cases = (((3, "left"), (2, "left"), [3], 2),
+                 ((4, "left"), (3, "left"), [3, 4], 3),
+                 ((3, "left"), (4, "left"), [3, 4], 4))
+        for start, end, marked, insert_row in cases:
+            with self.subTest(start=start, end=end):
+                self._load_lines(editor, lines)
+                seen.clear()
+                self._mouse_drag(editor, start, end)
+                self.assertTrue(seen)
+                for rows, covered in seen:
+                    self.assertTrue(set(rows) <= set(covered), (rows, covered))
+                self.assertEqual(seen[-1][0], marked)
+                self.assertEqual(int(text.index("insert").split(".")[0]), insert_row)
+        # 程序直接改选区时同样先盖遮罩。
+        self._load_lines(editor, lines)
+        seen.clear()
+        text.tag_add("sel", "2.0", "5.0")
+        paint()
+        self.assertEqual(seen[-1], ([3, 4], [3, 4]))
+
+    def test_drag_autoscroll_stops_selection_at_pointer_row(self):
+        editor = self.note.editors[0]
+        text = editor.text
+        self._load_lines(editor, [{"type": "text", "text": f"第 {i} 行" if i % 2 else "", "checked": False}
+                                  for i in range(40)])
+        x, y = self._row_point(editor, 2, "right")
+        text.focus_force()
+        text.event_generate("<Button-1>", x=x, y=y, time=5000)
+        text.event_generate("<B1-Motion>", x=x, y=editor.body.winfo_height() + 20, state=256, time=5010)
+        for _ in range(5):
+            editor._selection_scroll()
+        text.event_generate("<ButtonRelease-1>", x=x, y=y, state=256, time=5020)
+        self.app.root.update()
+        row = int(text.index("insert").split(".")[0])
+        self.assertGreater(row, 2)
+        painted = self._painted_rows(editor)
+        self.assertEqual(painted[-1], row)
+        self.assertNotIn(row + 1, painted)
 
     def test_toggling_wrapped_todos_keeps_exact_pixel_position(self):
         self.note.geometry("340x340")

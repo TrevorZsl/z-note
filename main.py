@@ -991,6 +991,8 @@ class NoteEditor:
                else self._selection_scroll(e), add="+")
         t.bind("<ButtonRelease-1>", lambda e: self._row_drag_release(e) if self._row_drag is not None
                else self._stop_selection_scroll(e), add="+")
+        # 拖选由 B1-Motion 和 _selection_scroll 驱动；Tk 自带的出界扫描会用旧坐标反复重算选区。
+        t.bind("<B1-Leave>", lambda e: "break")
         t.bind("<Unmap>", self._stop_selection_scroll)
         t.bind("<Unmap>", self._stop_wheel, add="+")
         self.render()
@@ -1562,7 +1564,9 @@ class NoteEditor:
         outside = -pointer_y if pointer_y < 0 else (pointer_y - height + 1 if pointer_y >= height else 0)
         if not outside:
             self._stop_selection_scroll()
-            return
+            if event is not None:
+                self._drag_select(event.x, event.y)
+            return "break"
         if event is not None and self._selection_scroll_job is not None:
             return "break"  # 计时器已在运行，下一帧会用最新的鼠标位置。
         now = time.monotonic()
@@ -1588,13 +1592,26 @@ class NoteEditor:
             pass
         self.body.update_idletasks()
         y = self.body.canvasy(max(0, min(height - 1, pointer_y))) - self._chunk_start
-        self.text.tk.call("tk::TextSelectTo", self.text, self._selection_x, round(y))
-        self._clamp_todo_cursor()
+        self._drag_select(self._selection_x, round(y))
         if self.body.yview() != before:
             self.scroll_thumb.reveal()
         else:
             self._stop_selection_scroll()
         return "break"
+
+    def _drag_select(self, x, y):
+        """鼠标拖选按字逐个选。选区下端停在空行开头时，这一行连同换行符一起选上，光标仍留在这一行；
+        下端只会是按下或指到的那一行，向上、向下拖都能选中起点或终点的空行，不会多选下一行。"""
+        t = self.text
+        t.tk.call("tk::TextSelectTo", t, x, y)
+        if t.tk.call("set", "::tk::Priv(selectMode)") == "char" and t.tag_ranges("sel"):
+            last = t.index("sel.last")
+            row = int(last.split(".")[0])
+            body = self._text_body(row)
+            if (t.compare("sel.first", "<", f"{row}.0") and t.compare(body, ">=", f"{row}.end")
+                    and t.compare(last, "<=", body)):
+                t.tag_add("sel", last, f"{row}.end+1c")
+        self._clamp_todo_cursor()
 
     def _make_check_images(self):
         size = max(18, round(self.app.base_font.metrics("ascent") * 1.1))
@@ -1639,6 +1656,42 @@ class NoteEditor:
             self._layout_pending = False
             measure, self._layout_measure_pending = self._layout_measure_pending, False
             self._queue_strikes(measure=measure)
+
+    def _selection_mask(self, key, cursor):
+        """按行取底色遮罩，key 如 ("tail", 3)、("margin", 3)：同一行一直用同一个遮罩，
+        选区变大时已盖好的行不挪位置，挪开时不会露出 Tk 画的整行高亮。"""
+        for mask in self._selection_masks:
+            if mask._mask_key == key:
+                break
+        else:
+            mask = tk.Frame(self.text, bg=self._bg)
+            mask._mask_key = key
+            mask.bind("<MouseWheel>", self._text_wheel)
+            mask.bind("<Control-MouseWheel>", self.win._ctrl_wheel)
+            mask.bind("<Motion>", self._hover_row)
+            for event in ("<Button-1>", "<B1-Motion>", "<ButtonRelease-1>", "<Button-3>"):
+                mask.bind(event, lambda e, sequence=event: self.text.event_generate(
+                    sequence, x=e.x_root - self.text.winfo_rootx(),
+                    y=e.y_root - self.text.winfo_rooty(), time=e.time, state=e.state))
+            self._selection_masks.append(mask)
+        if mask.cget("cursor") != cursor:
+            mask.configure(cursor=cursor)
+        return mask
+
+    def _cover_empty_row_tail(self, row):
+        """Tk 把空行换行符的高亮一直画到行尾；只留一个空格宽的标记，其余用底色遮罩盖回。
+        返回遮罩；这一行不在当前正文窗口里时返回 None。"""
+        box, display = self.text.bbox(f"{row}.end"), self.text.dlineinfo(f"{row}.end")
+        if not (box and display):
+            return None
+        left = box[0] + max(1, self.app.base_font.measure(" "))
+        right = self._drag_gutter.winfo_x()
+        if right <= left:
+            return None
+        mask = self._selection_mask(("tail", row), "xterm")
+        mask.place(x=left, y=display[1], width=right - left, height=display[3], bordermode="ignore")
+        mask.lift()
+        return mask
 
     def _layout_text(self):
         # 全文重加 tag 会让 Tk 重测每一行；收起动画逐帧布局时正文结构不变，render 已加过。
@@ -1698,28 +1751,8 @@ class NoteEditor:
             view_changed = True
         if view_changed:
             self.body.update_idletasks()
-        used_masks = used_boxes = used_bars = 0
-
-        def selection_mask(cursor):
-            nonlocal used_masks
-            if used_masks < len(self._selection_masks):
-                mask = self._selection_masks[used_masks]
-            else:
-                mask = tk.Frame(self.text, bg=self._bg)
-                mask.bind("<MouseWheel>", self._text_wheel)
-                mask.bind("<Control-MouseWheel>", self.win._ctrl_wheel)
-                mask.bind("<Motion>", self._hover_row)
-                for event in ("<Button-1>", "<B1-Motion>", "<ButtonRelease-1>", "<Button-3>"):
-                    mask.bind(event, lambda e, sequence=event: self.text.event_generate(
-                        sequence, x=e.x_root - self.text.winfo_rootx(),
-                        y=e.y_root - self.text.winfo_rooty(), time=e.time, state=e.state))
-                self._selection_masks.append(mask)
-            used_masks += 1
-            if mask.cget("cursor") != cursor:
-                mask.configure(cursor=cursor)
-            return mask
-
-        empty_marker = max(1, self.app.base_font.measure(" "))
+        used_masks = set()
+        used_boxes = used_bars = 0
         content_height = self.text.winfo_height()
         visible_start = self.text.index("@0,0")
         first_row = int(visible_start.split(".")[0])
@@ -1741,11 +1774,12 @@ class NoteEditor:
                 if self.text.tag_nextrange("selection_fill", f"{row}.0", f"{row}.end"):
                     top, bottom = max(0, row_top), min(content_height, row_top + row_height)
                     if top is not None:
-                        mask = selection_mask("")
+                        mask = self._selection_mask(("margin", row), "")
                         mask.place(x=int(self.text.cget("padx")), y=top,
                                    width=int(self.text.tag_cget("todo_indent", "lmargin2")),
                                    height=bottom - top, bordermode="ignore")
                         mask.lift()
+                        used_masks.add(mask)
                 size = self._check_images[False].width()
                 y = row_top + row_height // 2 - size // 2
                 if -size < y < content_height:
@@ -1772,16 +1806,9 @@ class NoteEditor:
                         box._todo_row = row
                         box.bind("<Button-1>", lambda _e, r=row-1: self.toggle_done(r))
             if not line["text"] and "selection_fill" in self.text.tag_names(f"{row}.end"):
-                # Tk 把换行符的高亮一直画到行尾；空行只留一个空格宽的标记，其余盖回底色。
-                box, display = self.text.bbox(f"{row}.end"), self.text.dlineinfo(f"{row}.end")
-                if box and display:
-                    left = box[0] + empty_marker
-                    right = self._drag_gutter.winfo_x()
-                    if right > left:
-                        mask = selection_mask("xterm")
-                        mask.place(x=left, y=display[1], width=right - left,
-                                   height=display[3], bordermode="ignore")
-                        mask.lift()
+                mask = self._cover_empty_row_tail(row)
+                if mask is not None:
+                    used_masks.add(mask)
             if line["type"] != "todo" or not line["checked"]:
                 continue
             start = f"{row}.{self._prefix_len(line)}"
@@ -1832,8 +1859,11 @@ class NoteEditor:
                 start = next_start
 
         # 这次没排上的控件回收掉，池子始终只留当前需要的。
-        for pool, used in ((self._selection_masks, used_masks),
-                           (self._checkbox_widgets, used_boxes),
+        for mask in self._selection_masks:
+            if mask not in used_masks:
+                mask.destroy()
+        self._selection_masks[:] = [mask for mask in self._selection_masks if mask in used_masks]
+        for pool, used in ((self._checkbox_widgets, used_boxes),
                            (self._strike_widgets, used_bars)):
             for widget in pool[used:]:
                 widget.destroy()
@@ -1904,12 +1934,15 @@ class NoteEditor:
             return t.index(f"{row}.{1 + len(PREFIX_PAD)}")
         return start
 
-    def _trim_selection(self):
-        """删除、输入、剪贴前把选区收到高亮的文字上：勾选框和两端的换行属于行结构。
-        与 _paint_selection 的高亮范围一致；选区里没有可删的内容时取消选区并返回 False。"""
+    def _reaches_note_end(self, first, last):
+        """选区从首行开头一直选到文末（如全选），最后一行是空行时也算选中。"""
         t = self.text
-        if not t.tag_ranges("sel"):
-            return True
+        return t.compare(last, "==", "end-1c") and t.compare(first, "<=", self._text_body(1))
+
+    def _trimmed_range(self):
+        """选区收到高亮内容后的 (first, last)，不改动选区；勾选框和两端的换行属于行结构。
+        空行要连同换行符一起选中才算。没有可删的内容时返回 None。"""
+        t = self.text
         first, last = t.index("sel.first"), t.index("sel.last")
         first_row, last_row = int(first.split(".")[0]), int(last.split(".")[0])
         if last_row > first_row:
@@ -1917,9 +1950,9 @@ class NoteEditor:
             if t.compare(body, "<", f"{last_row}.end"):
                 excluded = t.compare(last, "<=", body)  # 末行一个字都没选中
             else:
-                # 空行有高亮标记才算选中；选到文末（如全选）时也包括最后的空行。
+                # 只停在空行开头、没选到它的换行就不算；从首行选到文末（如全选）时包括最后的空行。
                 excluded = (t.compare(last, "==", f"{last_row}.0") and
-                            t.compare(last, "!=", "end-1c"))
+                            not self._reaches_note_end(first, last))
             if excluded:
                 last_row -= 1
                 last = t.index(f"{last_row}.end")
@@ -1933,8 +1966,33 @@ class NoteEditor:
                 t.compare(first, "==", f"{first_row}.end")):
             first = self._text_body(first_row + 1)  # 起点在有字行的行尾：这行没有被高亮
         if t.compare(first, ">=", last):
+            return None
+        return first, last
+
+    def _whole_rows(self):
+        """高亮覆盖两行以上的完整内容时返回这些行 (top, bottom)，行号从 1 起；否则返回 None。"""
+        t = self.text
+        span = t.tag_ranges("sel") and self._trimmed_range()
+        if not span:
+            return None
+        first, last = span
+        top, bottom = int(first.split(".")[0]), int(last.split(".")[0])
+        if (bottom > top and t.compare(first, "<=", self._text_body(top)) and
+                t.compare(last, ">=", f"{bottom}.end")):
+            return top, bottom
+        return None
+
+    def _trim_selection(self):
+        """删除、输入、剪贴前把选区收到高亮的文字上，与 _paint_selection 的高亮范围一致；
+        选区里没有可删的内容时取消选区并返回 False。"""
+        t = self.text
+        if not t.tag_ranges("sel"):
+            return True
+        span = self._trimmed_range()
+        if not span:
             t.tag_remove("sel", "1.0", "end")
             return False
+        first, last = span
         if (first, last) != (t.index("sel.first"), t.index("sel.last")):
             t.tag_remove("sel", "1.0", "end")
             t.tag_add("sel", first, last)
@@ -2209,6 +2267,7 @@ class NoteEditor:
             return "break"
         self._sync_lines_from_text()
         self._clamp_todo_cursor()
+        rows = self._whole_rows() if command == "tk_textCut" else None  # 收拢前判断，见 _local_shortcut
         self._trim_selection()
         t = self.text
         if command in ("tk_textCopy", "tk_textCut"):
@@ -2239,6 +2298,8 @@ class NoteEditor:
             self.app._clipboard_lines = (user32.GetClipboardSequenceNumber(), content, copied_lines)
             if command == "tk_textCopy":
                 return "break"
+            if rows:  # 剪切整行和删除整行一样，不留空行
+                return self.delete_rows(*rows)
             t.delete(first, last)
             self._on_keyrelease(None)
             return "break"
@@ -2305,27 +2366,40 @@ class NoteEditor:
     def _paint_selection(self, _event=None):
         # 原生选区保留复制/删除语义；背景只画文字，避开勾选框和换行后的空白。
         t = self.text
-        t.tag_remove("selection_fill", "1.0", "end")
         selected = t.tag_ranges("sel")
+        ranges, markers = [], []
+        if selected:
+            first, last = selected
+            first_row, last_row = int(str(first).split(".")[0]), int(str(last).split(".")[0])
+            for row in range(first_row, last_row + 1):
+                start = first if t.compare(first, ">", f"{row}.0") else f"{row}.0"
+                if row <= len(self.lines) and self.lines[row-1]["type"] == "todo":
+                    text_start = f"{row}.{self._prefix_len(self.lines[row-1])}"
+                    if t.compare(start, "<", text_start):
+                        start = text_start
+                end = last if t.compare(last, "<", f"{row}.end") else f"{row}.end"
+                if t.compare(start, "<", end):
+                    ranges.append((t.index(start), t.index(end)))
+                elif row <= len(self.lines) and not self.lines[row-1]["text"] and (
+                        row < last_row or (t.compare(last, ">", f"{row}.0")
+                                           and (row > first_row or t.compare(first, "<", f"{row}.end")))
+                        or (row > first_row and self._reaches_note_end(first, last))):
+                    # 空行没有文字可画：只给被选中的空行补一个换行符大小的标记，其余行不变。
+                    markers.append(row)
+        # 新标记的空行先盖好尾部遮罩再打标记，Text 的重画排在遮罩之后，尾部不会先整行变蓝。
+        # 先把待处理的重画按旧状态画完：旧遮罩是齐的，透明的 sel 也不显色。
+        keys = {mask._mask_key for mask in self._selection_masks}
+        missing = [row for row in markers if ("tail", row) not in keys]
+        if missing:
+            t.update_idletasks()
+            for row in missing:
+                self._cover_empty_row_tail(row)
+        t.tag_remove("selection_fill", "1.0", "end")
         self._queue_strikes()
-        if not selected:
-            return
-        first, last = selected
-        first_row, last_row = int(str(first).split(".")[0]), int(str(last).split(".")[0])
-        for row in range(first_row, last_row + 1):
-            start = first if t.compare(first, ">", f"{row}.0") else f"{row}.0"
-            if row <= len(self.lines) and self.lines[row-1]["type"] == "todo":
-                text_start = f"{row}.{self._prefix_len(self.lines[row-1])}"
-                if t.compare(start, "<", text_start):
-                    start = text_start
-            end = last if t.compare(last, "<", f"{row}.end") else f"{row}.end"
-            if t.compare(start, "<", end):
-                t.tag_add("selection_fill", start, end)
-            elif row <= len(self.lines) and not self.lines[row-1]["text"] and (
-                    row < last_row or (t.compare(last, ">", f"{row}.0")
-                                       and (row > first_row or t.compare(first, "<", f"{row}.end")))):
-                # 空行没有文字可画：只给被选中的空行补一个换行符大小的标记，其余行不变。
-                t.tag_add("selection_fill", f"{row}.end", f"{row}.end+1c")
+        for start, end in ranges:
+            t.tag_add("selection_fill", start, end)
+        for row in markers:
+            t.tag_add("selection_fill", f"{row}.end", f"{row}.end+1c")
 
     def _sync_lines_from_text(self):
         # 选区删除和粘贴都可能改变多行，不能只保存光标所在行。
@@ -2479,10 +2553,14 @@ class NoteEditor:
         if (event.type == tk.EventType.KeyPress and self.text.tag_ranges("sel") and
                 (deleting or typing or event.keysym in ("Return", "KP_Enter")) and
                 not self.win._ime_composing(self.text)):
+            # 收拢会把空的末行写成它的行首，先按原选区判断是否整行选中。
+            rows = self._whole_rows() if deleting else None
             if not self._trim_selection():
                 if deleting:
                     return "break"  # 选区里只有勾选框或换行，没有可删的文字
             elif deleting:
+                if rows:  # 两行以上整行选中：按行删除，不留空行
+                    return self.delete_rows(*rows)
                 first, last = (int(str(i).split(".")[0]) for i in self.text.tag_ranges("sel"))
                 if last > first:  # 首行保留，尾行剩下的文字接上去，中间各行收起
                     self._snapshot_removal(first, last, 1)
@@ -2530,12 +2608,9 @@ class NoteEditor:
         label = "转为文字" if target == "text" else "转为待办"
         if len(rows) > 1:
             label = f"全部{label}（{len(rows)} 行）"
-        # 选中的几行每行文字都完整选上时叫「删除 n 行」，否则叫「删除选中内容」；删法都和删除键一样。
-        t = self.text
-        whole = (len(rows) > 1 and t.tag_ranges("sel") and
-                 t.compare("sel.first", "<=", self._text_body(rows[0] + 1)) and
-                 t.compare("sel.last", ">=", f"{rows[-1] + 1}.end"))
-        delete_label = f"删除 {len(rows)} 行" if whole else "删除选中内容"
+        # 高亮覆盖两行以上的完整内容时叫「删除 n 行」，否则叫「删除选中内容」；删法都和删除键一样。
+        whole = self._whole_rows()
+        delete_label = f"删除 {whole[1] - whole[0] + 1} 行" if whole else "删除选中内容"
         actions = [
             (label, lambda: self.convert_rows(rows, target)),
             ("在下方插入新行", lambda: self.insert_line(row)),
@@ -2606,6 +2681,30 @@ class NoteEditor:
         self._see_text("insert")
         self.d["editedAt"] = datetime.now().isoformat(timespec="microseconds")
         self.app.schedule_save()
+
+    def delete_rows(self, top, bottom):
+        """删除选中的整行（行号从 1 起）：全是文字就整行删掉；含有待办时原位留一个空待办。"""
+        self._sync_lines_from_text()
+        lines = self.lines
+        removed = lines[top - 1:bottom]
+        if any(line["type"] == "todo" for line in removed):
+            keep = [dict(removed[0], type="todo", text="", checked=False)]
+        elif len(removed) == len(lines):
+            keep = [dict(removed[0], text="", checked=False)]  # 全删光时留一个空行
+        else:
+            keep = []
+        self._snapshot_removal(top, bottom, len(keep))
+        lines[top - 1:bottom] = keep
+        self.render(keep_cursor=False)
+        if not keep and top > 1:
+            self.text.mark_set("insert", f"{top - 1}.end")  # 整行删掉后光标回到上一行行尾
+        else:
+            row = min(top - 1, len(self.lines) - 1)
+            self.text.mark_set("insert", f"{row+1}.{self._prefix_len(self.lines[row])}")
+        self._see_text("insert")
+        self.d["editedAt"] = datetime.now().isoformat(timespec="microseconds")
+        self.app.schedule_save()
+        return "break"
 
     def delete_selection(self):
         """右键「删除选中内容」：重放 Delete 键，和按键删选区走同一条流程。"""
@@ -2741,6 +2840,21 @@ class NoteWindow(tk.Toplevel):
             if not self.bind_class("TodoCaret", sequence):
                 self.bind_class("TodoCaret", sequence,
                                 lambda e: e.widget.winfo_toplevel()._on_keyrelease(e))
+        # Tk 把行尾右半边的空白算成下一行开头，点击和拖选会落到下一行；便签正文停在本行行尾。
+        if not self.tk.call("info", "procs", "::tk::NoteTextClosestGap"):
+            self.tk.eval("""
+                rename ::tk::TextClosestGap ::tk::NoteTextClosestGap
+                proc ::tk::TextClosestGap {w x y} {
+                    set gap [::tk::NoteTextClosestGap $w $x $y]
+                    if {"TodoCaret" in [bindtags $w]} {
+                        set pos [$w index @$x,$y]
+                        if {[$w compare $gap > $pos] && [$w compare $pos == "$pos lineend"]} {
+                            return $pos
+                        }
+                    }
+                    return $gap
+                }
+            """)
 
         self.update_idletasks()
         self._relayout()
