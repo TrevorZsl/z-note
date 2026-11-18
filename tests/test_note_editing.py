@@ -4905,6 +4905,25 @@ class NoteEditingTests(unittest.TestCase):
         text.event_generate("<ButtonRelease-1>", x=x, y=y, state=256, time=self._press_time + 20)
         self.app.root.update()
 
+    def _mouse_multi_click(self, editor, point, clicks, drag_to=None):
+        """在 point=(x, y) 连点 clicks 次，间隔 60ms 算作双击、三击；drag_to 不为空时最后一下按住拖过去再松开。"""
+        text = editor.text
+        text.focus_force()
+        self.app.root.update()
+        self._press_time = getattr(self, "_press_time", 0) + 1000  # 与上一次点击隔开，不连成多击
+        x, y = point
+        for i in range(clicks):
+            text.event_generate("<Button-1>", x=x, y=y, time=self._press_time + i * 60)
+            if i < clicks - 1 or drag_to is None:
+                text.event_generate("<ButtonRelease-1>", x=x, y=y, state=256,
+                                    time=self._press_time + i * 60 + 20)
+        if drag_to is not None:
+            x, y = drag_to
+            text.event_generate("<B1-Motion>", x=x, y=y, state=256, time=self._press_time + clicks * 60)
+            text.event_generate("<ButtonRelease-1>", x=x, y=y, state=256,
+                                time=self._press_time + clicks * 60 + 20)
+        self.app.root.update()
+
     def _painted_rows(self, editor):
         # 相邻行的高亮会连成一段，行首可能落在上一行开始的那段里。
         text = editor.text
@@ -4991,6 +5010,98 @@ class NoteEditingTests(unittest.TestCase):
         text.event_generate("<KeyPress-BackSpace>")
         text.event_generate("<KeyRelease-BackSpace>")
         self.assertEqual(editor.lines, lines[3:])
+
+    def test_double_click_stays_in_clicked_row(self):
+        long_text = "今天下班以后要去超市买牛奶鸡蛋面包还有水果然后回家做饭洗衣服"
+        line = lambda kind, value: {"type": kind, "text": value, "checked": False}
+        lines = [line("todo", "jklj"), line("todo", ""), line("todo", ""), line("text", ""),
+                 line("text", ""), line("todo", ""), line("todo", "dasda"), line("text", "abc def ghi"),
+                 line("todo", "买牛奶 鸡蛋 面包"), line("text", "abc  "), line("todo", long_text),
+                 line("text", f"买牛奶 {long_text} 洗衣服")]
+
+        def at(editor, index, dx=2):
+            editor._see_text(index)
+            self.app.root.update()
+            box = editor.text.bbox(index)
+            return box[0] + dx, box[1] + box[3] // 2
+
+        def selected(editor):
+            ranges = editor.text.tag_ranges("sel")
+            return tuple(editor.text.index(i) for i in ranges)
+
+        editor = self.note.editors[0]
+        text = editor.text
+        # 空行（待办与文字，点在左边或右边）：不选中，光标留在这一行，不再一路选到上下的文字。
+        for row in (2, 3, 4, 5, 6):
+            for dx in (2, 120):
+                with self.subTest(empty_row=row, dx=dx):
+                    self._load_lines(editor, lines)
+                    self._mouse_multi_click(editor, at(editor, f"{row}.end", dx), 2)
+                    self.assertEqual(selected(editor), ())
+                    self.assertEqual(self._painted_rows(editor), [])
+                    self.assertEqual(text.index("insert"), text.index(editor._text_body(row)))
+        # 有字的条目照旧选到左右空格，光标停在词首；只是不越过这一条的首尾。
+        body = 3 + len(long_text) // 2
+        for index, dx, expected in (
+                ("1.4", 2, ("1.3", "1.7")), ("7.4", 2, ("7.3", "7.8")),
+                ("8.1", 2, ("8.0", "8.3")), ("8.3", 2, ("8.3", "8.4")),       # 词内、两词之间的空格
+                ("9.7", 2, ("9.7", "9.9")),                                   # 「买牛奶 鸡蛋 面包」里的「鸡蛋」
+                ("1.7", 60, ("1.3", "1.7")),                                  # 行尾右侧空白：选最后一段
+                ("10.4", 2, ("10.3", "10.5")),                                # 行尾的连续空格只选这段
+                (f"11.{body}", 2, ("11.3", "11.end")),                        # 自动换行的长条目整条选中
+                ("11.end-2c", 2, ("11.3", "11.end")),
+                (f"12.{1 + body}", 2, ("12.4", f"12.{4 + len(long_text)}"))):  # 跨过自动换行选到两边空格
+            with self.subTest(word=index, dx=dx):
+                self._load_lines(editor, lines)
+                self._mouse_multi_click(editor, at(editor, index, dx), 2)
+                self.assertEqual(selected(editor), tuple(text.index(i) for i in expected))
+                self.assertEqual(text.index("insert"), text.index(expected[0]))
+        self.assertGreaterEqual(text.count("11.0", "11.end", "displaylines")[0], 2)
+        self.assertNotEqual(text.count(f"12.{1 + body}", "12.4", "displaylines")[0], 0)
+        # 双击空行后打字或按 Delete，只作用在这一行。
+        self._load_lines(editor, lines)
+        self._mouse_multi_click(editor, at(editor, "5.0", 20), 2)
+        text.event_generate("<KeyPress>", keysym="x")
+        text.event_generate("<KeyRelease>", keysym="x")
+        self.app.root.update()
+        self.assertEqual(editor.lines, lines[:4] + [line("text", "x")] + lines[5:])
+        self._load_lines(editor, lines)
+        self._mouse_multi_click(editor, at(editor, "5.0", 20), 2)
+        text.event_generate("<KeyPress-Delete>")
+        text.event_generate("<KeyRelease-Delete>")
+        self.app.root.update()
+        self.assertEqual(editor.lines, lines[:4] + lines[5:])
+        # 双击后拖动按词扩展；拖到的空行和双击的空行都连同换行符选上，拖回双击的空行又不选中。
+        for start, end, painted in ((("1.4", 2), ("4.0", 20), [1, 2, 3, 4]),
+                                    (("4.0", 20), ("1.4", 2), [1, 2, 3, 4]),
+                                    (("4.0", 20), ("5.0", 20), [4, 5]),
+                                    (("4.0", 20), ("4.0", 120), [])):
+            with self.subTest(drag=(start, end)):
+                self._load_lines(editor, lines)
+                self._mouse_multi_click(editor, at(editor, *start), 2, drag_to=at(editor, *end))
+                self.assertEqual(self._painted_rows(editor), painted)
+                if painted:
+                    self.assertEqual(selected(editor)[0], text.index("1.3" if painted[0] == 1 else "4.0"))
+        # 三击照旧选中整行。
+        for index, dx, expected in (("5.0", 20, ("5.0", "6.0")), ("1.4", 2, ("1.0", "2.0"))):
+            with self.subTest(triple=index):
+                self._load_lines(editor, lines)
+                self._mouse_multi_click(editor, at(editor, index, dx), 3)
+                self.assertEqual(selected(editor), expected)
+        # 两栏时由被点的那一栏取词，另一栏不受影响。
+        self.note.toggle_columns()
+        self.app.root.update()
+        self.assertEqual(len(self.note.editors), 2)
+        for column in self.note.editors:
+            self._load_lines(column, lines)
+        first, second = self.note.editors
+        for index, dx, expected in (("2.end", 20, ()), ("1.4", 2, ("1.3", "1.7"))):
+            with self.subTest(column_click=index):
+                for column in self.note.editors:
+                    column.text.tag_remove("sel", "1.0", "end")
+                self._mouse_multi_click(second, at(second, index, dx), 2)
+                self.assertEqual(selected(second), expected)
+                self.assertEqual(selected(first), ())
 
     def test_drag_to_second_last_empty_row_spares_final_empty_row(self):
         editor = self.note.editors[0]

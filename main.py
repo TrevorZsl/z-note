@@ -1604,7 +1604,7 @@ class NoteEditor:
         下端只会是按下或指到的那一行，向上、向下拖都能选中起点或终点的空行，不会多选下一行。"""
         t = self.text
         t.tk.call("tk::TextSelectTo", t, x, y)
-        if t.tk.call("set", "::tk::Priv(selectMode)") == "char" and t.tag_ranges("sel"):
+        if t.tk.call("set", "::tk::Priv(selectMode)") in ("char", "word") and t.tag_ranges("sel"):
             last = t.index("sel.last")
             row = int(last.split(".")[0])
             body = self._text_body(row)
@@ -1612,6 +1612,43 @@ class NoteEditor:
                     and t.compare(last, "<=", body)):
                 t.tag_add("sel", last, f"{row}.end+1c")
         self._clamp_todo_cursor()
+
+    def _word_at(self, index, after):
+        """index 所在那一条待办或文字里紧挨 index 的词，跨过自动换行，但不越过这一条的首尾，也不含勾选框。
+        after 为真取 index 后面的字，否则取前面的字；词是连续的非空白或连续的空白，与 Tk 一致。空条目返回 None。"""
+        t = self.text
+        row, col = map(int, t.index(index).split("."))
+        start = int(self._text_body(row).split(".")[1])
+        content = t.get(f"{row}.{start}", f"{row}.end")
+        if not content:
+            return None
+        i = max(0, min(len(content) - 1, col - start - (0 if after else 1)))
+        space = content[i].isspace()
+        first, last = i, i + 1
+        while first and content[first - 1].isspace() == space:
+            first -= 1
+        while last < len(content) and content[last].isspace() == space:
+            last += 1
+        return f"{row}.{start + first}", f"{row}.{start + last}"
+
+    def _select_words(self, x, y):
+        """代替 Tk 的按词选择（双击、双击后拖动）：两端各在自己那一条里取词，不会顺着换行选到相邻条目；
+        双击空条目不选中，光标留在这一条。"""
+        t = self.text
+        anchor_mark = str(t.tk.call("tk::TextAnchor", t))
+        cur = t.index(t.tk.call("tk::TextClosestGap", t, x, y))
+        if anchor_mark not in t.mark_names():
+            t.mark_set(anchor_mark, cur)
+        anchor = t.index(anchor_mark)
+        first, last = self._word_at(anchor, t.mark_gravity(anchor_mark) == "right") or (anchor, anchor)
+        if t.compare(cur, "<", first):
+            first = (self._word_at(cur, True) or (cur,))[0]
+        elif t.compare(cur, ">", last):
+            last = (self._word_at(cur, False) or (cur, cur))[1]
+        t.tag_remove("sel", "1.0", "end")
+        t.mark_set("insert", cur)
+        if t.compare(first, "<", last):
+            t.tag_add("sel", first, last)
 
     def _make_check_images(self):
         size = max(18, round(self.app.base_font.metrics("ascent") * 1.1))
@@ -2854,6 +2891,23 @@ class NoteWindow(tk.Toplevel):
                     }
                     return $gap
                 }
+            """)
+            # Tk 按词选择时把换行也当空白，双击空行会一路选到上下的文字；便签正文改为只在被点的那一条里取词。
+            root = self._root()
+
+            def select_words(path, x, y):
+                widget = root.nametowidget(path)
+                widget.winfo_toplevel()._editor_for(widget)._select_words(int(x), int(y))
+            self.tk.eval(f"""
+                rename ::tk::TextSelectTo ::tk::NoteTextSelectTo
+                proc ::tk::TextSelectTo {{w x y args}} {{
+                    if {{"TodoCaret" in [bindtags $w] && [info exists ::tk::Priv(selectMode)]
+                            && $::tk::Priv(selectMode) eq "word"}} {{
+                        {root.register(select_words)} $w $x $y
+                        return
+                    }}
+                    ::tk::NoteTextSelectTo $w $x $y {{*}}$args
+                }}
             """)
 
         self.update_idletasks()
