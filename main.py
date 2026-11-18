@@ -31,6 +31,7 @@ UI_FONT = CLASSIC_FAMILY
 UI_TITLE_FONT = "Times New Roman"
 
 NOTE_BG, NOTE_BORDER = "#FFFFFF", "#DFE2E6"
+SELECTION_BG = "#DCE7F3"
 T_COLOR = "#010203"   # 窗口透明色键（圆角外的部分透出去）
 RADIUS = 20
 EDGE = 7                              # 窗口边缘可拖拽调大小的宽度
@@ -870,6 +871,37 @@ user32.UpdateLayeredWindow.argtypes = [wintypes.HWND, wintypes.HDC, ctypes.c_voi
 user32.UpdateLayeredWindow.restype = wintypes.BOOL
 
 
+def selection_corner_pieces(rects, radius):
+    """按 VS Code 的方式给选区轮廓的每个转角配圆角片。rects 是各显示行露出的选区 (左, 上, 右, 下)；
+    返回 (x, y, 半径, top, left, concave)：凸角削在矩形内，凹角在矩形外侧补一道反向圆弧。
+    同一台阶处凸角和凹角各取台阶宽的一半以内，窄台阶也不会出缺口。"""
+    pieces = []
+    for i, (left, top, right, bottom) in enumerate(rects):
+        cap = min(radius, (right - left) // 2, (bottom - top) // 2)
+        for is_top in (True, False):
+            edge = top if is_top else bottom
+            neighbour = next((other for j, other in enumerate(rects) if j != i
+                              and abs((other[3] if is_top else other[1]) - edge) <= 1
+                              and other[0] < right and other[2] > left), None)
+            for is_left in (True, False):
+                if neighbour is None:
+                    size, concave = cap, False
+                else:
+                    step = neighbour[0] - left if is_left else right - neighbour[2]
+                    if abs(step) <= 1:
+                        continue  # 与相邻行齐平，轮廓在这里是直线
+                    concave = step < 0
+                    size = min(radius, -step // 2) if concave else min(cap, step // 2)
+                if size < 1:
+                    continue
+                if concave:
+                    x = left - size if is_left else right
+                else:
+                    x = left if is_left else right - size
+                pieces.append((x, top if is_top else bottom - size, size, is_top, is_left, concave))
+    return pieces
+
+
 class NoteEditor:
     """一栏正文编辑器：Text + 勾选框/删除线覆盖层 + 分块滚动。NoteWindow 持有 1~2 个实例。"""
 
@@ -889,12 +921,15 @@ class NoteEditor:
         self.scroll_thumb = VerticalThumb(win, self.body, self._bg, auto_hide=True)
         self._make_check_images()
         self.text.tag_config("done", font=self.done_font)  # 只加删除线，不改字色
-        self.text.tag_config("selection_fill", background="#DCE7F3", foreground="#2B2F36")
+        self.text.tag_config("selection_fill", background=SELECTION_BG, foreground="#2B2F36")
         self.text.tag_raise("selection_fill", "sel")
         self.text.bind("<<Selection>>", self._paint_selection)
         self.text.tag_configure("ime_preedit", underline=True)
         self._strike_widgets = []
         self._selection_masks = []
+        self._selection_corners = []  # 选区圆角片，独立于底色遮罩
+        self._selection_corner_spares = []  # 隐藏备用的角片，下次选区直接复用
+        self._selection_corner_cache = None
         self._checkbox_widgets = []
         self._pending_removal = None  # 删整行前记下的旧布局，由下一次 render 播放收起
         self._removal = None
@@ -1734,6 +1769,118 @@ class NoteEditor:
         mask.lift()
         return mask
 
+    def _selection_corner_radius(self):
+        return max(2, round(3 * self.text.winfo_fpixels("1i") / 96))
+
+    def _selection_corner_image(self, size, top, left, concave):
+        """四分之一圆角图。凸角：圆心在内侧，圆内选区色、圆外底色，盖住 Tk 画的直角；
+        凹角：圆心横向翻到外侧，圆内底色、圆外选区色，在选区外补出反向圆弧。"""
+        if self._selection_corner_cache is None:
+            self._selection_corner_cache = {}
+        key = (size, top, left, concave, self._bg)
+        image = self._selection_corner_cache.get(key)
+        if image is None:
+            big = size * 4
+            inside, outside = (self._bg, SELECTION_BG) if concave else (SELECTION_BG, self._bg)
+            canvas = Image.new("RGB", (big, big), outside)
+            cx, cy = (big if left != concave else 0), (big if top else 0)
+            ImageDraw.Draw(canvas).ellipse((cx - big, cy - big, cx + big, cy + big), fill=inside)
+            image = ImageTk.PhotoImage(canvas.resize((size, size), Image.Resampling.LANCZOS), master=self.text)
+            self._selection_corner_cache[key] = image
+        return image
+
+    def _selection_corner(self, index):
+        """按序复用的角图控件；事件转给 Text，与底色遮罩一致。"""
+        if index < len(self._selection_corners):
+            return self._selection_corners[index]
+        if self._selection_corner_spares:
+            corner = self._selection_corner_spares.pop()
+            self._selection_corners.append(corner)
+            return corner
+        corner = tk.Label(self.text, bd=0, highlightthickness=0, padx=0, pady=0, cursor="xterm")
+        corner.bind("<MouseWheel>", self._text_wheel)
+        corner.bind("<Control-MouseWheel>", self.win._ctrl_wheel)
+        corner.bind("<Motion>", self._hover_row)
+        for event in ("<Button-1>", "<B1-Motion>", "<ButtonRelease-1>", "<Button-3>"):
+            corner.bind(event, lambda e, sequence=event: self.text.event_generate(
+                sequence, x=e.x_root - self.text.winfo_rootx(),
+                y=e.y_root - self.text.winfo_rooty(), time=e.time, state=e.state))
+        self._selection_corners.append(corner)
+        return corner
+
+    def _selection_rects(self, first_row, last_row, content_height):
+        """可见行里每个显示行实际露出的选区矩形 (左, 上, 右, 下)，与 Tk 画法和各遮罩的边界一致。"""
+        t = self.text
+        width = t.winfo_width()
+        right_limit = min(width - int(t.cget("padx")), self._drag_gutter.winfo_x())
+        visible_start = t.index("@0,0")
+        rects = []
+        for row in range(first_row, last_row + 1):
+            # 相邻行的标记会和本行连成一段 tag，行首已在段内时取包含它的那段。
+            found = (t.tag_prevrange("selection_fill", f"{row}.0+1c")
+                     if "selection_fill" in t.tag_names(f"{row}.0")
+                     else t.tag_nextrange("selection_fill", f"{row}.0", f"{row}.end"))
+            if found and self.lines[row - 1]["text"]:
+                start, end = found[0], found[1]
+                if t.compare(start, "<", f"{row}.0"):
+                    start = t.index(f"{row}.0")
+                if t.compare(end, ">", f"{row}.end"):
+                    end = t.index(f"{row}.end")
+                if t.compare(start, "<", visible_start):
+                    start = visible_start
+                while t.compare(start, "<", end):
+                    display, box = t.dlineinfo(start), t.bbox(start)
+                    if not (display and box) or display[1] >= content_height:
+                        break
+                    bottom = display[1] + display[3]
+                    stop = t.index(f"@{width},{max(0, display[1])}")
+                    if t.compare(end, ">", stop):
+                        right = right_limit  # 选区接着软换行：Tk 把底色画到右内边距，拖拽区盖回
+                    else:
+                        last = t.bbox(f"{end}-1c")
+                        right = min(last[0] + last[2], right_limit) if last else right_limit
+                    if right > box[0]:
+                        rects.append((box[0], display[1], right, bottom))
+                    if bottom >= content_height:
+                        break
+                    next_start = t.index(f"@0,{bottom}")
+                    if t.compare(next_start, "<=", start):
+                        break
+                    start = next_start
+            elif not self.lines[row - 1]["text"] and "selection_fill" in t.tag_names(f"{row}.end"):
+                # 空行标记：与 _cover_empty_row_tail 留出的一个空格宽一致。
+                box, display = t.bbox(f"{row}.end"), t.dlineinfo(f"{row}.end")
+                if box and display:
+                    rects.append((box[0], display[1], box[0] + max(1, self.app.base_font.measure(" ")),
+                                  display[1] + display[3]))
+        return rects
+
+    def _layout_selection_corners(self, first_row, last_row, content_height):
+        """选区轮廓的每个转角都放圆角片（凸角和凹角），见 selection_corner_pieces。"""
+        used = 0
+        if self.text.tag_ranges("selection_fill"):
+            rects = self._selection_rects(first_row, last_row, content_height)
+            for piece in selection_corner_pieces(rects, self._selection_corner_radius()):
+                x, y, size, top, left, concave = piece
+                corner = self._selection_corner(used)
+                used += 1
+                corner._corner_piece = piece
+                image = self._selection_corner_image(size, top, left, concave)
+                if str(corner.cget("image")) != str(image):
+                    corner.configure(image=image)
+                bounds = (x, y, size)
+                if getattr(corner, "_layout_bounds", None) != bounds:
+                    corner.place(x=x, y=y, width=size, height=size, bordermode="ignore")
+                    corner._layout_bounds = bounds
+                if concave and self._selection_masks:
+                    corner.lift()  # 本帧刚抬起的遮罩不能盖住凹角圆弧
+        # 用不上的角片藏起来留作备用：销毁控件比隐藏慢得多，会拖慢删除选区后的第一帧。
+        for corner in self._selection_corners[used:]:
+            corner.place_forget()
+            corner._layout_bounds = None
+            self._selection_corner_spares.append(corner)
+        del self._selection_corners[used:]
+
     def _layout_text(self):
         # 全文重加 tag 会让 Tk 重测每一行；收起动画逐帧布局时正文结构不变，render 已加过。
         if self._removal is None:
@@ -1899,6 +2046,7 @@ class NoteEditor:
                     break
                 start = next_start
 
+        self._layout_selection_corners(first_row, last_row, content_height)
         # 这次没排上的控件回收掉，池子始终只留当前需要的。
         for mask in self._selection_masks:
             if mask not in used_masks:
@@ -1911,8 +2059,9 @@ class NoteEditor:
             del pool[used:]
 
         if self._selection_masks:
+            # 凹角圆弧会落在留白和空行尾部遮罩上，排在最上层。
             self.win.after_idle(lambda: [w.lift() for w in self._selection_masks + self._checkbox_widgets
-                                         if w.winfo_exists()])
+                                         + self._selection_corners if w.winfo_exists()])
         self._clamp_todo_cursor()
 
     def _on_vertical(self, event):

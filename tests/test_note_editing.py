@@ -4221,6 +4221,109 @@ class NoteEditingTests(unittest.TestCase):
         self.assertEqual(self.note._checkbox_widgets[0].cget("bg"), self.note._bg)
         self.assertFalse(self.note._selection_masks)
 
+    def _corner_pieces(self, editor):
+        """当前摆上的角片，并核对每片的实际位置和尺寸与它记下的角片一致。"""
+        pieces = set()
+        for corner in editor._selection_corners:
+            x, y, size = corner._corner_piece[:3]
+            self.assertTrue(corner.winfo_ismapped())
+            self.assertEqual((corner.winfo_x(), corner.winfo_y(), corner.winfo_width(), corner.winfo_height()),
+                             (x, y, size, size))
+            pieces.add(corner._corner_piece)
+        return pieces
+
+    def test_selection_rounds_four_corners_of_single_line(self):
+        editor = self.note.editors[0]
+        self._load_lines(editor, [{"type": "text", "text": "abc", "checked": False},
+                                  {"type": "text", "text": "", "checked": False},
+                                  {"type": "text", "text": "xyz", "checked": False}])
+        text = editor.text
+        text.tag_add("sel", "1.0", "1.end")
+        self.app.root.update()
+        r = editor._selection_corner_radius()
+        first, last, line = text.bbox("1.0"), text.bbox("1.2"), text.dlineinfo("1.0")
+        left, right, top, bottom = first[0], last[0] + last[2], line[1], line[1] + line[3]
+        self.assertEqual(self._corner_pieces(editor),
+                         {(left, top, r, True, True, False), (right - r, top, r, True, False, False),
+                          (left, bottom - r, r, False, True, False),
+                          (right - r, bottom - r, r, False, False, False)})
+        text.tag_remove("sel", "1.0", "end")
+        self.app.root.update()
+        self.assertFalse(editor._selection_corners)
+
+    def test_selection_wrapped_row_gets_concave_corner_under_wider_line(self):
+        self.note.geometry("300x300")
+        editor = self.note.editors[0]
+        self._load_lines(editor, [{"type": "todo", "text": "啊" * 25, "checked": False}])
+        text = editor.text
+        text.tag_add("sel", "1.0", "1.end")
+        self.app.root.update()
+        r = editor._selection_corner_radius()
+        self.assertGreaterEqual(text.count("1.0", "1.end", "displaylines")[0], 2)
+        start = f"1.{editor._prefix_len(editor.lines[0])}"
+        top_line, top_box = text.dlineinfo(start), text.bbox(start)
+        last_line, last_box = text.dlineinfo("1.end-1c"), text.bbox("1.end-1c")
+        above = text.dlineinfo(text.index(f"@0,{last_line[1] - 1}"))
+        left = top_box[0]
+        right_limit = min(text.winfo_width() - int(text.cget("padx")), editor._drag_gutter.winfo_x())
+        last_right, last_top = last_box[0] + last_box[2], last_line[1]
+        last_bottom = last_line[1] + last_line[3]
+        step = right_limit - last_right
+        self.assertGreater(step, 2 * r, "末行应明显短于上一行")
+        self.assertEqual(self._corner_pieces(editor), {
+            (left, top_line[1], r, True, True, False),
+            (right_limit - r, top_line[1], r, True, False, False),
+            # 上一行比末行宽：上一行右下是凸角，末行右上外侧补反向圆弧。
+            (right_limit - r, above[1] + above[3] - r, r, False, False, False),
+            (last_right, last_top, r, True, False, True),
+            (left, last_bottom - r, r, False, True, False),
+            (last_right - r, last_bottom - r, r, False, False, False)})
+        # 原有的左侧留白遮罩不受影响。
+        self.assertEqual(len(editor._selection_masks), 1)
+
+    def test_selection_starting_mid_wrapped_row_rounds_concave_start(self):
+        self.note.geometry("300x300")
+        editor = self.note.editors[0]
+        self._load_lines(editor, [{"type": "text", "text": "啊" * 25, "checked": False}])
+        text = editor.text
+        text.tag_add("sel", "1.3", "1.end")
+        self.app.root.update()
+        r = editor._selection_corner_radius()
+        first_line, first_box = text.dlineinfo("1.3"), text.bbox("1.3")
+        # 第二显示行从行首开始，比首行更靠左：首行左下外侧补反向圆弧。
+        self.assertIn((first_box[0] - r, first_line[1] + first_line[3] - r, r, False, True, True),
+                      self._corner_pieces(editor))
+
+    def test_selection_empty_row_marker_joins_neighbours_with_concave_corners(self):
+        editor = self.note.editors[0]
+        self._load_lines(editor, [{"type": "text", "text": "abc", "checked": False},
+                                  {"type": "text", "text": "", "checked": False},
+                                  {"type": "text", "text": "xyz", "checked": False}])
+        text = editor.text
+        text.tag_add("sel", "1.0", "3.end")
+        self.app.root.update()
+        self.assertIn("selection_fill", text.tag_names("2.end"))
+        r = editor._selection_corner_radius()
+        marker = text.dlineinfo("2.0")
+        marker_right = text.bbox("2.end")[0] + max(1, self.app.base_font.measure(" "))
+        abc = text.bbox("1.2")
+        size = min(r, (abc[0] + abc[2] - marker_right) // 2)
+        pieces = self._corner_pieces(editor)
+        top_concave = (marker_right, marker[1], size, True, False, True)
+        bottom_concave = (marker_right, marker[1] + marker[3] - size, size, False, False, True)
+        self.assertIn(top_concave, pieces)
+        self.assertIn(bottom_concave, pieces)
+        # 标记左边与上下两行齐平，轮廓是直线，不放角片。
+        self.assertFalse([p for p in pieces if p[4] and marker[1] <= p[1] < marker[1] + marker[3]])
+        # 凹角圆弧落在空行尾部遮罩上，必须排在遮罩之上。
+        self.app.root.update()
+        order = list(text.winfo_children())
+        tail = [m for m in editor._selection_masks if m._mask_key == ("tail", 2)]
+        self.assertEqual(len(tail), 1)
+        for corner in editor._selection_corners:
+            if corner._corner_piece in (top_concave, bottom_concave):
+                self.assertGreater(order.index(corner), order.index(tail[0]))
+
     def test_scroll_positions_checkboxes_before_next_idle_frame(self):
         self.note.geometry("340x340")
         self.note.d["lines"] = [
@@ -6593,6 +6696,46 @@ class NoteEditingTests(unittest.TestCase):
         self.assertEqual(len(self.app.notes[note_id].editors), 2)
         self.assertEqual(self.app.notes[note_id].d["lines"], left)
         self.assertEqual(self.app.notes[note_id].d["lines2"], right)
+
+
+class SelectionCornerPiecesTests(unittest.TestCase):
+    pieces = staticmethod(main.selection_corner_pieces)
+
+    def test_lone_rect_gets_four_convex_corners(self):
+        self.assertEqual(set(self.pieces([(10, 0, 60, 30)], 4)),
+                         {(10, 0, 4, True, True, False), (56, 0, 4, True, False, False),
+                          (10, 26, 4, False, True, False), (56, 26, 4, False, False, False)})
+
+    def test_wider_line_above_gives_convex_and_concave_pair(self):
+        pieces = set(self.pieces([(10, 0, 100, 30), (10, 30, 60, 60)], 4))
+        self.assertIn((96, 26, 4, False, False, False), pieces)  # 上行右下：凸
+        self.assertIn((60, 30, 4, True, False, True), pieces)    # 下行右上外侧：凹
+        # 左边齐平，接缝处不放角片。
+        self.assertFalse([p for p in pieces if p[4] and p[1] in (26, 30)])
+
+    def test_wider_line_below_mirrors(self):
+        pieces = set(self.pieces([(40, 0, 100, 30), (10, 30, 100, 60)], 4))
+        self.assertIn((36, 26, 4, False, True, True), pieces)    # 上行左下外侧：凹
+        self.assertIn((10, 30, 4, True, True, False), pieces)    # 下行左上：凸
+        self.assertFalse([p for p in pieces if not p[4] and p[1] in (26, 30)])
+
+    def test_small_step_shrinks_both_corners(self):
+        pieces = set(self.pieces([(10, 0, 100, 30), (10, 30, 95, 60)], 4))
+        self.assertIn((98, 28, 2, False, False, False), pieces)
+        self.assertIn((95, 30, 2, True, False, True), pieces)
+
+    def test_one_pixel_step_counts_as_flush(self):
+        pieces = self.pieces([(10, 0, 100, 30), (10, 30, 99, 60)], 4)
+        self.assertFalse([p for p in pieces if not p[4] and 26 <= p[1] <= 30])
+
+    def test_narrow_marker_radius_fits_its_width(self):
+        pieces = self.pieces([(10, 0, 15, 30)], 4)
+        self.assertEqual({p[2] for p in pieces}, {2})
+
+    def test_rects_not_overlapping_horizontally_stay_separate(self):
+        pieces = self.pieces([(10, 0, 30, 30), (60, 30, 100, 60)], 4)
+        self.assertEqual(len(pieces), 8)
+        self.assertFalse([p for p in pieces if p[5]])
 
 
 if __name__ == "__main__":
