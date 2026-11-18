@@ -2209,6 +2209,9 @@ class NoteEditingTests(unittest.TestCase):
         for value, scale in ((opacity_value, opacity), (font_value, font)):
             self.assertLessEqual(abs(value.winfo_rooty() + value.winfo_height() / 2
                                      - scale.winfo_rooty() - scale.winfo_height() / 2), 1)
+        # 拖动须从滑块上按下开始。
+        opacity.event_generate("<Button-1>", x=0, y=14)
+        font.event_generate("<Button-1>", x=0, y=14)
         for x in range(0, 181):
             opacity.event_generate("<B1-Motion>", x=x, y=14)
             self.assertIn(opacity.get(), range(0, 51, 10))

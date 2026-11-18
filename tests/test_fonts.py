@@ -123,6 +123,65 @@ class FontTests(unittest.TestCase):
         win.destroy()
         self.assertIsNone(self.app.root.grab_current())
 
+    def test_ui_text_follows_font_choice_in_open_windows(self):
+        note = self.app.new_note()
+        note.d["lines"] = [{"type": "todo", "text": "中文 ABC", "checked": True}]
+        note.render()
+        win = self.app.settings_win = main.SettingsWindow(self.app)
+        self.app.root.update()
+        dock_family = self.app.dock.font.cget("family")
+        family = lambda widget: self.app.root.tk.splitlist(widget.cget("font"))[0]
+        labels = []
+        pending = list(win.winfo_children())
+        while pending:
+            widget = pending.pop()
+            pending.extend(widget.winfo_children())
+            if isinstance(widget, main.tk.Label) and widget.cget("text") in ("字体", "设置"):
+                labels.append(widget)
+        body = next(label for label in labels if label.cget("text") == "字体")
+        title = next(label for label in labels if label.cget("text") == "设置")
+        self.assertEqual(family(note.status), main.CLASSIC_FAMILY)
+        self.assertEqual(family(title), "Times New Roman")
+        for choice, title_family in (("yahei", FONT_FAMILIES["yahei"]), ("classic", "Times New Roman")):
+            win._font_family(FONT_CHOICES[choice])
+            self.app.root.update()
+            expected = FONT_FAMILIES[choice]
+            self.assertEqual((main.UI_FONT, main.UI_TITLE_FONT), (expected, title_family))
+            self.assertEqual(family(note.status), expected)
+            self.assertEqual(family(note.clear_btn), expected)
+            self.assertEqual(family(body), expected)
+            self.assertEqual(family(title), title_family)
+            self.assertEqual(win.font_selector._font.cget("family"), expected)
+            self.assertEqual(main.tkfont.nametofont("TkDefaultFont", root=self.app.root).cget("family"), expected)
+            # 收纳书签用内置 Classic 字形绘制，量宽字体保持不变。
+            self.assertEqual(self.app.dock.font.cget("family"), dock_family)
+            for border in win._hotkey_borders:
+                entry = border.winfo_children()[0]
+                self.assertEqual(int(border.cget("width")), entry.winfo_reqwidth() + 12)
+        win.destroy()
+
+    def test_font_popup_click_does_not_drag_slider_below(self):
+        win = main.SettingsWindow(self.app)
+        self.app.root.update()
+        field = win.font_selector
+        opacity = self.app.opacity_scale
+        sizes = [w for w in opacity.master.master.winfo_children()
+                 for w in w.winfo_children() if isinstance(w, main.SettingsScale) and w is not opacity]
+        field._open()
+        self.app.root.update()
+        canvas = field._popup.winfo_children()[0]
+        row_height = max(30, field._font.metrics("linespace") + 14)
+        canvas.event_generate("<Button-1>", x=20, y=6 + row_height + row_height // 2)
+        self.app.root.update()
+        self.assertEqual(self.app.data["settings"]["fontFamily"], "yahei")
+        # 弹窗已在按下时关闭，按住未松开时的移动落到下方滑块上。
+        for scale in [opacity] + sizes:
+            scale.event_generate("<B1-Motion>", x=168, y=14)
+            scale.event_generate("<ButtonRelease-1>", x=168, y=14)
+        self.assertEqual(opacity.get(), 0)
+        self.assertEqual(self.app.data["settings"]["fontSize"], 11)
+        win.destroy()
+
 
 if __name__ == "__main__":
     unittest.main()

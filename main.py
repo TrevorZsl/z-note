@@ -4427,8 +4427,11 @@ class SettingsScale(tk.Canvas):
                          highlightthickness=0, bd=0, cursor="hand2", takefocus=1)
         self.minimum, self.maximum, self.step = minimum, maximum, step
         self.command, self.value = command, minimum
-        self.bind("<Button-1>", self._pick)
-        self.bind("<B1-Motion>", self._pick)
+        self._pressed = False
+        self.bind("<Button-1>", self._press)
+        # 只跟随在滑块上按下开始的拖动；字体弹窗等在按下时关闭，余下的拖动不能改到滑块。
+        self.bind("<B1-Motion>", lambda e: self._pick(e) if self._pressed else "break")
+        self.bind("<ButtonRelease-1>", lambda _e: setattr(self, "_pressed", False))
         self.bind("<Left>", lambda _e: self.set(self.value - self.step))
         self.bind("<Right>", lambda _e: self.set(self.value + self.step))
         self.bind("<FocusIn>", lambda _e: self._draw())
@@ -4445,6 +4448,10 @@ class SettingsScale(tk.Canvas):
             self.value = value
             self._draw()
             self.command(value)
+
+    def _press(self, event):
+        self._pressed = True
+        return self._pick(event)
 
     def _pick(self, event):
         self.focus_set()
@@ -4485,10 +4492,8 @@ class FontSelector(tk.Canvas):
         self.variable, self.command = variable, command
         self._popup = None
         self._font = tkfont.Font(root=parent, family=UI_FONT, size=10)
-        width = max(self._font.measure(label) for label in FONT_CHOICES.values()) + 32
-        height = self._font.metrics("linespace") + 16
-        super().__init__(parent, width=width, height=height, bg=NOTE_BG,
-                         highlightthickness=0, bd=0, cursor="hand2", takefocus=True)
+        super().__init__(parent, bg=NOTE_BG, highlightthickness=0, bd=0, cursor="hand2", takefocus=True)
+        self._fit()
         self._trace = variable.trace_add("write", lambda *_: self._draw())
         self.bind("<Configure>", lambda _e: self._draw())
         self.bind("<FocusIn>", lambda _e: self._draw())
@@ -4497,6 +4502,11 @@ class FontSelector(tk.Canvas):
         for key in ("<Return>", "<space>", "<Down>", "<Up>"):
             self.bind(key, self._open)
         self.bind("<Destroy>", self._destroy)
+
+    def _fit(self):
+        """按当前字体量出能放下所有选项的尺寸；切换字体后重新调用。"""
+        self.configure(width=max(self._font.measure(label) for label in FONT_CHOICES.values()) + 32,
+                       height=self._font.metrics("linespace") + 16)
 
     def _draw(self):
         width, height = self.winfo_width(), self.winfo_height()
@@ -4906,6 +4916,9 @@ class SettingsWindow(tk.Toplevel):
                 body.yview_moveto(0)
 
         self.bind("<Configure>", layout)
+        # 切换字体后按当前窗口尺寸重排一次，换行和快捷键框的折行随新字体更新。
+        self._relayout = lambda: layout(type("Event", (), {"widget": self, "width": self.winfo_width(),
+                                                           "height": self.winfo_height()})())
         f.bind("<Configure>", update_region)
         body.bind("<Configure>", update_region)
         SettingsWindow._lock_size(self, width, height)
@@ -5086,6 +5099,24 @@ class SettingsWindow(tk.Toplevel):
         work = wintypes.RECT()
         user32.SystemParametersInfoW(48, 0, ctypes.byref(work), 0)
         return work
+
+    def _fit_hotkey_boxes(self):
+        """切换字体后，按新字体重新量快捷键输入框，圆角边框跟着放大或缩小。"""
+        hotkey_width = math.ceil(self._hotkey_font.measure("Ctrl+Alt+Shift+Backspace") /
+                                 self._hotkey_font.measure("0")) + 2
+        for border in self._hotkey_borders:
+            border.winfo_children()[0].configure(width=hotkey_width)
+        self.update_idletasks()  # 具名字体改动在空闲时才生效，先刷新再量尺寸。
+        for border in self._hotkey_borders:
+            entry = border.winfo_children()[0]
+            box_w, box_h = entry.winfo_reqwidth() + 12, entry.winfo_reqheight() + 12
+            border.configure(width=box_w, height=box_h)
+            outline = border.find_all()[0]
+            shape = round_rect(border, 1, 1, box_w - 1, box_h - 1, 7)
+            border.coords(outline, *border.coords(shape))
+            border.delete(shape)
+        self.update_idletasks()
+        self._relayout()
 
     def _drag_press(self, event):
         x, y = event.x_root-self.winfo_rootx(), event.y_root-self.winfo_rooty()
@@ -6283,7 +6314,8 @@ class SideDock(DockBookmark):
     def __init__(self, app):
         self.app = app
         label_size = 10
-        self.font = tkfont.Font(root=app.root, family=UI_FONT, size=label_size)
+        # 书签文字用 classic.ttf 画成图片，量宽也必须用同一款字体，不随字体选项变化。
+        self.font = tkfont.Font(root=app.root, family=CLASSIC_FAMILY, size=label_size)
         self.label_ink_font = ImageFont.truetype(str(FONT_DIR / "classic.ttf"),
                                                 round(app.root.winfo_fpixels(f"{label_size}p")))
         line_height = self.font.metrics("linespace")
@@ -7143,6 +7175,9 @@ class App:
             0, "STATIC", None, 0x88000000, 0, 0, 0, 0, None, None, None, None)
         if not self._bottom_reference_hwnd:
             raise ctypes.WinError()
+        # 界面文字跟随字体选项：常规字重用正文字体，粗体标题用便签标题字体。
+        global UI_FONT, UI_TITLE_FONT
+        UI_FONT, UI_TITLE_FONT = self.note_font_family(), self.note_title_font_family()
         for name in ("TkDefaultFont", "TkMenuFont"):
             tkfont.nametofont(name, root=self.root).configure(family=UI_FONT)
         self.notes = {}
@@ -7247,6 +7282,51 @@ class App:
                 editor.done_font.config(family=family, size=self.data["settings"]["fontSize"])
                 editor._make_check_images()
                 editor.render()
+        self._retarget_ui_fonts(family, title_family)
+
+    def _retarget_ui_fonts(self, family, title_family):
+        """把已打开窗口里的界面文字换成新字体；之后新建的菜单、提示和窗口直接读 UI_FONT。"""
+        global UI_FONT, UI_TITLE_FONT
+        if (UI_FONT, UI_TITLE_FONT) == (family, title_family):
+            return
+        old = {UI_FONT, UI_TITLE_FONT}
+        UI_FONT, UI_TITLE_FONT = family, title_family
+        call = self.root.tk.call
+        # 收纳书签用内置 Classic 字形画成图片，量宽的字体保持一致，不跟随。
+        skip = {str(self.dock.font)} if self.dock is not None else set()
+        for name in tkfont.names(self.root):
+            if name not in skip and call("font", "configure", name, "-family") in old:
+                bold = call("font", "configure", name, "-weight") == "bold"
+                call("font", "configure", name, "-family", title_family if bold else family)
+
+        def convert(spec):
+            parts = list(self.root.tk.splitlist(spec)) if spec else []
+            if not parts or parts[0] not in old:
+                return None
+            parts[0] = title_family if "bold" in parts[2:] else family
+            return tuple(parts)
+
+        pending = [self.root]
+        while pending:
+            widget = pending.pop()
+            pending.extend(widget.winfo_children())
+            if isinstance(widget, tk.Canvas):
+                for item in widget.find_all():
+                    if widget.type(item) == "text":
+                        font = convert(widget.itemcget(item, "font"))
+                        if font:
+                            widget.itemconfigure(item, font=font)
+            elif "font" in widget.keys():
+                font = convert(widget.cget("font"))
+                if font:
+                    widget.configure(font=font)
+        Tooltip._font = None
+        for note in self.notes.values():
+            note._footer_content_size = None
+            note._layout_footer()
+        if self.settings_win is not None and self.settings_win.winfo_exists():
+            self.settings_win.font_selector._fit()
+            self.settings_win._fit_hotkey_boxes()
 
     def set_opacity(self, percent):
         self._note_motion.finish_all()
