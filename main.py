@@ -1959,6 +1959,7 @@ class NoteEditor:
                     row_top += self._removal["extra"]
                     row_height -= self._removal["extra"]
                 # Tk 会把软换行的选区背景画进左边距，盖回勾选框旁的留白。
+                # 遮罩只需盖住 Text 自己画的底色，压在最底层：拖选时每次重排，勾选框都不会被它盖白一帧。
                 if self.text.tag_nextrange("selection_fill", f"{row}.0", f"{row}.end"):
                     top, bottom = max(0, row_top), min(content_height, row_top + row_height)
                     if top is not None:
@@ -1966,7 +1967,7 @@ class NoteEditor:
                         mask.place(x=int(self.text.cget("padx")), y=top,
                                    width=int(self.text.tag_cget("todo_indent", "lmargin2")),
                                    height=bottom - top, bordermode="ignore")
-                        mask.lift()
+                        mask.lower()
                         used_masks.add(mask)
                 size = self._check_images[False].width()
                 y = row_top + row_height // 2 - size // 2
@@ -2059,9 +2060,10 @@ class NoteEditor:
             del pool[used:]
 
         if self._selection_masks:
-            # 凹角圆弧会落在留白和空行尾部遮罩上，排在最上层。
-            self.win.after_idle(lambda: [w.lift() for w in self._selection_masks + self._checkbox_widgets
-                                         + self._selection_corners if w.winfo_exists()])
+            # 凹角圆弧会落在留白和空行尾部遮罩上，排在最上层。留白遮罩已压在底层，这里不抬，免得盖住勾选框。
+            self.win.after_idle(lambda: [w.lift() for w in [m for m in self._selection_masks
+                                                            if m._mask_key[0] != "margin"]
+                                         + self._checkbox_widgets + self._selection_corners if w.winfo_exists()])
         self._clamp_todo_cursor()
 
     def _on_vertical(self, event):

@@ -4224,6 +4224,34 @@ class NoteEditingTests(unittest.TestCase):
         self.assertEqual(self.note._checkbox_widgets[0].cget("bg"), self.note._bg)
         self.assertFalse(self.note._selection_masks)
 
+    def test_selection_margin_mask_stays_under_checkbox_while_dragging(self):
+        # 拖选时每次移动都重排；留白遮罩哪怕短暂排到勾选框上面，重画落在这一刻就会把勾选框盖白一帧。
+        self.note.d["lines"] = [{"type": "todo", "text": "买牛奶和面包", "checked": False}]
+        self.note.render()
+        self.text.tag_add("sel", "1.5", "1.end")
+        self.app.root.update()
+        editor = self.note.editors[0]
+        box = editor._checkbox_widgets[0]
+
+        def box_above_mask():
+            mask = next(m for m in editor._selection_masks if m._mask_key == ("margin", 1))
+            hwnd = main.user32.GetWindow(mask.winfo_id(), 3)  # GW_HWNDPREV：往上找
+            while hwnd:
+                if hwnd == box.winfo_id():
+                    return True
+                hwnd = main.user32.GetWindow(hwnd, 3)
+            return False
+
+        for first in ("1.5", "1.3", "1.0"):  # 选区起点一路挪向勾选框
+            with self.subTest(first=first):
+                self.text.tag_remove("sel", "1.0", "end")
+                self.text.tag_add("sel", first, "1.end")
+                editor._paint_selection()
+                editor._layout_text()
+                self.assertTrue(box_above_mask(), "刚布局完、空闲任务还没跑时，勾选框被留白遮罩盖住")
+                self.app.root.update()
+                self.assertTrue(box_above_mask())
+
     def _corner_pieces(self, editor):
         """当前摆上的角片，并核对每片的实际位置和尺寸与它记下的角片一致。"""
         pieces = set()
