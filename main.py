@@ -4803,7 +4803,7 @@ class SettingsWindow(tk.Toplevel):
                                                      fill=NOTE_BG, outline=NOTE_BORDER, width=4)
             image = ImageTk.PhotoImage(image.resize((w, h), Image.Resampling.LANCZOS), master=self)
             button = tk.Button(actions, text=text, command=command, image=image, compound="center",
-                               bg=NOTE_BG, activebackground=NOTE_BG, fg="#475569", font=font,
+                               bg=NOTE_BG, activebackground=NOTE_BG, fg="#475569", font=(UI_FONT, 9),
                                relief="flat", bd=0, highlightthickness=0, cursor="hand2")
             button._image = image
             return button

@@ -167,15 +167,18 @@ class FontTests(unittest.TestCase):
         title = next(label for label in labels if label.cget("text") == "设置")
         self.assertEqual(family(note.status), main.CLASSIC_FAMILY)
         self.assertEqual(family(title), main.CLASSIC_FAMILY)
-        for choice in ("yahei", "classic"):
+        for choice in ("yahei", "simsun", "system", "classic"):
             win._font_family(FONT_CHOICES[choice])
             self.app.root.update()
-            expected = FONT_FAMILIES[choice]
+            expected = self.app.note_font_family()
             self.assertEqual(main.UI_FONT, expected)
             self.assertEqual(family(note.status), expected)
             self.assertEqual(family(note.clear_btn), expected)
             self.assertEqual(family(body), expected)
             self.assertEqual(family(title), expected)
+            for button in (win._update_button, win._update_cancel_button):
+                self.assertEqual(button.tk.call("font", "actual", button.cget("font"), "-family"),
+                                 expected)
             self.assertEqual(win.font_selector._font.cget("family"), expected)
             self.assertEqual(main.tkfont.nametofont("TkDefaultFont", root=self.app.root).cget("family"), expected)
             self.assertEqual(self.app.dock.font.cget("family"), expected)
