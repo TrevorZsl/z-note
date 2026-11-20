@@ -27,9 +27,6 @@ from bundled_fonts import CLASSIC_FAMILY, FONT_CHOICES, FONT_FAMILIES, FONT_DIR,
 
 APP_NAME = "z-note"
 UI_FONT = CLASSIC_FAMILY
-# 内置 Classic 粗体里的中文仍是常规字重；标题沿用便签标题的系统字体，中文可真正加粗。
-UI_TITLE_FONT = "Times New Roman"
-
 NOTE_BG, NOTE_BORDER = "#FFFFFF", "#DFE2E6"
 SELECTION_BG = "#DCE7F3"
 T_COLOR = "#010203"   # 窗口透明色键（圆角外的部分透出去）
@@ -2924,7 +2921,7 @@ class NoteWindow(tk.Toplevel):
         # -- 工具栏 --
         self.toolbar = tk.Frame(self, bg=self._bg)
         self._tool_btns = []
-        self._chip_font = tkfont.Font(family=app.note_title_font_family(), size=10, weight="bold")
+        self._chip_font = tkfont.Font(family=app.note_font_family(), size=10, weight="bold")
         self._title_edit_font = self._chip_font
 
         def btn(icon, get_tip, cmd):
@@ -4633,7 +4630,7 @@ class SettingsWindow(tk.Toplevel):
         header = tk.Frame(f, bg=NOTE_BG)
         header.pack(fill="x", pady=(0, 12))
         title = tk.Label(header, text="设置", bg=NOTE_BG, fg="#1F2328",
-                         font=(UI_TITLE_FONT, 12, "bold"), cursor="fleur")
+                         font=(UI_FONT, 12, "bold"), cursor="fleur")
         title.pack(side="left")
         _hook_move_cursor(title)
         title.bind("<Enter>", _cursor_small)
@@ -4659,7 +4656,7 @@ class SettingsWindow(tk.Toplevel):
             heading = tk.Frame(f, bg=NOTE_BG)
             heading.pack(fill="x", pady=(0, 8))
             tk.Label(heading, text=title, bg=NOTE_BG, fg="#1F2328",
-                     font=(UI_TITLE_FONT, 11, "bold")).pack(side="left")
+                     font=(UI_FONT, 11, "bold")).pack(side="left")
             return heading
 
         section("常规")
@@ -5291,7 +5288,7 @@ class HistoryWindow(tk.Toplevel):
         header = tk.Frame(shell, bg=NOTE_BG)
         header.pack(fill="x")
         title = tk.Label(header, text="清除记录与回收站", bg=NOTE_BG, fg="#1F2328",
-                         font=(UI_TITLE_FONT, 12, "bold"), cursor="fleur")
+                         font=(UI_FONT, 12, "bold"), cursor="fleur")
         title.pack(side="left")
         self._drag = None
         self._close_button = tk.Label(header, text="×", bg=NOTE_BG, fg=INK,
@@ -5825,7 +5822,7 @@ class HistoryWindow(tk.Toplevel):
 
     def label(self, text, bold=False, parent=None):
         label = tk.Label(parent or self.content, text=text, bg=NOTE_BG, fg="#2B2F36",
-            font=(UI_TITLE_FONT, 10, "bold") if bold else (UI_FONT, 10), justify="left", anchor="w")
+            font=(UI_FONT, 10, "bold") if bold else (UI_FONT, 10), justify="left", anchor="w")
         label.pack(fill="x", pady=(6, 4), padx=4)
         label.bind("<Configure>", lambda e: label.configure(wraplength=max(1, e.width-8)))
 
@@ -6076,8 +6073,10 @@ class DockBookmark(tk.Toplevel):
                                   tags="dock-disclosure")
         elif is_note and self._note_visible:
             # 以当前显示的字形为准，英文下伸字母和中文可有不同中线。
-            _, top, _, bottom = self.dock.label_ink_font.getbbox(text, anchor="ls")
-            ink_middle = text_y + self.dock.label_baseline_offset + (top+bottom)/2
+            ink_middle = text_y
+            if self.dock.label_ink_font is not None:
+                _, top, _, bottom = self.dock.label_ink_font.getbbox(text, anchor="ls")
+                ink_middle += self.dock.label_baseline_offset + (top+bottom)/2
             dot_y = math.floor(ink_middle + 0.5)
             self.bar.create_image(19, dot_y, image=self.dock.note_visible_dot,
                                   tags="dock-note-visible")
@@ -6316,12 +6315,9 @@ class SideDock(DockBookmark):
     def __init__(self, app):
         self.app = app
         label_size = 10
-        # 书签文字用 classic.ttf 画成图片，量宽也必须用同一款字体，不随字体选项变化。
-        self.font = tkfont.Font(root=app.root, family=CLASSIC_FAMILY, size=label_size)
-        self.label_ink_font = ImageFont.truetype(str(FONT_DIR / "classic.ttf"),
-                                                round(app.root.winfo_fpixels(f"{label_size}p")))
+        self.font = tkfont.Font(root=app.root, family=app.note_font_family(), size=label_size)
+        self.set_label_font()
         line_height = self.font.metrics("linespace")
-        self.label_baseline_offset = self.font.metrics("ascent") - line_height//2
         label_width = max(self.font.measure(text) for text in ("z-note", "展开", "收起"))
         self.bar_width = max(88, label_width+42)  # 左侧留给三角，右侧保留文字留白。
         self.bar_height = max(34, line_height+16)
@@ -6341,6 +6337,15 @@ class SideDock(DockBookmark):
         super().__init__(self, self.bar_height)
         self.hide_all_button = DockHideAllButton(self)
         self.update_label("z-note")
+
+    def set_label_font(self):
+        self.font.configure(family=self.app.note_font_family())
+        choice = self.app.data["settings"]["fontFamily"]
+        self.label_ink_font = None
+        if choice in FONT_FAMILIES:
+            pixels = round(self.app.root.winfo_fpixels(f"{self.font.cget('size')}p"))
+            self.label_ink_font = ImageFont.truetype(str(FONT_DIR / f"{choice}.ttf"), pixels)
+        self.label_baseline_offset = self.font.metrics("ascent") - self.font.metrics("linespace")//2
 
     @staticmethod
     def work_area():
@@ -7050,7 +7055,7 @@ class RoundMessageBox:
         body.pack(fill="both", expand=True)
         # 固定内容宽度，短句也保持舒展的版面，换行按缩放后的像素计算。
         tk.Frame(body, bg=NOTE_BG, width=round(340 * scale), height=0).pack()
-        tk.Label(body, text=title, bg=NOTE_BG, fg="#1F2328", font=(UI_TITLE_FONT, 11, "bold"),
+        tk.Label(body, text=title, bg=NOTE_BG, fg="#1F2328", font=(UI_FONT, 11, "bold"),
                  anchor="w").pack(fill="x")
         tk.Label(body, text=message, bg=NOTE_BG, fg="#2B2F36", font=(UI_FONT, 10),
                  justify="left", anchor="w", wraplength=round(340 * scale)).pack(fill="x", pady=(10, 18))
@@ -7177,9 +7182,8 @@ class App:
             0, "STATIC", None, 0x88000000, 0, 0, 0, 0, None, None, None, None)
         if not self._bottom_reference_hwnd:
             raise ctypes.WinError()
-        # 界面文字跟随字体选项：常规字重用正文字体，粗体标题用便签标题字体。
-        global UI_FONT, UI_TITLE_FONT
-        UI_FONT, UI_TITLE_FONT = self.note_font_family(), self.note_title_font_family()
+        global UI_FONT
+        UI_FONT = self.note_font_family()
         for name in ("TkDefaultFont", "TkMenuFont"):
             tkfont.nametofont(name, root=self.root).configure(family=UI_FONT)
         self.notes = {}
@@ -7267,45 +7271,39 @@ class App:
         choice = self.data["settings"]["fontFamily"]
         return self._system_font_family if choice == "system" else FONT_FAMILIES[choice]
 
-    def note_title_font_family(self):
-        # Windows can synthesize bold for Song glyphs; the bundled Classic bold embeds regular Song.
-        system_faces = {"classic": "Times New Roman", "simsun": "SimSun"}
-        return system_faces.get(self.data["settings"]["fontFamily"], self.note_font_family())
-
     def update_fonts(self):
         family = self.note_font_family()
-        title_family = self.note_title_font_family()
         self.base_font.config(family=family, size=self.data["settings"]["fontSize"])
         for w in self.notes.values():
-            w._chip_font.config(family=title_family)
+            w._chip_font.config(family=family)
             w._draw_chip()
             for editor in w.editors:
                 editor._sync_lines_from_text()
                 editor.done_font.config(family=family, size=self.data["settings"]["fontSize"])
                 editor._make_check_images()
                 editor.render()
-        self._retarget_ui_fonts(family, title_family)
+        self._retarget_ui_fonts(family)
 
-    def _retarget_ui_fonts(self, family, title_family):
+    def _retarget_ui_fonts(self, family):
         """把已打开窗口里的界面文字换成新字体；之后新建的菜单、提示和窗口直接读 UI_FONT。"""
-        global UI_FONT, UI_TITLE_FONT
-        if (UI_FONT, UI_TITLE_FONT) == (family, title_family):
+        global UI_FONT
+        if UI_FONT == family:
             return
-        old = {UI_FONT, UI_TITLE_FONT}
-        UI_FONT, UI_TITLE_FONT = family, title_family
+        old = UI_FONT
+        UI_FONT = family
         call = self.root.tk.call
-        # 收纳书签用内置 Classic 字形画成图片，量宽的字体保持一致，不跟随。
-        skip = {str(self.dock.font)} if self.dock is not None else set()
+        if self.dock is not None:
+            self.dock.set_label_font()
+            self.request_dock_refresh()
         for name in tkfont.names(self.root):
-            if name not in skip and call("font", "configure", name, "-family") in old:
-                bold = call("font", "configure", name, "-weight") == "bold"
-                call("font", "configure", name, "-family", title_family if bold else family)
+            if call("font", "configure", name, "-family") == old:
+                call("font", "configure", name, "-family", family)
 
         def convert(spec):
             parts = list(self.root.tk.splitlist(spec)) if spec else []
-            if not parts or parts[0] not in old:
+            if not parts or parts[0] != old:
                 return None
-            parts[0] = title_family if "bold" in parts[2:] else family
+            parts[0] = family
             return tuple(parts)
 
         pending = [self.root]

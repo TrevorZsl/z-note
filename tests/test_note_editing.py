@@ -3476,7 +3476,7 @@ class NoteEditingTests(unittest.TestCase):
                      main.tkfont.nametofont("TkMenuFont", root=self.app.root)):
             self.assertEqual(font.actual("family"), main.UI_FONT)
         self.assertEqual(self.app.base_font.actual("weight"), "normal")
-        self.assertEqual(self.note._chip_font.actual("family"), "Times New Roman")
+        self.assertEqual(self.note._chip_font.actual("family"), main.UI_FONT)
         self.assertEqual(self.note._chip_font.actual("weight"), "bold")
 
     def test_convert_shortcut_majority_and_repeat_preserve_selection_and_history(self):

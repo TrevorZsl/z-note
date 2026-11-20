@@ -14,7 +14,8 @@ FONT_CHOICES = {
 }
 FONT_FAMILIES = {"classic": CLASSIC_FAMILY, "yahei": "ZNote YaHei", "simsun": "ZNote SimSun"}
 FONT_DIR = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent)) / "assets" / "fonts"
-FONT_FILES = ("classic.ttf", "classic-bold.ttf", "yahei.ttf", "yahei-bold.ttf", "simsun.ttf")
+# Classic's bundled bold face has regular Chinese strokes. Let Windows embolden both scripts.
+FONT_FILES = ("classic.ttf", "yahei.ttf", "yahei-bold.ttf", "simsun.ttf")
 _loaded = []
 
 
