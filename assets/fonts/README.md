@@ -12,7 +12,7 @@ SHA-256 见 `sources.json`。这些文件是公开仓库收集的专有字体，
 `ZNote SimSun`，设置界面仍显示用户熟悉的名称。
 Classic 的西文字形来自 Times New Roman，缺少的中文字形来自宋体，
 合并为一个字体，让正文、标题画布与标题编辑框都不依赖本机字体回退。
-常规与粗体分别打包；宋体粗体由 Windows 合成。
+Classic 和宋体在运行时由 Windows 合成粗体，让中英文笔画同步加粗；微软雅黑使用内置粗体。
 
 重建：将 `times.ttf`、`timesbd.ttf`、`msyh.ttc`、`msyhbd.ttc`、`simsun.ttc`
 和记录提交号的 `source-commit.txt` 放入 `.runtime-deps/font-sources/`，
