@@ -2,7 +2,7 @@
 
 适用于 z-note。一次标签构建生成一份安装包和一份 `SHA256SUMS`，上传到 GitHub 草稿和 Gitee 预览版。下载两边的附件，与原构建逐一比对 SHA-256 后交付链接。正式发布由维护者操作。
 
-> 给执行 Agent：按本文发布指定版本。先查已有标签、Actions 运行和两边的发行版，优先接续已完成的工作。新版本用标签触发构建。在 Actions 构建期间准备本机 Windows Runner。构建和 GitHub 草稿成功后，如果云端 Gitee 任务仍在运行、安装包尚未就绪、且本机 Runner 已在线，切换到原产物补传。两边下载验收完成后再交付。
+> 给执行 Agent：按本文发布指定版本。先查已有标签、Actions 运行和两边的发行版，优先接续已完成的工作。新版本用标签触发构建。推标签前设好仓库变量 `GITEE_RELEASE_RUNNER`（见第 3 节）时，构建与上传全程落本机 Runner、不消耗 Actions 分钟数；未设变量时构建走 GitHub 云端。构建和 GitHub 草稿成功后，如果云端 Gitee 任务仍在运行、安装包尚未就绪、且本机 Runner 已在线，切换到原产物补传。两边下载验收完成后再交付。
 
 ## 1. 查版本和现有状态
 
@@ -63,7 +63,40 @@ gh api "repos/$sourceRepo/actions/runs/$sourceRun/artifacts" --jq '.artifacts[]|
 
 ## 3. 构建期间准备 Windows Runner
 
-在能连 GitHub Actions 且能直连 Gitee 的 Windows 机器操作。若仓库变量 `GITEE_RELEASE_RUNNER` 已指向在线专用 Runner，标签运行会直接用它。变量已设置但 Runner 离线时，尽早恢复该 Runner 或准备以下一次性 Runner。变量未设置时标签运行的 Gitee 任务使用 GitHub 云端。日常一次性补传无需修改仓库变量。
+在能连 GitHub Actions 且能直连 Gitee 的 Windows 机器操作。若仓库变量 `GITEE_RELEASE_RUNNER` 已指向在线 Runner，标签运行的 `build`、`github-draft` 和 Gitee 任务都会直接用它：自托管 Runner 不消耗 Actions 分钟数，想全程本机构建就设这个变量。变量已设置但 Runner 离线时，任务会一直排队、不会回落云端，尽早恢复该 Runner，或按下面的配方重新起满一次性 Runner。变量未设置时构建走 GitHub 云端，Gitee 任务用云端补传。日常一次性补传无需修改仓库变量。
+
+全程本机模式在推标签前完成三件事：起满 3 个同标签一次性 Runner、设变量、再回第 2 节推标签。一次性 Runner 接满一个任务就退出，而一次发版有 `build` → `github-draft` ∥ `gitee-preview` 共 3 个任务，少于 3 个时剩余任务会一直排队。
+
+~~~powershell
+# 1) 按下方配方生成 $runnerLabel 后，在同一标签下注册并启动 3 个 Runner（各自独立目录）。
+$runnerLabel = '<一次发版共用一个标签>'
+$baseRunner = (Resolve-Path '.runtime-deps/gitee-actions-runner').Path
+1..3 | ForEach-Object {
+    $i = $_
+    $dir = if ($i -eq 1) { $baseRunner } else { Join-Path (Split-Path $baseRunner -Parent) "gitee-actions-runner-$i" }
+    if ($i -gt 1 -and -not (Test-Path $dir)) { Copy-Item $baseRunner $dir -Recurse -Exclude '_work' }
+    $token = gh api --method POST "repos/$sourceRepo/actions/runners/registration-token" --jq .token
+    if ($LASTEXITCODE -ne 0 -or -not $token) { throw "获取 Runner $i 注册令牌失败" }
+    Push-Location $dir
+    try {
+        .\config.cmd --unattended --ephemeral --no-default-labels --url "https://github.com/$sourceRepo" --token $token --name "$runnerLabel-$i" --labels $runnerLabel --work '_work'
+        if ($LASTEXITCODE -ne 0) { throw "Runner $i 注册失败" }
+    } finally {
+        Pop-Location
+    }
+    Start-Process -FilePath (Join-Path $dir 'run.cmd') -WorkingDirectory $dir -WindowStyle Hidden -RedirectStandardOutput (Join-Path $dir "run-$i.out.log") -RedirectStandardError (Join-Path $dir "run-$i.err.log")
+}
+
+# 2) 3 个 Runner 都 online 且 idle 后设变量，再回第 2 节推标签。
+gh api "repos/$sourceRepo/actions/runners" --paginate --jq '.runners[] | [.name,.status,.busy,([.labels[].name]|join(","))] | @tsv'
+gh variable set GITEE_RELEASE_RUNNER -R $sourceRepo --body $runnerLabel
+
+# 3) 两边附件验收完成后清变量，避免下次发版在离线标签上排队；没接到任务的 Runner 不会自动注销，逐个移除。
+gh variable delete GITEE_RELEASE_RUNNER -R $sourceRepo
+gh api -X DELETE "repos/$sourceRepo/actions/runners/<runnerId>"
+~~~
+
+首次全程本机构建时，`setup-python`、`pip` 安装和 Inno Setup 下载都走 GitHub 网络路径，按本节代理配方处理；构建会校验标签与说明、跑 4 个测试套件再打包，本机首次运行盯一遍日志确认各步骤正常。
 
 优先复用本机已校验的 `.runtime-deps/gitee-actions-runner`。没有副本时，到私有源码仓 **Settings → Actions → Runners → New self-hosted runner**，按页面提供的 Windows 命令下载、校验、解压。目录若仍在接单，先核对当前任务和注册状态，使用空闲副本。
 
@@ -109,7 +142,7 @@ gh api "repos/$sourceRepo/actions/runners" --paginate --jq '.runners[] | [.name,
 
 | 看到的状态 | 下一步 |
 | --- | --- |
-| `build` 和 `github-draft` 成功，Gitee 附件已齐 | 进入下载验收。如果仍启动了闲置的一次性 Runner，注销它。 |
+| `build` 和 `github-draft` 成功，Gitee 附件已齐 | 进入下载验收。验收完成后清除仓库变量 `GITEE_RELEASE_RUNNER`（全程本机模式时），并注销闲置的一次性 Runner。 |
 | 两个前置任务成功、原 Artifact 存在、云端 Gitee 仍在跑或排队、确认 Gitee 缺文件、本机已在线 | 取消原运行中仅剩的云端任务，等原运行成为 `completed`，再派发本机补传。若取消期间云端已上传完成，直接验收。 |
 | 原运行已结束，Gitee 缺文件 | 跳过取消，派发本机补传。原运行的总体结论可以是 `failure` 或 `cancelled`。 |
 | Runner 暂不可用 | 继续跟踪原上传，同时解决 Runner 连通性；先查具体失败步骤。 |

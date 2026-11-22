@@ -25,7 +25,7 @@ concurrency:
 jobs:
   build:
     if: github.event_name == 'push'
-    runs-on: windows-2022
+    runs-on: ${{ vars.GITEE_RELEASE_RUNNER || 'windows-2022' }}
     timeout-minutes: 30
     outputs:
       version: ${{ steps.metadata.outputs.version }}
@@ -79,11 +79,12 @@ jobs:
           path: |
             dist/z-note-setup-${{ env.RELEASE_VERSION }}.exe
             dist/SHA256SUMS
+          retention-days: 7
           if-no-files-found: error
 
   github-draft:
     needs: build
-    runs-on: windows-2022
+    runs-on: ${{ vars.GITEE_RELEASE_RUNNER || 'windows-2022' }}
     env:
       RELEASE_VERSION: ${{ needs.build.outputs.version }}
     steps:
