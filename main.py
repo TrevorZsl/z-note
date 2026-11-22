@@ -1652,6 +1652,48 @@ class NoteEditor:
                 t.tag_add("sel", last, f"{row}.end+1c")
         self._clamp_todo_cursor()
 
+    def _select_to(self, x, y, mode):
+        t = self.text
+        cur = str(t.tk.call("tk::TextClosestGap", t, x, y))
+        caret = self._todo_caret_index(cur)
+        if mode == "word":
+            self._select_words(cur, caret)
+            return True
+        if caret == cur:
+            return False
+
+        # Tk 会在 TextSelectTo 返回前重绘。前缀里的命中仍用于选区，插入光标要先落在正文。
+        anchor = str(t.tk.call("tk::TextAnchor", t))
+        if anchor not in t.mark_names():
+            t.mark_set(anchor, cur)
+        if t.compare(cur, "!=", anchor) or abs(int(t.tk.call("set", "::tk::Priv(pressX)")) - x) >= 3:
+            t.tk.call("set", "::tk::Priv(mouseMoved)", 1)
+        if mode == "line" or t.tk.getboolean(t.tk.call("set", "::tk::Priv(mouseMoved)")):
+            first, last = (cur, anchor) if t.compare(cur, "<", anchor) else (anchor, cur)
+            if mode == "line":
+                first = t.index(f"{first} linestart")
+                last = t.index(f"{last} lineend +1c")
+            t.tag_remove("sel", "1.0", "end")
+            t.mark_set("insert", caret)
+            t.tag_add("sel", first, last)
+            t.update_idletasks()
+        return True
+
+    def _key_select(self, index):
+        t = self.text
+        index = t.index(index)
+        caret = self._todo_caret_index(index)
+        if caret == index:
+            return False
+        anchor = str(t.tk.call("tk::TextAnchor", t))
+        if not t.tag_ranges("sel") or anchor not in t.mark_names():
+            t.mark_set(anchor, "insert")
+        t.tk.call("tk::TextKeyExtend", t, index)
+        t.mark_set("insert", caret)
+        t.see("insert")
+        t.update_idletasks()
+        return True
+
     def _word_at(self, index, after):
         """index 所在那一条待办或文字里紧挨 index 的词，跨过自动换行，但不越过这一条的首尾，也不含勾选框。
         after 为真取 index 后面的字，否则取前面的字；词是连续的非空白或连续的空白，与 Tk 一致。空条目返回 None。"""
@@ -1670,12 +1712,11 @@ class NoteEditor:
             last += 1
         return f"{row}.{start + first}", f"{row}.{start + last}"
 
-    def _select_words(self, x, y):
+    def _select_words(self, cur, caret):
         """代替 Tk 的按词选择（双击、双击后拖动）：两端各在自己那一条里取词，不会顺着换行选到相邻条目；
         双击空条目不选中，光标留在这一条。"""
         t = self.text
         anchor_mark = str(t.tk.call("tk::TextAnchor", t))
-        cur = t.index(t.tk.call("tk::TextClosestGap", t, x, y))
         if anchor_mark not in t.mark_names():
             t.mark_set(anchor_mark, cur)
         anchor = t.index(anchor_mark)
@@ -1685,7 +1726,7 @@ class NoteEditor:
         elif t.compare(cur, ">", last):
             last = (self._word_at(cur, False) or (cur, cur))[1]
         t.tag_remove("sel", "1.0", "end")
-        t.mark_set("insert", cur)
+        t.mark_set("insert", caret)
         if t.compare(first, "<", last):
             t.tag_add("sel", first, last)
 
@@ -1929,16 +1970,13 @@ class NoteEditor:
             self.body.update_idletasks()
         top = round(self.body.canvasy(0))
         target = max(0, top - (height - self.body.winfo_height()) // 2)
-        view_changed = round(self.text.yview()[0] * self._document_height) != target
-        if view_changed:
+        if round(self.text.yview()[0] * self._document_height) != target:
             self.text.yview_moveto(target / self._document_height)
         self._chunk_start = round(self.text.yview()[0] * self._document_height)
         text_y = self._chunk_start - top
         if self.text.winfo_y() != text_y:
             self.text.place_configure(y=text_y)
-            view_changed = True
-        if view_changed:
-            self.body.update_idletasks()
+        # 和正文一起提交装饰布局，避免重绘先露出软换行选区左侧的底色。
         used_masks = set()
         used_boxes = used_bars = 0
         content_height = self.text.winfo_height()
@@ -2110,12 +2148,14 @@ class NoteEditor:
         if self.win._ime_composing(self.text):
             return
         t = self.text
-        start = t.index("insert linestart")
-        images = t.dump(start, f"{start}+1c", image=True)
-        if images and t.image_cget(start, "image") in {str(i) for i in self._check_slots.values()}:
-            target = f"{start}+{1 + len(PREFIX_PAD)}c"
-            if t.compare("insert", "<", target):
-                t.mark_set("insert", target)
+        index = t.index("insert")
+        caret = self._todo_caret_index(index)
+        if caret != index:
+            t.mark_set("insert", caret)
+
+    def _todo_caret_index(self, index):
+        start = self._text_body(int(index.split(".")[0]))
+        return start if self.text.compare(index, "<", start) else index
 
     def _text_body(self, row):
         # 按文本中的勾选框图片判断，连续按键时行数据可能还没同步。
@@ -3048,18 +3088,27 @@ class NoteWindow(tk.Toplevel):
             # Tk 按词选择时把换行也当空白，双击空行会一路选到上下的文字；便签正文改为只在被点的那一条里取词。
             root = self._root()
 
-            def select_words(path, x, y):
+            def note_editor(path):
                 widget = root.nametowidget(path)
-                widget.winfo_toplevel()._editor_for(widget)._select_words(int(x), int(y))
+                return widget.winfo_toplevel()._editor_for(widget)
+
+            select_to = root.register(lambda path, x, y, mode: note_editor(path)._select_to(int(x), int(y), mode))
+            key_select = root.register(lambda path, index: note_editor(path)._key_select(index))
             self.tk.eval(f"""
                 rename ::tk::TextSelectTo ::tk::NoteTextSelectTo
                 proc ::tk::TextSelectTo {{w x y args}} {{
                     if {{"TodoCaret" in [bindtags $w] && [info exists ::tk::Priv(selectMode)]
-                            && $::tk::Priv(selectMode) eq "word"}} {{
-                        {root.register(select_words)} $w $x $y
+                            && [{select_to} $w $x $y $::tk::Priv(selectMode)]}} {{
                         return
                     }}
                     ::tk::NoteTextSelectTo $w $x $y {{*}}$args
+                }}
+                rename ::tk::TextKeySelect ::tk::NoteTextKeySelect
+                proc ::tk::TextKeySelect {{w index}} {{
+                    if {{"TodoCaret" in [bindtags $w] && [{key_select} $w $index]}} {{
+                        return
+                    }}
+                    ::tk::NoteTextKeySelect $w $index
                 }}
             """)
 

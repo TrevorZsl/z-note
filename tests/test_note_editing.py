@@ -5487,6 +5487,66 @@ class NoteEditingTests(unittest.TestCase):
         paint()
         self.assertEqual(seen[-1], ([3, 4], [3, 4]))
 
+    def test_todo_selection_keeps_caret_out_of_prefix_before_redraw(self):
+        editor = self.note.editors[0]
+        text = editor.text
+        lines = [dict(type="todo", text="" if row == 2 else f"待办 {row}", checked=row % 2 == 0)
+                 for row in range(1, 46)]
+        drawn = []
+
+        def before_update(command, _operation):
+            if text.tk.splitlist(command) == ("update", "idletasks"):
+                index = text.index("insert")
+                drawn.append((index, editor._text_body(int(index.split(".")[0]))))
+
+        callback = text.register(before_update)
+        text.tk.call("trace", "add", "execution", "::update", "enter", callback)
+        try:
+            for gesture in ("drag", "scroll down", "scroll up", "Shift+Home"):
+                with self.subTest(gesture=gesture):
+                    self._load_lines(editor, lines)
+                    text.focus_force()
+                    self.app.root.update()
+                    drawn.clear()
+                    if gesture == "drag":
+                        self._mouse_drag(editor, (1, "left"), (2, "left"))
+                        expected = ("1.0", "3.0")
+                        self.assertIn(2, self._painted_rows(editor))
+                    elif gesture == "Shift+Home":
+                        text.mark_set("insert", "1.end")
+                        text.event_generate("<Shift-KeyPress-Home>")
+                        expected = ("1.0", text.index("1.end"))
+                    else:
+                        editor.body.yview_moveto(.45)
+                        self.app.root.update()
+                        x = int(text.cget("padx")) + 1
+                        body_top = editor.body.winfo_rooty() - text.winfo_rooty()
+                        height = editor.body.winfo_height()
+                        y = body_top + height // 2
+                        time = 7000 if gesture == "scroll down" else 8000
+                        text.event_generate("<Button-1>", x=x, y=y, time=time)
+                        anchor = text.index(text.tk.call("tk::TextAnchor", text))
+                        before = editor.body.yview()[0]
+                        drawn.clear()
+                        offset = height + 40 if gesture == "scroll down" else -40
+                        text.event_generate("<B1-Motion>", x=x, y=body_top + offset,
+                                            state=256, time=time + 20)
+                        self.assertTrue(editor._selection_scroll_job)
+                        text.event_generate("<ButtonRelease-1>", x=x, y=y, state=256, time=time + 40)
+                        self.assertIsNone(editor._selection_scroll_job)
+                        endpoint = text.index("insert linestart")
+                        if gesture == "scroll down":
+                            self.assertGreater(editor.body.yview()[0], before)
+                            expected = (anchor, endpoint)
+                        else:
+                            self.assertLess(editor.body.yview()[0], before)
+                            expected = (endpoint, anchor)
+                    self.assertEqual(tuple(map(str, text.tag_ranges("sel"))), expected)
+                    self.assertTrue(drawn)
+                    self.assertEqual([index for index, body in drawn if text.compare(index, "<", body)], [])
+        finally:
+            text.tk.call("trace", "remove", "execution", "::update", "enter", callback)
+
     def test_drag_autoscroll_stops_selection_at_pointer_row(self):
         editor = self.note.editors[0]
         text = editor.text
