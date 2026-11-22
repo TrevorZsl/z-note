@@ -4212,7 +4212,8 @@ class NoteEditingTests(unittest.TestCase):
         self.assertEqual(self.note._checkbox_widgets[0].cget("bg"), self.note._bg)
         self.assertEqual(len(self.note._selection_masks), 1)
         mask = self.note._selection_masks[0]
-        self.assertEqual(mask.winfo_x() + mask.winfo_width(), self.text.bbox(middle)[0])
+        self.assertEqual(mask.winfo_x() + mask.winfo_width(),
+                         self.text.bbox(middle)[0] - int(self.text.cget("insertwidth")) // 2)
         self.assertLessEqual(mask.winfo_y(), self.note._checkbox_widgets[0].winfo_y())
         self.assertGreaterEqual(mask.winfo_y() + mask.winfo_height(),
                                 self.note._checkbox_widgets[0].winfo_y() +
@@ -4296,7 +4297,7 @@ class NoteEditingTests(unittest.TestCase):
         last_line, last_box = text.dlineinfo("1.end-1c"), text.bbox("1.end-1c")
         above = text.dlineinfo(text.index(f"@0,{last_line[1] - 1}"))
         left = top_box[0]
-        right_limit = min(text.winfo_width() - int(text.cget("padx")), editor._drag_gutter.winfo_x())
+        right_limit = editor._drag_gutter.winfo_x() - int(text.cget("insertwidth")) // 2
         last_right, last_top = last_box[0] + last_box[2], last_line[1]
         last_bottom = last_line[1] + last_line[3]
         step = right_limit - last_right
@@ -4859,7 +4860,7 @@ class NoteEditingTests(unittest.TestCase):
                         self.assertEqual(len(covering), 1, f"第 {row} 行高亮没有收成小标记")
                         mask = covering[0]
                         self.assertEqual(mask.winfo_x() + mask.winfo_width(),
-                                         editor._drag_gutter.winfo_x())
+                                         editor._drag_gutter.winfo_x() - int(text.cget("insertwidth")) // 2)
                         self.assertLessEqual(mask.winfo_y(), display[1])
                         self.assertGreaterEqual(mask.winfo_y() + mask.winfo_height(),
                                                 display[1] + display[3])
@@ -5486,6 +5487,68 @@ class NoteEditingTests(unittest.TestCase):
         text.tag_add("sel", "2.0", "5.0")
         paint()
         self.assertEqual(seen[-1], ([3, 4], [3, 4]))
+
+    def test_visible_caret_uses_two_pixel_columns_across_note_body(self):
+        lines = [dict(type=kind, text=value, checked=False) for kind, value in (
+            ("text", "asdasd here"), ("text", ""), ("todo", "asdasd here"), ("todo", ""),
+            ("text", "asdasd here " * 10), ("todo", "asdasd here " * 10))]
+        positions = ("1.0", "1.4", "1.end", "2.0", "3.3", "3.7", "3.end", "4.3",
+                     "5.0+1 display line display linestart", "6.3+1 display line display linestart")
+        root = self.app.root
+        for columns in (1, 2):
+            if columns == 2:
+                self.note.toggle_columns()
+            self.note.geometry(f"{430 if columns == 1 else 690}x640+100+70")
+            root.update()
+            for editor in self.note.editors:
+                self._load_lines(editor, lines)
+                text = editor.text
+                text.configure(insertofftime=0)
+                text.focus_force()
+                root.update()
+                color = tuple(channel // 257 for channel in text.winfo_rgb(text.cget("insertbackground")))
+                for selected in (False, True):
+                    if selected:
+                        text.tag_add("sel", "1.0", "end-1c")
+                    with self.subTest(columns=columns, column=editor.col, selected=selected):
+                        clipped = []
+                        for position in positions:
+                            text.mark_set("insert", position)
+                            root.update()
+                            x, y, _, height = text.bbox("insert")
+                            frame = ImageGrab.grab(window=text.winfo_id())
+                            rows = range(y + 2, y + height - 2)
+                            if not all(frame.getpixel((col, row)) == color
+                                       for col in (x - 1, x) for row in rows):
+                                clipped.append(position)
+                        self.assertEqual(clipped, [])
+
+    def test_caret_at_exact_wrap_limit_clears_right_drag_gutter(self):
+        editor = self.note.editors[0]
+        text = editor.text
+        root = self.app.root
+        value = "asdasd heer " * 3
+        text.configure(insertofftime=0)
+        text.focus_force()
+        root.update()
+        for kind in ("text", "todo"):
+            with self.subTest(kind=kind):
+                self._load_lines(editor, [dict(type=kind, text=value, checked=False)])
+                start = text.bbox(editor._text_body(1))[0]
+                line_width = start + self.app.base_font.measure(value)
+                right_inset = int(text.tag_cget("drag_margin", "rmargin")) + int(text.cget("padx"))
+                width = self.note.winfo_width() - text.winfo_width() + line_width + right_inset
+                self.note.geometry(f"{width}x{self.note.winfo_height()}")
+                root.update()
+                text.tag_add("sel", "1.0", "1.end")
+                text.mark_set("insert", "1.end")
+                root.update()
+                x, y, _, height = text.bbox("insert")
+                self.assertEqual(x, line_width)
+                frame = ImageGrab.grab(window=text.winfo_id())
+                color = tuple(channel // 257 for channel in text.winfo_rgb(text.cget("insertbackground")))
+                self.assertTrue(all(frame.getpixel((col, row)) == color
+                                    for col in (x - 1, x) for row in range(y + 2, y + height - 2)))
 
     def test_todo_selection_keeps_caret_out_of_prefix_before_redraw(self):
         editor = self.note.editors[0]

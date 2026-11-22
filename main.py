@@ -902,6 +902,11 @@ def selection_corner_pieces(rects, radius):
 class NoteEditor:
     """一栏正文编辑器：Text + 勾选框/删除线覆盖层 + 分块滚动。NoteWindow 持有 1~2 个实例。"""
 
+    BODY_PAD_X = 12
+    DRAG_GUTTER_WIDTH = 54
+    INSERT_WIDTH = 2
+    INSERT_HALF_WIDTH = INSERT_WIDTH // 2
+
     def __init__(self, win, col):
         self.win, self.col = win, col
         self.d = win.d  # 与窗口共享同一便签字典；只有 lines 按 col 分流
@@ -910,10 +915,12 @@ class NoteEditor:
                                      size=win.app.data["settings"]["fontSize"])
         self.body = tk.Canvas(win, bg=self._bg, bd=0, highlightthickness=0, yscrollincrement=1)
         self.text = tk.Text(self.body, bg=self._bg, fg="#2B2F36", bd=0, highlightthickness=0,
-                            padx=12, pady=10, wrap="char", spacing1=9, spacing3=10,
+                            padx=self.BODY_PAD_X - self.INSERT_HALF_WIDTH, pady=10,
+                            wrap="char", spacing1=9, spacing3=10,
                             selectbackground=self._bg, inactiveselectbackground=self._bg,
                             selectforeground="#2B2F36", selectborderwidth=0,
-                            font=win.app.base_font, insertbackground="#2B2F36", cursor="xterm")
+                            font=win.app.base_font, insertbackground="#2B2F36",
+                            insertwidth=self.INSERT_WIDTH, cursor="xterm")
         self.text.place(x=0, y=0, relwidth=1)
         self.scroll_thumb = VerticalThumb(win, self.body, self._bg, auto_hide=True)
         self._make_check_images()
@@ -950,8 +957,9 @@ class NoteEditor:
         self._row_drag_job = None
         # Tk 会把软换行选区画进右边距；独立覆盖层让拖拽区始终保持便签底色。
         self._drag_gutter = tk.Frame(self.text, bg=self._bg)
-        self._drag_gutter.place(relx=1, x=-int(self.text.cget("padx"))-54,
-                                y=0, width=54, relheight=1, bordermode="ignore")
+        self._drag_gutter.place(relx=1, x=-self.BODY_PAD_X - self.DRAG_GUTTER_WIDTH + self.INSERT_HALF_WIDTH,
+                                y=0, width=self.DRAG_GUTTER_WIDTH - self.INSERT_HALF_WIDTH,
+                                relheight=1, bordermode="ignore")
         self._drag_gutter.bind("<Motion>", self._hover_row)
         self._drag_gutter.bind("<Enter>", self._hover_row)
         self._drag_gutter.bind("<Leave>", lambda e: self.win.after_idle(self._hide_drag_handle))
@@ -982,7 +990,12 @@ class NoteEditor:
         self._drag_leave = win.bind("<Leave>",
             lambda e: self.win.after_idle(self._hide_drag_handle), add="+")
         self._drag_handle.bind("<Leave>", self._hide_drag_handle, add="+")
-        self.text.tag_configure("drag_margin", rmargin=54)
+        # 给居中的插入光标留出裁切空间，在段落边距内补回文字位置和换行宽度。
+        self.text.tag_configure("drag_margin", lmargin1=self.INSERT_HALF_WIDTH,
+                                lmargin2=self.INSERT_HALF_WIDTH,
+                                rmargin=self.DRAG_GUTTER_WIDTH + self.INSERT_HALF_WIDTH,
+                                lmargincolor=self._bg, rmargincolor=self._bg)
+        self.text.tag_raise("todo_indent", "drag_margin")
         self.text.bind("<Motion>", self._hover_row)
         self.text.bind("<Enter>", self._hover_row)
         self.text.bind("<Leave>", lambda e: self.win.after_idle(self._hide_drag_handle))
@@ -1172,7 +1185,7 @@ class NoteEditor:
         self._drag_handle._row = row - 1
         viewport_top = -self.text.winfo_y()
         middle = (max(top, viewport_top) + min(top+height, viewport_top+self.body.winfo_height()))/2
-        self._drag_handle.place(x=self.text.winfo_width()-55+int(self.text.cget("padx")),
+        self._drag_handle.place(x=self.text.winfo_width()-55+self.BODY_PAD_X,
                                 y=round(middle)-12, width=24, height=24, bordermode="ignore")
         tk.Misc.lift(self._drag_handle)
 
@@ -1249,6 +1262,7 @@ class NoteEditor:
                     for tag in ("todo_indent", "drag_margin"):
                         measure.tag_configure(tag, **{key: editor.text.tag_cget(tag, key)
                                               for key in ("lmargin1", "lmargin2", "rmargin")})
+                    measure.tag_raise("todo_indent", "drag_margin")
                     line = self.lines[drag["source"]]
                     if line["type"] == "todo":
                         measure.image_create("1.0", image=editor._check_slots[line["checked"]])
@@ -1422,11 +1436,11 @@ class NoteEditor:
     def _draw_drag_row(self, cv, index, y, muted=False, line=None, layout=None):
         line = self.lines[index] if line is None else line
         height, segments = self._row_drag["rows"][index] if layout is None else layout
-        x = int(self.text.cget("padx"))
+        x = self.BODY_PAD_X
         if line["type"] == "todo":
             cv.create_image(x+self._check_margin+self._check_margin//2, y+height/2,
                             image=self._check_images[line["checked"]], anchor="w")
-            x += int(self.text.tag_cget("todo_indent", "lmargin2"))
+            x += int(self.text.tag_cget("todo_indent", "lmargin2")) - self.INSERT_HALF_WIDTH
         font = self.done_font if line["type"] == "todo" and line["checked"] else self.app.base_font
         color = mix(self._bg, "#2B2F36", .25) if muted else "#2B2F36"
         for n, segment in enumerate(segments):
@@ -1739,7 +1753,7 @@ class NoteEditor:
         self._check_slots = {checked: ImageTk.PhotoImage(Image.new("RGBA", (slot_width, size)), master=self.text)
                              for checked in (False, True)}
         # Text 在左内边距处裁切光标，首行也要留出半个光标的绘制宽度。
-        caret_margin = self._check_margin // 2
+        caret_margin = self._check_margin // 2 + self.INSERT_HALF_WIDTH
         self.text.tag_config("todo_indent", lmargin1=caret_margin,
                              lmargin2=caret_margin + slot_width + self.app.base_font.measure(PREFIX_PAD))
 
@@ -1799,7 +1813,7 @@ class NoteEditor:
         if not (box and display):
             return None
         left = box[0] + max(1, self.app.base_font.measure(" "))
-        right = self._drag_gutter.winfo_x()
+        right = self._drag_gutter.winfo_x() - self.INSERT_HALF_WIDTH
         if right <= left:
             return None
         mask = self._selection_mask(("tail", row), "xterm")
@@ -1850,7 +1864,7 @@ class NoteEditor:
         """可见行里每个显示行实际露出的选区矩形 (左, 上, 右, 下)，与 Tk 画法和各遮罩的边界一致。"""
         t = self.text
         width = t.winfo_width()
-        right_limit = min(width - int(t.cget("padx")), self._drag_gutter.winfo_x())
+        right_limit = width - self.BODY_PAD_X - self.DRAG_GUTTER_WIDTH
         visible_start = t.index("@0,0")
         rects = []
         for row in range(first_row, last_row + 1):
@@ -1999,9 +2013,10 @@ class NoteEditor:
                     top, bottom = max(0, row_top), min(content_height, row_top + row_height)
                     if top is not None:
                         mask = self._selection_mask(("margin", row), "")
-                        mask.place(x=int(self.text.cget("padx")), y=top,
-                                   width=int(self.text.tag_cget("todo_indent", "lmargin2")),
-                                   height=bottom - top, bordermode="ignore")
+                        # 原生边距先画底色，再画光标。子窗口给光标左半边留出空间。
+                        mask_width = int(self.text.tag_cget("todo_indent", "lmargin2")) - 2 * self.INSERT_HALF_WIDTH
+                        mask.place(x=self.BODY_PAD_X, y=top,
+                                   width=mask_width, height=bottom - top, bordermode="ignore")
                         mask.lower()
                         used_masks.add(mask)
                 size = self._check_images[False].width()
@@ -2020,7 +2035,7 @@ class NoteEditor:
                         box.bind("<Control-MouseWheel>", self.win._ctrl_wheel)
                         self._checkbox_widgets.append(box)
                     used_boxes += 1
-                    bounds = (int(self.text.cget("padx")) + self._check_margin + self._check_margin // 2,
+                    bounds = (self.BODY_PAD_X + self._check_margin + self._check_margin // 2,
                               y, size, size)
                     if getattr(box, "_layout_bounds", None) != bounds:
                         box.place(x=bounds[0], y=y, width=size, height=size, bordermode="ignore")
@@ -2145,6 +2160,10 @@ class NoteEditor:
         if self.win._ime_composing(self.text):
             return
         t = self.text
+        if (_event is not None and _event.type == tk.EventType.KeyPress and
+                "drag_margin" not in t.tag_names("1.0")):
+            # Tk 在文档开头插字时不继承标签，等松键再补会先按裁切边界画一帧。
+            t.tag_add("drag_margin", "1.0", "2.0")
         index = t.index("insert")
         caret = self._todo_caret_index(index)
         if caret != index:
@@ -3188,7 +3207,7 @@ class NoteWindow(tk.Toplevel):
     def _clamp_todo_cursor(self, _event=None):
         editor = (self._editor_for(_event.widget) if _event is not None and
                   hasattr(_event, "widget") else self.focused)
-        editor._clamp_todo_cursor()
+        editor._clamp_todo_cursor(_event)
 
     def _on_keyrelease(self, event=None):
         editor = (self._editor_for(event.widget) if event is not None and
@@ -3479,7 +3498,7 @@ class NoteWindow(tk.Toplevel):
         editor = self._editor_for(widget) if not isinstance(widget, tk.Entry) else None
         if editor is not None:
             widget.delete(start, f"{start}+{self._ime_length}c")
-            tags = ["ime_preedit"]
+            tags = ["ime_preedit", "drag_margin"]
             if "todo_indent" in widget.tag_names(f"{start} linestart"):
                 tags.append("todo_indent")
             widget.insert(start, value, tags)
