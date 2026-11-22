@@ -913,6 +913,10 @@ def selection_corner_pieces(rects, radius):
     return pieces
 
 
+def todo_strike_thickness(ascent):
+    return max(2, round(ascent * 0.12))
+
+
 class NoteEditor:
     """一栏正文编辑器：Text + 勾选框/删除线覆盖层 + 分块滚动。NoteWindow 持有 1~2 个实例。"""
 
@@ -2081,7 +2085,8 @@ class NoteEditor:
                     last = (last[0], last[1],
                             min(last[2], self.done_font.measure(self.text.get(last_index))), last[3])
                 if first and last:
-                    thickness = max(2, round(self.done_font.metrics("ascent") * 0.12))
+                    ascent = self.done_font.metrics("ascent")
+                    thickness = todo_strike_thickness(ascent)
                     if used_bars < len(self._strike_widgets):
                         bar = self._strike_widgets[used_bars]
                     else:
@@ -2097,7 +2102,7 @@ class NoteEditor:
                     used_bars += 1
                     bar._text_start = start
                     baseline = display[1] + display[4]
-                    middle = baseline - round(self.done_font.metrics("ascent") * 0.33)
+                    middle = baseline - round(ascent * 0.33)
                     bounds = (first[0], middle - thickness // 2,
                               max(1, last[0] + last[2] - first[0]), thickness)
                     if getattr(bar, "_layout_bounds", None) != bounds:
@@ -5493,6 +5498,70 @@ class HistoryPane(tk.Canvas):
         for axis in self.bars:
             self.bars[axis].set(*self.viewport.yview())
 
+class CompletedTodoPreview(tk.Text):
+    """Read-only preview with one custom strike per visible text line."""
+
+    def __init__(self, parent, text):
+        super().__init__(parent, width=1, height=1, bg=NOTE_BG, fg="#2B2F36",
+                         font=(UI_FONT, 10), wrap="word", padx=2, pady=2,
+                         bd=0, highlightthickness=0, takefocus=False, cursor="arrow")
+        self.insert("1.0", text)
+        self.tag_configure("preview", rmargin=4)
+        self.tag_add("preview", "1.0", "end")
+        self.configure(state="disabled")
+        # The surrounding history window owns scrolling, just as for its labels.
+        self.bindtags((str(self), str(self.winfo_toplevel()), "all"))
+        self._strikes = []
+        self._layout_job = None
+        self.bind("<Configure>", self.queue_layout)
+
+    def queue_layout(self, _event=None):
+        if self._layout_job is None:
+            self._layout_job = self.after_idle(self._layout)
+
+    def _layout(self):
+        self._layout_job = None
+        if self.winfo_width() <= 1:
+            return
+        height = int(self.tk.call(self, "count", "-update", "-displaylines", "1.0", "end"))
+        if int(self.cget("height")) != height:
+            self.configure(height=height)
+            return
+        for bar in self._strikes:
+            bar.destroy()
+        self._strikes.clear()
+        ascent = int(self.tk.call("font", "metrics", self.cget("font"), "-ascent"))
+        thickness = todo_strike_thickness(ascent)
+        start = "1.0"
+        while self.compare(start, "<", "end"):
+            display = self.dlineinfo(start)
+            if display is None:
+                break
+            stop = self.index(f"{start} +1displaylines")
+            if self.compare(stop, "<=", start):
+                break
+            x, y, width, line_height, _ = display
+            segment = self.get(start, stop)
+            visible = segment.rstrip()
+            if width and visible:
+                # 软换行也可能留下空格，线条止于最后一个实际字符。
+                trailing = len(segment) - len(visible)
+                if trailing:
+                    last = self.bbox(f"{stop} -{trailing + 1}c")
+                    if last:
+                        width = min(width, last[0] + last[2] - x)
+                bar = tk.Frame(self, bg="#505761")
+                bar.place(x=x, y=y + (line_height - thickness + 1) // 2,
+                          width=width, height=thickness, bordermode="ignore")
+                self._strikes.append(bar)
+            start = stop
+
+    def destroy(self):
+        if self._layout_job is not None:
+            self.after_cancel(self._layout_job)
+        super().destroy()
+
+
 class HistoryWindow(tk.Toplevel):
     def __init__(self, app):
         super().__init__(app.root)
@@ -6077,11 +6146,14 @@ class HistoryWindow(tk.Toplevel):
         row.pack(fill="x", padx=4, pady=(6, 4))
         marker = tk.Label(row, image=self._check_images[line["checked"]], bg=NOTE_BG)
         marker.pack(side="left", anchor="center", padx=(0, 8))
-        text = tk.Label(row, text=line["text"], bg=NOTE_BG, fg="#2B2F36",
-                        font=(UI_FONT, 10, "overstrike" if line["checked"] else "normal"),
-                        justify="left", anchor="w")
+        if line["checked"]:
+            text = CompletedTodoPreview(row, line["text"])
+        else:
+            text = tk.Label(row, text=line["text"], bg=NOTE_BG, fg="#2B2F36",
+                            font=(UI_FONT, 10),
+                            justify="left", anchor="w")
+            text.bind("<Configure>", lambda e: text.configure(wraplength=max(1, e.width-8)))
         text.pack(side="left", fill="x", expand=True)
-        text.bind("<Configure>", lambda e: text.configure(wraplength=max(1, e.width-8)))
 
     def _center_empty(self):
         empty = getattr(self, "_empty_label", None)
@@ -7587,6 +7659,8 @@ class App:
                 font = convert(widget.cget("font"))
                 if font:
                     widget.configure(font=font)
+                    if isinstance(widget, CompletedTodoPreview):
+                        widget.queue_layout()
         Tooltip._font = None
         for note in self.notes.values():
             note._footer_content_size = None

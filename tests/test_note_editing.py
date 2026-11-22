@@ -3006,7 +3006,7 @@ class NoteEditingTests(unittest.TestCase):
         self.assertEqual(win.selected_id, "note2")
         self.assertEqual(label.cget("bg"), "#E9EDF2")
         self.assertTrue(any(isinstance(row, main.tk.Frame) and any(
-            isinstance(c, main.tk.Label) and c.cget("text") == "第二张便签的内容"
+            isinstance(c, main.CompletedTodoPreview) and c.get("1.0", "end-1c") == "第二张便签的内容"
             for c in row.winfo_children()) for row in win.content.winfo_children()))
         win.destroy()
 
@@ -3056,9 +3056,12 @@ class NoteEditingTests(unittest.TestCase):
             if isinstance(labels[0], main.tk.Frame):
                 marker, label = labels[0].winfo_children()
                 self.assertEqual(marker.cget("image"), str(win._check_images[True]))
+                self.assertIsInstance(label, main.CompletedTodoPreview)
+                self.assertEqual(label.get("1.0", "end-1c"), content)
+                self.assertGreater(len(label._strikes), 1)
             else:
                 label = labels[0]
-            self.assertEqual(label.cget("text"), content)
+                self.assertEqual(label.cget("text"), content)
             self.assertGreater(label.winfo_width(), win.right.viewport.winfo_width() * .75)
             self.assertLessEqual(label.winfo_rootx() + label.winfo_width(),
                                  win.right.viewport.winfo_rootx() + win.right.viewport.winfo_width())
@@ -3095,14 +3098,26 @@ class NoteEditingTests(unittest.TestCase):
     def test_history_multiline_preview_uses_one_centered_note_checkbox(self):
         win = main.HistoryWindow(self.app)
         for checked in (False, True):
-            win.preview_line({"type": "todo", "text": "很长的待办" * 40 + "\n第二段", "checked": checked})
+            win.preview_line({"type": "todo", "text": "很长的待办" * 40 + "\n\n第二段  ", "checked": checked})
         self.app.root.update()
         rows = [c for c in win.content.winfo_children() if isinstance(c, main.tk.Frame)]
         self.assertEqual(len(rows), 2)
         for checked, row in zip((False, True), rows):
             marker, text = row.winfo_children()
             self.assertEqual(marker.cget("image"), str(win._check_images[checked]))
-            self.assertEqual(bool(main.tkfont.Font(root=win, font=text.cget("font")).actual("overstrike")), checked)
+            font = main.tkfont.Font(root=win, font=text.cget("font"))
+            self.assertFalse(font.actual("overstrike"))
+            if checked:
+                self.assertIsInstance(text, main.CompletedTodoPreview)
+                thickness = main.todo_strike_thickness(font.metrics("ascent"))
+                self.assertEqual(len(text._strikes), int(text.cget("height")) - 1)
+                self.assertTrue(all(bar.winfo_height() == thickness for bar in text._strikes))
+                self.assertEqual(text._strikes[-1].winfo_width(), font.measure("第二段"))
+                _, top, _, height, _ = text.dlineinfo("3.0")
+                self.assertAlmostEqual(text._strikes[-1].winfo_y() + thickness / 2,
+                                       top + height / 2, delta=0.5)
+            else:
+                self.assertIsInstance(text, main.tk.Label)
             self.assertGreater(text.winfo_height(), marker.winfo_height() * 2)
             self.assertAlmostEqual(marker.winfo_y() + marker.winfo_height()/2,
                                    text.winfo_y() + text.winfo_height()/2, delta=2)
