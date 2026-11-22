@@ -5542,15 +5542,16 @@ class HistoryWindow(tk.Toplevel):
             self.tabs[key].pack(side="left", padx=(0, 12))
         self._batch_actions = tk.Frame(tabs, bg=NOTE_BG)
         self._batch_actions.grid(row=0, column=1, sticky="e")
+        self._batch_count = tk.Label(self._batch_actions, bg=NOTE_BG, fg=QUIET, font=self._button_font)
         self.select_all_button = self.button(self._batch_actions, "取消全选", self.toggle_all)
         self._select_all_image = self._button_image("全选")
-        self.select_all_button.grid(row=0, column=0, padx=(0, 8))
+        self.select_all_button.grid(row=0, column=1, padx=(0, 8))
         self.select_all_button.grid_remove()
-        self.delete_button = self.button(self._batch_actions, "删除", self.delete_selected)
-        self.delete_button.grid(row=0, column=1, padx=(0, 8))
+        self.delete_button = self.button(self._batch_actions, "永久删除", self.delete_selected, danger=True)
+        self.delete_button.grid(row=0, column=2, padx=(0, 8))
         self.delete_button.grid_remove()
         self.batch_button = self.button(self._batch_actions, "批量管理", self.toggle_batch)
-        self.batch_button.grid(row=0, column=2)
+        self.batch_button.grid(row=0, column=3)
         self.hint = tk.Label(shell, bg=NOTE_BG, fg=QUIET, font=(UI_FONT, 10), anchor="w")
         self.hint.pack(fill="x", pady=(0, 12))
         panes = tk.Frame(shell, bg=NOTE_BG)
@@ -5585,7 +5586,8 @@ class HistoryWindow(tk.Toplevel):
         self.update_idletasks()
         # Reserve room for the delete button so checking a row cannot move the toolbar.
         self._batch_min_width = tab_buttons.winfo_reqwidth() + 16 + sum(
-            button.winfo_reqwidth() for button in self._batch_actions.winfo_children())
+            button.winfo_reqwidth() for button in self._batch_actions.winfo_children()
+            if button is not self._batch_count)
         tabs.bind("<Configure>", lambda e: self._layout_batch_actions(e.width))
         self.hint.bind("<Configure>", lambda e: self.hint.configure(wraplength=max(1, e.width), justify="left"))
         self._sync_pane(self.mode)
@@ -5601,10 +5603,12 @@ class HistoryWindow(tk.Toplevel):
                                                 fill=fill, outline=NOTE_BORDER, width=4)
         return ImageTk.PhotoImage(image.resize((width, height), Image.Resampling.LANCZOS), master=self)
 
-    def button(self, parent, text, command):
-        photo = self._button_image(text)
+    def button(self, parent, text, command, *, primary=False, danger=False):
+        photo = self._button_image(text, "#E9EDF2" if primary else NOTE_BG)
+        foreground = "#A44A42" if danger else "#1F2328" if primary else "#475569"
         button = tk.Button(parent, text=text, command=command, image=photo, compound="center",
-            bg=NOTE_BG, fg="#475569", activebackground=NOTE_BG, activeforeground="#1F2328",
+            bg=NOTE_BG, fg=foreground, activebackground=NOTE_BG,
+            activeforeground=foreground if danger else "#1F2328",
             font=self._button_font, relief="flat", bd=0, padx=0, pady=0, cursor="hand2", highlightthickness=0)
         button._image = photo
         return button
@@ -5840,8 +5844,10 @@ class HistoryWindow(tk.Toplevel):
             tab.configure(fg="#1F2328" if key == self.mode else QUIET,
                           image=tab._selected_image if key == self.mode else tab._image)
         self.hint.configure(text="清除的已完成待办会保存在这里，按便签整理。" if self.mode == "archives"
-                            else "彻底删除便签不会删除已清除待办的记录。")
+                            else "永久删除便签后，已清除的待办记录仍会保留。")
         self.checked.intersection_update(self.ids)
+        if not self.ids:
+            self.batch_mode = False
         if self.selected_id not in self.ids:
             self.selected_id = None
         self._show_batch_controls()
@@ -5894,7 +5900,8 @@ class HistoryWindow(tk.Toplevel):
                         box.pack(side="left", anchor="center", padx=(0, 6), before=row.pack_slaves()[0])
                 elif box.winfo_manager():
                     box.pack_forget()
-        self.batch_button.configure(text="取消批量" if self.batch_mode else "批量管理")
+        self.batch_button.configure(text="取消批量" if self.batch_mode else "批量管理",
+                                    state="normal" if self.ids else "disabled")
         self._layout_batch_actions(self._batch_actions.master.winfo_width())
         self._update_batch_controls()
 
@@ -5971,12 +5978,20 @@ class HistoryWindow(tk.Toplevel):
                    fill=canvas.master.cget("bg"), outline="")
 
     def _layout_batch_actions(self, width):
-        stacked = self.batch_mode and width < self._batch_min_width
+        count_width = self._button_font.measure(f"已选 {len(self.ids)} 组") + 12
+        stacked = self.batch_mode and width < self._batch_min_width + count_width
+        if self.batch_mode:
+            self._batch_count.grid(row=1 if stacked else 0, column=0,
+                                   columnspan=4 if stacked else 1, sticky="e", padx=(0, 8))
+        else:
+            self._batch_count.grid_remove()
         self._batch_actions.grid_configure(row=1 if stacked else 0, column=0 if stacked else 1,
                                            columnspan=2 if stacked else 1, pady=(8, 0) if stacked else 0)
 
     def _update_batch_controls(self):
         if self.batch_mode:
+            unit = "组" if self.mode == "archives" else "张"
+            self._batch_count.configure(text=f"已选 {len(self.checked)} {unit}")
             all_selected = self.ids and len(self.checked) == len(self.ids)
             self.select_all_button.configure(
                 text="取消全选" if all_selected else "全选",
@@ -5984,6 +5999,8 @@ class HistoryWindow(tk.Toplevel):
                 state="normal" if self.ids else "disabled")
             self.select_all_button.grid()
         else:
+            if not self.ids:
+                self.select_all_button.configure(text="全选", image=self._select_all_image, state="disabled")
             self.select_all_button.grid_remove()
         if self.batch_mode and self.checked:
             self.delete_button.grid()
@@ -6029,7 +6046,11 @@ class HistoryWindow(tk.Toplevel):
         keys = set(self.checked)
         if not keys:
             return
-        if messagebox.askyesno("批量删除", f"彻底删除选中的 {len(keys)} 张便签记录？此操作无法恢复。", parent=self):
+        subject = "组清除记录" if self.mode == "archives" else "张便签"
+        message = f"永久删除选中的 {len(keys)} {subject}？此操作无法恢复。"
+        if self.mode == "deletedNotes":
+            message += "已清除的待办记录仍会保留。"
+        if messagebox.askyesno("永久删除", message, parent=self, permanent=True):
             field = "noteId" if self.mode == "archives" else "id"
             self._delete_records(field, keys)
 
@@ -6042,9 +6063,9 @@ class HistoryWindow(tk.Toplevel):
         if self.app._store_history(change) and mode == "deletedNotes":
             self.app.request_dock_refresh()
 
-    def label(self, text, bold=False, parent=None):
-        label = tk.Label(parent or self.content, text=text, bg=NOTE_BG, fg="#2B2F36",
-            font=(UI_FONT, 10, "bold") if bold else (UI_FONT, 10), justify="left", anchor="w")
+    def label(self, text, parent=None, *, secondary=False):
+        label = tk.Label(parent or self.content, text=text, bg=NOTE_BG, fg=QUIET if secondary else "#2B2F36",
+            font=(UI_FONT, 10), justify="left", anchor="w")
         label.pack(fill="x", pady=(6, 4), padx=4)
         label.bind("<Configure>", lambda e: label.configure(wraplength=max(1, e.width-8)))
 
@@ -6073,7 +6094,8 @@ class HistoryWindow(tk.Toplevel):
             child.destroy()
         if self.selected_id is None:
             # 占位提示用浅灰色，在预览区居中。
-            self._empty_label = tk.Label(self.content, text="请选择一条记录" if self.ids else "暂无记录",
+            empty_text = "还没有清除的待办" if self.mode == "archives" else "回收站为空"
+            self._empty_label = tk.Label(self.content, text="请选择一条记录" if self.ids else empty_text,
                                          bg=NOTE_BG, fg=QUIET, font=(UI_FONT, 10), anchor="center")
             self._empty_label.pack(fill="x")
             if not getattr(self, "_empty_centering", False):
@@ -6089,8 +6111,8 @@ class HistoryWindow(tk.Toplevel):
             note = records[0]
             actions = tk.Frame(self.content, bg=NOTE_BG)
             actions.pack(anchor="w", pady=(0,12))
-            self.button(actions, "彻底删除", lambda: self.delete_record(note["id"])).pack(side="left")
-            self.button(actions, "还原", lambda: self.app.recover_note(note["id"])).pack(side="left", padx=(8,0))
+            self.button(actions, "还原", lambda: self.app.recover_note(note["id"]), primary=True).pack(side="left")
+            self.button(actions, "永久删除", lambda: self.delete_record(note["id"]), danger=True).pack(side="left", padx=(8,0))
             if note.get("twoColumn"):
                 for key, name in (("lines", "左栏"), ("lines2", "右栏")):
                     section = tk.Frame(self.content, bg=NOTE_BG)
@@ -6135,18 +6157,30 @@ class HistoryWindow(tk.Toplevel):
                 for line in note["lines"]:
                     self.preview_line(line)
         else:
+            note_id = self.selected_id
+            actions = tk.Frame(self.content, bg=NOTE_BG)
+            actions.pack(anchor="w", pady=(0, 12))
+            self.button(actions, "永久删除本组", lambda: self.delete_archive_group(note_id),
+                        danger=True).pack(side="left")
             for batch in records:
-                self.label("清除于 " + batch["clearedAt"].replace("T", " "), True)
+                self.label("清除于 " + batch["clearedAt"].replace("T", " "), secondary=True)
                 for item in batch["items"]:
                     self.preview_line(item["line"])
                 tk.Frame(self.content, bg=NOTE_BORDER, height=1).pack(fill="x", pady=12)
         self.content.update_idletasks()
         self.right.update_region()
 
+    def delete_archive_group(self, note_id):
+        if self.mode != "archives" or note_id not in self.groups:
+            return
+        message = "永久删除这张便签的全部清除记录？此操作无法恢复。"
+        if messagebox.askyesno("永久删除", message, parent=self, permanent=True) and self.mode == "archives":
+            self._delete_records("noteId", {note_id})
+
     def delete_record(self, record_id):
-        message = ("彻底删除这张便签？此操作无法恢复，已清除待办的记录仍保留。"
+        message = ("永久删除这张便签？此操作无法恢复，已清除的待办记录仍会保留。"
                    if self.mode == "deletedNotes" else "永久删除这次清除记录？此操作无法恢复。")
-        if messagebox.askyesno("彻底删除", message, parent=self):
+        if messagebox.askyesno("永久删除", message, parent=self, permanent=True):
             self._delete_records("id", {record_id})
 
 
@@ -7263,7 +7297,7 @@ class RoundMessageBox:
         return ImageTk.PhotoImage(image.resize((width, height), Image.Resampling.LANCZOS), master=master)
 
     @classmethod
-    def _ask(cls, title, message, buttons, parent=None):
+    def _ask(cls, title, message, buttons, parent=None, *, permanent=False):
         load_fonts()
         master = parent if parent is not None and parent.winfo_exists() else tk._default_root
         win = tk.Toplevel(master)
@@ -7275,12 +7309,16 @@ class RoundMessageBox:
         scale = max(1, round(win.winfo_fpixels("1i")) / 96)
         body = tk.Frame(win, bg=NOTE_BG, padx=24, pady=20)
         body.pack(fill="both", expand=True)
+        work = SettingsWindow._work_area(win) if permanent else None
+        content_width = round(340 * scale)
+        if work is not None:
+            content_width = min(content_width, max(1, work.right - work.left - 64))
         # 固定内容宽度，短句也保持舒展的版面，换行按缩放后的像素计算。
-        tk.Frame(body, bg=NOTE_BG, width=round(340 * scale), height=0).pack()
+        tk.Frame(body, bg=NOTE_BG, width=content_width, height=0).pack()
         tk.Label(body, text=title, bg=NOTE_BG, fg="#1F2328", font=(UI_FONT, 11, "bold"),
                  anchor="w").pack(fill="x")
         tk.Label(body, text=message, bg=NOTE_BG, fg="#2B2F36", font=(UI_FONT, 10),
-                 justify="left", anchor="w", wraplength=round(340 * scale)).pack(fill="x", pady=(10, 18))
+                 justify="left", anchor="w", wraplength=content_width).pack(fill="x", pady=(10, 18))
         row = tk.Frame(body, bg=NOTE_BG)
         row.pack(fill="x")
         font = tkfont.Font(root=win, family=UI_FONT, size=10)
@@ -7288,23 +7326,33 @@ class RoundMessageBox:
 
         def choose(index):
             if closing[0]:
-                return
+                return "break"
             closing[0], result[0] = True, index
             win.grab_release()
             PopupFade.hide(win, win.destroy)
+            return "break"
 
         win._images = []
-        # 第一个按钮是主操作：放在最右、浅灰底，回车确认；Esc 取消。
+        default_index = 1 if permanent else 0
+        default_button = None
         for index, text in enumerate(buttons):
-            primary = index == 0
+            primary = index == default_index
             image = cls._button_image(win, font, text, "#E9EDF2" if primary else NOTE_BG)
             win._images.append(image)
-            tk.Button(row, text=text, image=image, compound="center", command=lambda i=index: choose(i),
-                      bg=NOTE_BG, activebackground=NOTE_BG, fg="#1F2328" if primary else "#475569",
-                      activeforeground="#1F2328", font=font, relief="flat", bd=0, padx=0, pady=0,
-                      highlightthickness=0, cursor="hand2").pack(side="right", padx=(8, 0))
+            foreground = "#A44A42" if permanent and index == 0 else "#1F2328" if primary else "#475569"
+            button = tk.Button(row, text=text, image=image, compound="center", command=lambda i=index: choose(i),
+                               bg=NOTE_BG, activebackground=NOTE_BG, fg=foreground,
+                               activeforeground=foreground if permanent else "#1F2328",
+                               font=font, relief="flat", bd=0, padx=0, pady=0,
+                               highlightthickness=1 if permanent else 0, highlightbackground=NOTE_BG,
+                               highlightcolor="#94A3B8", cursor="hand2")
+            button.pack(side="right", padx=(8, 0))
+            if permanent:
+                button.bind("<Return>", lambda _e, i=index: choose(i))
+            if primary:
+                default_button = button
         win.bind("<Escape>", lambda _e: choose(None))
-        win.bind("<Return>", lambda _e: choose(0))
+        win.bind("<Return>", lambda _e: choose(default_index))
 
         win.update_idletasks()
         width, height = win.winfo_reqwidth(), win.winfo_reqheight()
@@ -7314,7 +7362,11 @@ class RoundMessageBox:
         else:
             work = SettingsWindow._work_area(win)
             cx, cy = (work.left+work.right)//2, (work.top+work.bottom)//2
-        win.geometry(f"+{cx - width//2}+{cy - height//2}")
+        x, y = cx - width//2, cy - height//2
+        if permanent:
+            x = max(work.left + 8, min(x, work.right - width - 8))
+            y = max(work.top + 8, min(y, work.bottom - height - 8))
+        win.geometry(f"+{x}+{y}")
         win.attributes("-alpha", 0.0)
         win._popup_alpha = 0.0
         win.deiconify()
@@ -7322,12 +7374,15 @@ class RoundMessageBox:
         PopupFade.show(win)
         win.focus_force()
         win.grab_set()
+        if permanent:
+            default_button.focus_force()
         master.wait_window(win)
         return result[0]
 
     @classmethod
-    def askyesno(cls, title, message, parent=None, **_options):
-        return cls._ask(title, message, ("确定", "取消"), parent) == 0
+    def askyesno(cls, title, message, parent=None, *, permanent=False, **_options):
+        buttons = ("永久删除" if permanent else "确定", "取消")
+        return cls._ask(title, message, buttons, parent, permanent=permanent) == 0
 
     @classmethod
     def showinfo(cls, title, message, parent=None, **_options):

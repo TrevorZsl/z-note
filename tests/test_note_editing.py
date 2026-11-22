@@ -2530,8 +2530,8 @@ class NoteEditingTests(unittest.TestCase):
         win.switch("deletedNotes")
         win.choose(note_id)
         actions = win.content.winfo_children()[0]
-        delete, restore = actions.winfo_children()
-        self.assertEqual([delete.cget("text"), restore.cget("text")], ["彻底删除", "还原"])
+        restore, delete = actions.winfo_children()
+        self.assertEqual([restore.cget("text"), delete.cget("text")], ["还原", "永久删除"])
         with patch.object(main, "save_data", side_effect=OSError("disk full")), \
              patch.object(main.messagebox, "showerror") as error:
             restore.invoke()
@@ -2543,7 +2543,7 @@ class NoteEditingTests(unittest.TestCase):
         self.assertEqual(self.app.notes[note_id].d, dict(original, visible=True))
         self.assertFalse(self.app.data["deletedNotes"])
         self.assertFalse(win.ids)
-        self.assertEqual(win.content.winfo_children()[0].cget("text"), "暂无记录")
+        self.assertEqual(win.content.winfo_children()[0].cget("text"), "回收站为空")
         win.destroy()
 
     def test_clear_preserves_completed_items_and_undo_restores_positions(self):
@@ -2613,7 +2613,8 @@ class NoteEditingTests(unittest.TestCase):
         self.app.history_win = win
         self.app.root.update()
         win.choose(note_id)
-        self.assertFalse(any(isinstance(c, main.tk.Button) for c in win.content.winfo_children()))
+        actions = win.content.winfo_children()[0]
+        self.assertEqual([c.cget("text") for c in actions.winfo_children()], ["永久删除本组"])
         win.toggle_batch()
         win.check(note_id, True)
         with patch.object(main.messagebox, "askyesno", return_value=True):
@@ -2624,12 +2625,55 @@ class NoteEditingTests(unittest.TestCase):
         win.choose(note_id)
         actions = win.content.winfo_children()[0]
         buttons = [c.cget("text") for c in actions.winfo_children()]
-        self.assertEqual(buttons, ["彻底删除", "还原"])
+        self.assertEqual(buttons, ["还原", "永久删除"])
         win.toggle_batch()
         win.check(note_id, True)
         with patch.object(main.messagebox, "askyesno", return_value=True):
             win.delete_selected()
         self.assertFalse(self.app.data["deletedNotes"])
+        win.destroy()
+
+    def test_delete_one_archive_group_keeps_same_named_note_and_other_records(self):
+        from copy import deepcopy
+
+        note_id = self.note.d["id"]
+        self.note.d["title"] = "项目"
+        live_note = deepcopy(self.note.d)
+        other = dict(deepcopy(live_note), id="other", deletedAt="2026-11-22T10:00:00")
+        archives = [
+            {"id": batch_id, "noteId": key, "title": "项目", "clearedAt": date, "items": []}
+            for batch_id, key, date in (("first", note_id, "2026-11-20T09:00:00"),
+                                         ("second", note_id, "2026-11-21T09:00:00"),
+                                         ("other", other["id"], "2026-11-22T09:00:00"))
+        ]
+        self.app.data["archives"] = archives
+        self.app.data["deletedNotes"] = [other]
+        win = self.app.history_win = main.HistoryWindow(self.app)
+        win.choose(note_id)
+        button = win.content.winfo_children()[0].winfo_children()[0]
+        with patch.object(main.messagebox, "askyesno", return_value=False) as confirm:
+            button.invoke()
+        self.assertTrue(confirm.call_args.kwargs["permanent"])
+        self.assertEqual(self.app.data["archives"], archives)
+        with patch.object(main.messagebox, "askyesno", return_value=True), \
+             patch.object(main, "save_data", side_effect=OSError("disk full")), \
+             patch.object(main.messagebox, "showerror") as error:
+            button.invoke()
+        error.assert_called_once()
+        self.assertEqual(self.app.data["archives"], archives)
+        self.assertEqual(win.selected_id, note_id)
+        with patch.object(main.messagebox, "askyesno", return_value=True):
+            button.invoke()
+            self.assertEqual(self.app.data["archives"], [archives[-1]])
+            self.assertEqual(self.app.data["deletedNotes"], [other])
+            self.assertEqual(self.note.d, live_note)
+            self.assertIsNone(win.selected_id)
+            self.assertEqual(win.content.winfo_children()[0].cget("text"), "请选择一条记录")
+            win.choose(other["id"])
+            win.content.winfo_children()[0].winfo_children()[0].invoke()
+        self.assertFalse(self.app.data["archives"])
+        self.assertEqual(win.content.winfo_children()[0].cget("text"), "还没有清除的待办")
+        self.assertEqual(win.batch_button.cget("state"), "disabled")
         win.destroy()
 
     def test_history_batch_toggle_reuses_rows_and_preview_in_both_tabs(self):
@@ -2843,9 +2887,11 @@ class NoteEditingTests(unittest.TestCase):
         self.assertEqual(win.batch_button.cget("text"), "批量管理")
         self.assertFalse(win.checked)
         self.assertFalse(select_all.winfo_manager())
+        self.assertFalse(win._batch_count.winfo_manager())
         win.batch_button.invoke()
         select_all.invoke()
         self.assertEqual(win.checked, {"note-0", "note-1"})
+        self.assertEqual(win._batch_count.cget("text"), "已选 2 张")
         with patch.object(main.messagebox, "askyesno", side_effect=[False, True]) as confirm:
             win.delete_button.invoke()
             self.assertEqual(len(self.app.data["deletedNotes"]), 2)
@@ -2857,6 +2903,7 @@ class NoteEditingTests(unittest.TestCase):
         self.assertFalse(win.checked)
         self.assertEqual(select_all.cget("state"), "disabled")
         self.assertEqual(select_all.cget("text"), "全选")
+        self.assertEqual(win.batch_button.cget("state"), "disabled")
         self.assertFalse(win.delete_button.winfo_manager())
         win.destroy()
 
