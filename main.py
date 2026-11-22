@@ -7360,21 +7360,23 @@ class App:
         if show_welcome:
             sw, sh = self.root.winfo_screenwidth(), self.root.winfo_screenheight()
             self.data["notes"].append({
-                "id": str(uuid.uuid4()), "x": sw - 480, "y": 90, "w": 440, "h": 560,
+                "id": str(uuid.uuid4()), "x": sw - 480, "y": 90, "w": 440, "h": 580,
                 "title": "使用指南",
                 "z": "top", "opacity": self.data["settings"]["opacity"],
                 "color": self.data["settings"]["color"], "visible": True,
                 "lines": [
-                    {"type": "text", "text": f"欢迎使用 z-note {APP_VERSION}", "checked": False},
-                ] + [{"type": "todo", "text": text, "checked": False} for text in (
-                    "点方框勾选，右键编辑行",
-                    f"文字 / 待办：{self.hotkey_text('convert')}",
-                    "拖三横线排序，可跨栏拖动",
-                    "顶部切双栏，点标题改名",
-                    "图钉置顶，向下箭头置底",
-                    "减号隐藏，底部清除已完成",
-                    "托盘：新建、记录、回收站",
-                    "设置：字体、透明度与更新",
+                    {"type": "text", "text": "快速上手", "checked": False},
+                ] + [{"type": kind, "text": text, "checked": False} for kind, text in (
+                    ("todo", "勾选这条待办"),
+                    ("text", "底部加号：添加待办"),
+                    ("text", "顶部减号：隐藏便签"),
+                    ("text", "右侧书签：找回便签"),
+                    ("text", ""),
+                    ("text", "其他操作"),
+                    ("text", f"{self.hotkey_text('convert')} 切换待办"),
+                    ("text", "右键编辑 · 拖动排序"),
+                    ("text", "点标题改名"),
+                    ("text", "托盘可显示全部便签"),
                 )]})
             self.data["welcomeVersion"] = APP_VERSION
             self.save_now()

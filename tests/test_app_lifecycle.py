@@ -30,7 +30,9 @@ class WelcomeNoteTests(unittest.TestCase):
         guide = app.data["notes"][0]
         self.assertTrue(guide["visible"])
         self.assertEqual(guide["title"], "使用指南")
-        self.assertEqual(guide["lines"][0]["text"], f"欢迎使用 z-note {main.APP_VERSION}")
+        self.assertEqual(guide["lines"][0]["text"], "快速上手")
+        todos = [line for line in guide["lines"] if line["type"] == "todo"]
+        self.assertEqual(todos, [{"type": "todo", "text": "勾选这条待办", "checked": False}])
         self.assertEqual(app.data["welcomeVersion"], main.APP_VERSION)
         self.assertIn("Ctrl+Shift+L", "\n".join(line["text"] for line in guide["lines"]))
         self.saved.assert_called_once_with(app.data)
