@@ -446,8 +446,9 @@ class Tooltip:
     _cur = None
     _font = None
 
-    def __init__(self, widget, get_text, delay=500):
+    def __init__(self, widget, get_text, delay=500, *, wrap=False):
         self._w, self._gt, self._delay, self._aid = widget, get_text, delay, None
+        self._wrap = wrap
         widget.bind("<Enter>", self._enter, add="+")
         widget.bind("<Leave>", self._leave, add="+")
         widget.bind("<ButtonPress-1>", self._leave, add="+")
@@ -483,6 +484,19 @@ class Tooltip:
             Tooltip._font = tkfont.Font(family=UI_FONT, size=9, root=self._w)
         w, h = Tooltip._font.measure(text) + 24, 30
         tw, cv = self._new_popup(self._w)
+        if self._wrap:
+            work = SettingsWindow._work_area(self._w)
+            w = min(w, max(32, work.right - work.left - 16))
+            item = cv.create_text(12, 8, text=text, width=w - 24, anchor="nw",
+                                  fill="#3A3F46", font=Tooltip._font)
+            h = cv.bbox(item)[3] + 8
+            x = max(work.left + 8, min(self._w.winfo_rootx(), work.right - w - 8))
+            y = self._w.winfo_rooty() - h - 6
+            if y < work.top:
+                y = max(work.top, min(self._w.winfo_rooty() + self._w.winfo_height() + 6,
+                                      work.bottom - h))
+            self._show_popup(tw, cv, w, h, x, y)
+            return
         cv.create_text(w / 2, h / 2, text=text, fill="#3A3F46",
                        font=(UI_FONT, 9))
         x = max(4, self._w.winfo_rootx() + self._w.winfo_width() // 2 - w // 2)
@@ -4948,6 +4962,18 @@ class SettingsWindow(tk.Toplevel):
         self._update_status = tk.Label(actions, text=self._update_status_choices[0], bg=NOTE_BG,
                                        fg=QUIET, font=self._update_status_font, bd=0, padx=0)
         self._update_status.grid(row=0, column=2, sticky="w")
+        self._update_fraction = None
+        self._update_progress = tk.Frame(actions, bg=NOTE_BG)
+        self._update_progress.pack_propagate(False)
+        self._update_progress.grid(row=0, column=0, sticky="w", padx=(0, 12))
+        self._update_progress.grid_remove()
+        self._update_progress_text = tk.Label(self._update_progress, bg=NOTE_BG, fg=INK,
+                                             font=self._update_status_font, bd=0, padx=0, pady=0)
+        self._update_progress_text.pack(anchor="w")
+        self._update_progress_bar = tk.Canvas(self._update_progress, height=5, bg=NOTE_BG,
+                                              highlightthickness=0, bd=0)
+        self._update_progress_bar.pack(fill="x", pady=(2, 0))
+        self._update_progress_bar.bind("<Configure>", lambda _e: self._paint_update_progress())
         self._update_details = tk.Button(actions, text="详情", command=self._show_update_error,
                                          bg=NOTE_BG, activebackground=NOTE_BG, fg="#475569",
                                          font=self._update_status_font, relief="flat", bd=0,
@@ -4965,9 +4991,20 @@ class SettingsWindow(tk.Toplevel):
         self.bind("<Destroy>", self._destroy_update, add="+")
 
         section("数据")
-        path = tk.Label(f, text=DATA_FILE, bg=NOTE_BG, fg=QUIET,
-                        font=(UI_FONT, 9), wraplength=460, justify="left")
+        path = tk.Label(f, bg=NOTE_BG, fg=QUIET, font=(UI_FONT, 9), padx=0, bd=0)
         path.pack(anchor="w")
+        Tooltip(path, lambda: DATA_FILE if path.cget("text") != DATA_FILE else "", wrap=True)
+
+        def layout_path(content_width):
+            available = max(0, content_width - 8)
+            font = path.cget("font")
+            text = DATA_FILE
+            if int(self.tk.call("font", "measure", font, text)) > available:
+                suffix = "…"
+                while text and int(self.tk.call("font", "measure", font, text + suffix)) > available:
+                    text = text[:-1]
+                text += suffix if int(self.tk.call("font", "measure", font, suffix)) <= available else ""
+            path.configure(text=text)
 
         def layout_hotkeys(content_width):
             for hotkey_row, label, entry in hotkey_rows:
@@ -4991,7 +5028,7 @@ class SettingsWindow(tk.Toplevel):
         content_width = max(1, width - 2 * RADIUS - scrollbar.winfo_reqwidth() - 4)
         # 文本按实际可用宽度换行，窗口高度在换行完成后再计算。
         startup.configure(wraplength=max(1, content_width - self._check_images[False].width() - 16))
-        path.configure(wraplength=max(1, content_width - 16))
+        layout_path(content_width)
         layout_hotkeys(content_width)
         self._layout_hotkey_feedback(content_width)
         body.itemconfigure(content, width=content_width)
@@ -5019,7 +5056,7 @@ class SettingsWindow(tk.Toplevel):
             body.place(x=RADIUS, y=body_top, width=content_width, height=viewport_height)
             body.itemconfigure(content, width=content_width)
             startup.configure(wraplength=max(1, content_width - self._check_images[False].width() - 16))
-            path.configure(wraplength=max(1, content_width - 16))
+            layout_path(content_width)
             layout_hotkeys(content_width)
             self._layout_hotkey_feedback(content_width)
             layout_appearance(content_width)
@@ -5070,6 +5107,11 @@ class SettingsWindow(tk.Toplevel):
         cancel = self._update_cancel = threading.Event()
         self._update_busy = True
         self._update_button.configure(state="disabled")
+        if downloading:
+            self._update_fraction = 0.0
+            self._update_button.grid_remove()
+            self._update_status.grid_remove()
+            self._update_progress.grid()
         self._update_cancel_button.grid()
         self._update_cancel_button.configure(state="normal")
         self._set_update_status("正在下载更新…" if downloading else "正在检查更新…")
@@ -5112,10 +5154,23 @@ class SettingsWindow(tk.Toplevel):
             updater.remove_download(self._update_download[0])
 
     def _layout_update_status(self, content_width):
-        width = content_width - self._update_button.winfo_reqwidth() - 12
-        measure = self._update_status_font.measure
         link = self._update_release_link
         link_width = link.winfo_reqwidth() + 12
+        if self._update_fraction is not None:
+            # The progress block replaces the main button without moving the release link.
+            width = max(1, content_width - link_width - self._update_cancel_button.winfo_reqwidth() - 24)
+            width = min(width, round(182 * max(1, self.winfo_fpixels("1i") / 96)))
+            height = self._update_status_font.metrics("linespace") + 7
+            actions = self._update_button.master
+            actions.grid_rowconfigure(0, minsize=max(height, self._update_button.winfo_reqheight()))
+            link.grid_configure(row=0, column=5, columnspan=1, pady=0)
+            self._update_progress.configure(width=width, height=height)
+            self._update_progress_text.configure(text=self._fit_update_status(width))
+            self._paint_update_progress()
+            return
+        self._update_button.master.grid_rowconfigure(0, minsize=0)
+        width = content_width - self._update_button.winfo_reqwidth() - 12
+        measure = self._update_status_font.measure
         # Keep the link in place as cancel, progress, and error details come and go.
         inline = width >= link_width + max(
             self._update_cancel_button.winfo_reqwidth() + 12 + measure("50%（5.0 / 10.0 MB）"),
@@ -5129,13 +5184,26 @@ class SettingsWindow(tk.Toplevel):
             width -= self._update_cancel_button.winfo_reqwidth() + 12
         if self._update_error is not None:
             width -= self._update_details.winfo_reqwidth() + 6
+        self._update_status.configure(text=self._fit_update_status(width))
+
+    def _fit_update_status(self, width):
+        measure = self._update_status_font.measure
         text = next((choice for choice in self._update_status_choices if measure(choice) <= width), "")
         if not text and measure("…") <= width:
             prefix = self._update_status_choices[-1]
             while measure(prefix + "…") > width:
                 prefix = prefix[:-1]
             text = prefix + "…"
-        self._update_status.configure(text=text)
+        return text
+
+    def _paint_update_progress(self):
+        bar = self._update_progress_bar
+        width, height = bar.winfo_width(), bar.winfo_height()
+        bar.delete("all")
+        round_rect(bar, 0, 0, width, height, min(width, height) / 2, fill="#E9EDF1", outline="")
+        filled = round(width * (self._update_fraction or 0))
+        if filled:
+            round_rect(bar, 0, 0, filled, height, min(filled, height) / 2, fill="#7D8C9D", outline="")
 
     def _set_update_status(self, text, *shorter, error=None):
         self._update_status_choices = (text, *shorter)
@@ -5174,13 +5242,21 @@ class SettingsWindow(tk.Toplevel):
             kind, value = "cancelled", "已取消更新。"
         if kind == "progress":
             done, total = value
-            percent = f"{done / total:.0%}"
+            fraction = min(1.0, max(0.0, done / total)) if total else 0.0
+            if self._update_fraction is not None:
+                self._update_fraction = fraction
+            percent = f"{fraction:.0%}"
             sizes = f"{percent}（{done / 1048576:.1f} / {total / 1048576:.1f} MB）"
-            self._set_update_status(f"正在下载 {sizes}", sizes, percent)
+            self._set_update_status(sizes, percent)
             return
         checking = self._waiting_for_update_check or self._update_state == "idle"
         self._update_busy = False
         self._waiting_for_update_check = False
+        if self._update_fraction is not None:
+            self._update_fraction = None
+            self._update_progress.grid_remove()
+            self._update_status.grid()
+            self._update_button.grid()
         self._update_cancel_button.grid_remove()
         self._update_button.configure(state="normal")
         if kind == "checked":

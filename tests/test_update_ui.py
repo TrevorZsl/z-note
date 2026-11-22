@@ -18,6 +18,8 @@ class UpdateStateTests(unittest.TestCase):
         self.window._waiting_for_update_check = False
         self.window._update_installing = False
         self.window._update_download = self.window._update_release = None
+        self.window._update_fraction = None
+        self.window._update_progress = Mock()
         self.window._update_state = "idle"
         self.window._update_button = Mock()
         self.window._update_cancel_button = Mock()
@@ -271,6 +273,16 @@ class UpdateLayoutTests(unittest.TestCase):
             self.assertGreater(link.winfo_rootx(), rightmost.winfo_rootx() + rightmost.winfo_width())
             self.assertEqual(link.winfo_rooty(), initial_link_y)
 
+        def check_progress(text):
+            self.app.root.update()
+            self.assertFalse(button.winfo_ismapped())
+            self.assertFalse(status.winfo_ismapped())
+            self.assertEqual(window._update_progress_text.cget("text"), text)
+            self.assertTrue(window._update_progress_bar.winfo_ismapped())
+            self.assertGreater(cancel.winfo_x(), window._update_progress.winfo_x() + window._update_progress.winfo_width())
+            self.assertGreater(link.winfo_x(), cancel.winfo_x() + cancel.winfo_width())
+            self.assertEqual(link.winfo_rooty(), initial_link_y)
+
         with patch.object(self.app, "_check_for_update"), \
              patch.object(main.threading, "Thread"), \
              patch.object(main.messagebox, "askyesno", return_value=False) as confirm, \
@@ -292,9 +304,16 @@ class UpdateLayoutTests(unittest.TestCase):
             self.assertEqual(button.cget("text"), "立即更新")
             check_layout("可更新至 v9.9.9")
             button.invoke()
-            check_layout("正在下载更新", cancel)
+            check_progress("正在下载更新…")
             window._receive_update(window._update_cancel, "progress", (5 * 1048576, 10 * 1048576))
-            check_layout("50%（5.0 / 10.0 MB）", cancel)
+            check_progress("50%（5.0 / 10.0 MB）")
+            self.assertEqual(window._update_fraction, 0.5)
+            cancel.invoke()
+            check_progress("正在取消…")
+            window._receive_update(window._update_cancel, "cancelled", "已取消更新。")
+            self.assertFalse(window._update_progress.winfo_ismapped())
+            check_layout("已取消更新")
+            button.invoke()
             window._receive_update(window._update_cancel, "downloaded", (Path("setup.exe"), "hash"))
             self.assertEqual(button.cget("text"), "立即安装")
             check_layout("下载校验完成，可立即安装。")
@@ -322,7 +341,8 @@ class UpdateLayoutTests(unittest.TestCase):
         with patch.object(main.threading, "Thread"):
             button.invoke()
         window._receive_update(window._update_cancel, "progress", (5 * 1048576, 10 * 1048576))
-        fixed_width = button.winfo_reqwidth() + cancel.winfo_reqwidth() + 24
+        link = window._update_release_link
+        fixed_width = link.winfo_reqwidth() + cancel.winfo_reqwidth() + 36
         fixed_width += window.winfo_width() - status.master.winfo_width()
         measure = window._update_status_font.measure
         height = window.winfo_height()
@@ -331,10 +351,11 @@ class UpdateLayoutTests(unittest.TestCase):
             window._lock_size(width, height)
             window.geometry(f"{width}x{height}")
             self.app.root.update()
-            self.assertEqual(status.cget("text"), expected)
-            self.assertLessEqual(status.winfo_x() + status.winfo_width(), status.master.winfo_width())
-            link = window._update_release_link
-            self.assertGreater(link.winfo_y(), button.winfo_y() + button.winfo_height())
+            self.assertEqual(window._update_progress_text.cget("text"), expected)
+            self.assertFalse(button.winfo_ismapped())
+            self.assertGreater(link.winfo_x(), cancel.winfo_x() + cancel.winfo_width())
+            self.assertAlmostEqual(link.winfo_y() + link.winfo_height() / 2,
+                                   cancel.winfo_y() + cancel.winfo_height() / 2, delta=1)
             self.assertEqual(link.winfo_x() + link.winfo_width(), status.master.winfo_width())
 
     def test_startup_check_uses_worker_and_remembers_result_across_settings(self):

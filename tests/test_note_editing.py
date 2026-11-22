@@ -2431,6 +2431,8 @@ class NoteEditingTests(unittest.TestCase):
                         while pending:
                             widget = pending.pop()
                             pending.extend(widget.winfo_children())
+                            if widget is settings._update_progress_text:
+                                continue  # 下载进度文字只在下载时布局。
                             if isinstance(widget, (main.tk.Label, main.tk.Checkbutton)):
                                 self.assertGreaterEqual(widget.winfo_width(), widget.winfo_reqwidth(),
                                                         str(widget.cget("text")))
@@ -2439,6 +2441,9 @@ class NoteEditingTests(unittest.TestCase):
                         body = next(w for w in settings.winfo_children()
                                     if isinstance(w, main.tk.Canvas) and w.find_all()
                                     and w.type(w.find_all()[0]) == "window")
+                        path = body.winfo_children()[0].winfo_children()[-1]
+                        self.assertTrue(path.cget("text").endswith("…"))
+                        self.assertEqual(path.winfo_pixels(path.cget("wraplength")), 0)
                         if scale == 4:
                             self.assertLess(body.yview()[1], 1)
                             body.yview_moveto(1)
