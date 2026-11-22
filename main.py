@@ -6224,8 +6224,8 @@ class SideDockTooltip(Tooltip):
 
 class DockBookmark(tk.Toplevel):
     """主入口和便签书签共用的贴边圆角窗口。"""
-    NOTE_TITLE_X = 30
-    NOTE_RIGHT_PADDING = 12
+    NOTE_TITLE_X = 24
+    NOTE_RIGHT_PADDING = 6
     NUMBER_RIGHT_PADDING = 6
     HOVER_EXTENSION = 12
 
@@ -6328,13 +6328,7 @@ class DockBookmark(tk.Toplevel):
             self.bar.create_image(19, icon_y, image=self.disclosure_icons[self.dock.expanded],
                                   tags="dock-disclosure")
         elif is_note and self._note_visible:
-            # 以当前显示的字形为准，英文下伸字母和中文可有不同中线。
-            ink_middle = text_y
-            if self.dock.label_ink_font is not None:
-                _, top, _, bottom = self.dock.label_ink_font.getbbox(text, anchor="ls")
-                ink_middle += self.dock.label_baseline_offset + (top+bottom)/2
-            dot_y = math.floor(ink_middle + 0.5)
-            self.bar.create_image(19, dot_y, image=self.dock.note_visible_dot,
+            self.bar.create_image(15, self.height / 2, image=self.dock.note_visible_dot,
                                   tags="dock-note-visible")
 
     def place_at(self, y, batch=None, *, lift=True):
@@ -6480,7 +6474,7 @@ class DockBookmark(tk.Toplevel):
         anchor_x = user32.GetSystemMetrics(0) - self.base_width - self.HOVER_EXTENSION - 6
         NoteWindow._show_context_menu(
             self.dock, anchor_x, self.winfo_rooty() + self.winfo_height() // 2,
-            [("删除", delete)], compact=True, on_right_click=right_click_again)
+            [("移到回收站", delete)], compact=True, on_right_click=right_click_again)
 
         # 菜单独占鼠标会让书签收到“离开”，这里保持左伸，菜单关闭后再按鼠标位置决定是否缩回。
         menu = getattr(self.dock, "_context_menu", None)
@@ -6524,7 +6518,7 @@ class DockHideAllButton(DockBookmark):
         super().__init__(dock, dock.bookmark_height)
         self.base_width = self.WIDTH
         # 复用书签的悬停提示：标题按“已截断”处理，停留后在左侧显示中文说明。
-        self.full_label, self._label_truncated = "收纳所有", True
+        self.full_label, self._label_truncated = "隐藏所有便签", True
         # 深色图标与灰字书签区分开。
         self.icon = load_icon(self.bar, "panel-right-close", 20, active=True)
 
@@ -6596,12 +6590,6 @@ class SideDock(DockBookmark):
 
     def set_label_font(self):
         self.font.configure(family=self.app.note_font_family())
-        choice = self.app.data["settings"]["fontFamily"]
-        self.label_ink_font = None
-        if choice in FONT_FAMILIES:
-            pixels = round(self.app.root.winfo_fpixels(f"{self.font.cget('size')}p"))
-            self.label_ink_font = ImageFont.truetype(str(FONT_DIR / f"{choice}.ttf"), pixels)
-        self.label_baseline_offset = self.font.metrics("ascent") - self.font.metrics("linespace")//2
 
     @staticmethod
     def work_area():
@@ -7925,7 +7913,7 @@ class App:
             pystray.Menu.SEPARATOR,
             pystray.MenuItem("收纳模式", lambda: self.q.put("toggle_side_dock"),
                              checked=lambda item: self.data["settings"].get("sideDock", True)),
-            pystray.MenuItem("回收站...", lambda: self.q.put("history")),
+            pystray.MenuItem("清除记录与回收站…", lambda: self.q.put("history")),
             pystray.MenuItem(lambda _item: "设置（有更新）…" if self._available_update else "设置…",
                              lambda: self.q.put("settings")),
             pystray.MenuItem("退出", lambda: self.q.put("quit")),

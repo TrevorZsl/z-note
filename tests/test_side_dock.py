@@ -483,6 +483,17 @@ class SideDockTests(unittest.TestCase):
             self.wait(0.15)
             self.assertEqual((bookmark.winfo_x(), bookmark.winfo_width()), original)
 
+    def test_visible_dot_stays_centered_when_bookmark_label_changes(self):
+        self.click_bar()
+        bookmark = self.dock.bookmarks["0"]
+        for title in ("本周发布", "Project grocery", "周报 Project"):
+            with self.subTest(title=title):
+                bookmark.update_label(title, visible=True)
+                self.assertEqual(bookmark.bar.coords("dock-note-visible"), [15, bookmark.height / 2])
+        bookmark._enter()
+        self.wait(0.15)
+        self.assertEqual(bookmark.bar.coords("dock-note-visible"), [15, bookmark.height / 2])
+
     def test_refresh_is_coalesced(self):
         self.click_bar()
         with patch.object(self.dock, "refresh", wraps=self.dock.refresh) as refresh:
@@ -683,7 +694,7 @@ class SideDockTests(unittest.TestCase):
         with patch.object(main.NoteWindow, "_show_context_menu",
                           lambda _w, _x, _y, actions, **_kw: calls.append(actions)):
             bookmark._show_delete_menu(event)
-        self.assertEqual([label for label, _ in calls[0]], ["删除"])
+        self.assertEqual([label for label, _ in calls[0]], ["移到回收站"])
         calls[0][0][1]()
         self.root.update()
         self.assertNotIn("1", self.app.notes)
@@ -1440,7 +1451,7 @@ class SideDockTests(unittest.TestCase):
         popup = main.Tooltip._cur
         canvas, = popup.winfo_children()
         label = next(item for item in canvas.find_all() if canvas.type(item) == "text")
-        self.assertEqual(canvas.itemcget(label, "text"), "收纳所有")
+        self.assertEqual(canvas.itemcget(label, "text"), "隐藏所有便签")
         self.assertLessEqual(popup.winfo_x()+popup.winfo_width(), button.winfo_rootx())
         button.bar.event_generate("<ButtonPress-1>", x=20, y=15)
         self.root.update()
