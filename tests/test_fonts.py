@@ -116,8 +116,13 @@ class FontTests(unittest.TestCase):
         popup = field._popup
         self.assertIsNotNone(popup)
         self.assertEqual(popup.grab_current(), popup)
+        canvas = popup.winfo_children()[0]
+        option_fonts = [canvas.itemcget(item, "font") for item in canvas.find_all()
+                        if canvas.type(item) == "text"]
+        self.assertEqual(option_fonts, [str(field._font)] * len(main.FONT_CHOICES))
         popup.focus_force()
         popup.event_generate("<KeyPress-Down>")
+        self.assertEqual(self.app.data["settings"]["fontFamily"], "classic")
         popup.event_generate("<KeyPress-Return>")
         self.app.root.update()
         self.assertEqual(self.app.data["settings"]["fontFamily"], "yahei")
@@ -129,7 +134,7 @@ class FontTests(unittest.TestCase):
         popup = field._popup
         canvas = popup.winfo_children()[0]
         # Click the third visible option, rather than invoking its callback.
-        row_height = max(30, field._font.metrics("linespace") + 14)
+        row_height = (canvas.winfo_height() - 12) // len(main.FONT_CHOICES)
         canvas.event_generate("<Button-1>", x=20, y=6 + 2 * row_height + row_height // 2)
         self.app.root.update()
         self.assertEqual(self.app.data["settings"]["fontFamily"], "simsun")
@@ -192,12 +197,14 @@ class FontTests(unittest.TestCase):
         self.app.root.update()
         field = win.font_selector
         opacity = self.app.opacity_scale
-        sizes = [w for w in opacity.master.master.winfo_children()
-                 for w in w.winfo_children() if isinstance(w, main.SettingsScale) and w is not opacity]
+        sizes = [w for line in opacity.master.master.master.winfo_children()
+                 for row in line.winfo_children() for w in row.winfo_children()
+                 if isinstance(w, main.SettingsScale) and w is not opacity]
+        self.assertEqual(len(sizes), 1)
         field._open()
         self.app.root.update()
         canvas = field._popup.winfo_children()[0]
-        row_height = max(30, field._font.metrics("linespace") + 14)
+        row_height = (canvas.winfo_height() - 12) // len(main.FONT_CHOICES)
         canvas.event_generate("<Button-1>", x=20, y=6 + row_height + row_height // 2)
         self.app.root.update()
         self.assertEqual(self.app.data["settings"]["fontFamily"], "yahei")

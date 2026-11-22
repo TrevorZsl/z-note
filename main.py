@@ -4489,18 +4489,23 @@ class SmoothWheel:
 
 
 class SettingsScale(tk.Canvas):
-    def __init__(self, master, minimum, maximum, step, command):
-        super().__init__(master, width=180, height=42, bg=NOTE_BG,
+    TRACK_INSET = 12
+
+    def __init__(self, master, minimum, maximum, step, command, *, reverse=False):
+        super().__init__(master, width=180, height=36, bg=NOTE_BG,
                          highlightthickness=0, bd=0, cursor="hand2", takefocus=1)
         self.minimum, self.maximum, self.step = minimum, maximum, step
+        self.reverse = reverse
         self.command, self.value = command, minimum
         self._pressed = False
         self.bind("<Button-1>", self._press)
         # 只跟随在滑块上按下开始的拖动；字体弹窗等在按下时关闭，余下的拖动不能改到滑块。
         self.bind("<B1-Motion>", lambda e: self._pick(e) if self._pressed else "break")
         self.bind("<ButtonRelease-1>", lambda _e: setattr(self, "_pressed", False))
-        self.bind("<Left>", lambda _e: self.set(self.value - self.step))
-        self.bind("<Right>", lambda _e: self.set(self.value + self.step))
+        direction = -1 if reverse else 1
+        self.bind("<Left>", lambda _e: self.set(self.value - direction * self.step))
+        self.bind("<Right>", lambda _e: self.set(self.value + direction * self.step))
+        self.bind("<Configure>", lambda _e: self._draw())
         self.bind("<FocusIn>", lambda _e: self._draw())
         self.bind("<FocusOut>", lambda _e: self._draw())
         self._draw()
@@ -4522,38 +4527,45 @@ class SettingsScale(tk.Canvas):
 
     def _pick(self, event):
         self.focus_set()
-        self.set(self.minimum + (event.x - 12) * (self.maximum - self.minimum) / 156)
+        span = max(1, self.winfo_width() - 2 * self.TRACK_INSET)
+        fraction = (event.x - self.TRACK_INSET) / span
+        self.set(self.minimum + (1 - fraction if self.reverse else fraction)
+                 * (self.maximum - self.minimum))
         return "break"
 
     def _draw(self):
         # 超采样绘制刻度和握柄，保持圆角与线条平滑。
         scale = 4
-        img = Image.new("RGBA", (180 * scale, 42 * scale), NOTE_BG)
+        width = max(self.winfo_width(), 2 * self.TRACK_INSET + 1)
+        height = max(self.winfo_height(), 36)
+        left, right, middle = self.TRACK_INSET, width - self.TRACK_INSET, height / 2
+        img = Image.new("RGBA", (width * scale, height * scale), NOTE_BG)
         draw = ImageDraw.Draw(img)
         def box(bounds, radius, **kw):
             draw.rounded_rectangle(tuple(int(v * scale) for v in bounds),
                                    radius=radius * scale, **kw)
-        x = 12 + 156 * (self.value - self.minimum) / (self.maximum - self.minimum)
-        box((12, 11, 168, 17), 3, fill="#E9EDF1")
-        if x > 12:
-            box((12, 11, x, 17), 3, fill="#7D8C9D")
+        fraction = (self.value - self.minimum) / (self.maximum - self.minimum)
+        x = left + (right - left) * (1 - fraction if self.reverse else fraction)
+        box((left, middle - 3, right, middle + 3), 3, fill="#E9EDF1")
+        if x > left:
+            box((left, middle - 3, x, middle + 3), 3, fill="#7D8C9D")
         count = (self.maximum - self.minimum) // self.step
         for index in range(count + 1):
-            tick_x = (12 + 156 * index / count) * scale
-            draw.line((tick_x, 31 * scale, tick_x, 35 * scale),
-                      fill="#8E9CAC" if 12 + 156 * index / count <= x else "#D8DEE5",
+            tick_x = left + (right - left) * index / count
+            draw.line((tick_x * scale, (middle + 12) * scale, tick_x * scale, (middle + 15) * scale),
+                      fill="#8E9CAC" if tick_x <= x else "#D8DEE5",
                       width=scale)
         # 纯白圆形握柄，仍按刻度一格一格吸附。
-        box((x - 9, 6, x + 9, 24), 9, fill="#E6EAF0")
-        box((x - 9, 5, x + 9, 23), 9, fill="#FFFFFF",
+        box((x - 9, middle - 8, x + 9, middle + 10), 9, fill="#E6EAF0")
+        box((x - 9, middle - 9, x + 9, middle + 9), 9, fill="#FFFFFF",
             outline="#64748B" if self.focus_get() == self else "#9CA9B8", width=scale)
-        self._image = ImageTk.PhotoImage(img.resize((180, 42), Image.Resampling.LANCZOS), master=self)
+        self._image = ImageTk.PhotoImage(img.resize((width, height), Image.Resampling.LANCZOS), master=self)
         self.delete("all")
         self.create_image(0, 0, image=self._image, anchor="nw")
 
 
 class FontSelector(tk.Canvas):
-    """Rounded font field and popup; no native menu indicator."""
+    """Rounded font field and menu rendered in the current interface font."""
 
     def __init__(self, parent, variable, command):
         self.variable, self.command = variable, command
@@ -4572,7 +4584,7 @@ class FontSelector(tk.Canvas):
 
     def _fit(self):
         """按当前字体量出能放下所有选项的尺寸；切换字体后重新调用。"""
-        self.configure(width=max(self._font.measure(label) for label in FONT_CHOICES.values()) + 32,
+        self.configure(width=max(self._font.measure(label) for label in FONT_CHOICES.values()) + 44,
                        height=self._font.metrics("linespace") + 16)
 
     def _draw(self):
@@ -4587,8 +4599,15 @@ class FontSelector(tk.Canvas):
         self._image = ImageTk.PhotoImage(image.resize((width, height), Image.Resampling.LANCZOS), master=self)
         self.delete("all")
         self.create_image(0, 0, image=self._image, anchor="nw")
-        self.create_text(16, height / 2, text=self.variable.get(), font=self._font,
+        label = self.variable.get()
+        if self._font.measure(label) > width - 42:
+            while label and self._font.measure(label + "…") > width - 42:
+                label = label[:-1]
+            label = label + "…"
+        self.create_text(12, height / 2, text=label, font=self._font,
                          fill="#2B2F36", anchor="w")
+        self.create_line(width - 22, height / 2 - 2, width - 17, height / 2 + 3,
+                         width - 12, height / 2 - 2, fill=INK, width=1.5)
 
     def _close(self, _event=None):
         popup, self._popup = self._popup, None
@@ -4613,19 +4632,27 @@ class FontSelector(tk.Canvas):
         popup.attributes("-topmost", True)
         _round_popup(popup)
         labels = list(FONT_CHOICES.values())
+        work = SettingsWindow._work_area(self.winfo_toplevel())
         row_height = max(30, self._font.metrics("linespace") + 14)
-        width, height = self.winfo_width(), 12 + row_height * len(labels)
+        width = min(work.right - work.left, max(self.winfo_width(),
+                    self.winfo_reqwidth()))
+        height = 12 + row_height * len(labels)
         canvas = tk.Canvas(popup, width=width, height=height, bg=NOTE_BG,
                            highlightthickness=0, bd=0)
         canvas.pack()
         highlights = []
+        current = labels.index(self.variable.get())
         for index, label in enumerate(labels):
             top = 6 + index * row_height
             highlights.append(round_rect(canvas, 5, top, width - 5, top + row_height, 7,
                                           fill="#F2F3F5", outline="", state="hidden"))
-            canvas.create_text(16, top + row_height / 2, text=label, font=self._font,
+            middle = top + row_height / 2
+            canvas.create_text(16, middle, text=label, font=self._font,
                                fill="#2B2F36", anchor="w")
-        selected = labels.index(self.variable.get())
+            if index == current:
+                canvas.create_line(width - 26, middle, width - 22, middle + 4,
+                                   width - 15, middle - 4, fill=INK, width=2)
+        selected = current
 
         def select(index):
             nonlocal selected
@@ -4637,6 +4664,7 @@ class FontSelector(tk.Canvas):
             self._close()
             self.variable.set(labels[index])
             self.command(labels[index])
+            self.focus_set()
 
         def click(event):
             x, y = event.x_root - popup.winfo_rootx(), event.y_root - popup.winfo_rooty()
@@ -4659,13 +4687,13 @@ class FontSelector(tk.Canvas):
                 activate(selected)
             elif event.keysym in ("Escape", "Tab"):
                 self._close()
+                self.focus_set()
             return "break"
 
         canvas.bind("<Motion>", motion)
         popup.bind("<Button-1>", click)
         popup.bind("<KeyPress>", key)
         popup.bind("<FocusOut>", lambda _e: self._close())
-        work = SettingsWindow._work_area(self.winfo_toplevel())
         x = max(work.left, min(self.winfo_rootx(), work.right - width))
         y = self.winfo_rooty() + self.winfo_height() + 4
         if y + height > work.bottom:
@@ -4695,8 +4723,7 @@ class SettingsWindow(tk.Toplevel):
         f = tk.Frame(body, bg=NOTE_BG, padx=4, pady=2)
         content = body.create_window(0, 0, window=f, anchor="nw")
 
-        header = tk.Frame(f, bg=NOTE_BG)
-        header.pack(fill="x", pady=(0, 12))
+        header = tk.Frame(self, bg=NOTE_BG, padx=4)
         title = tk.Label(header, text="设置", bg=NOTE_BG, fg="#1F2328",
                          font=(UI_FONT, 12, "bold"), cursor="fleur")
         title.pack(side="left")
@@ -4750,36 +4777,35 @@ class SettingsWindow(tk.Toplevel):
         startup.pack(anchor="w", pady=4)
 
         section("外观")
-        font_row = tk.Frame(f, bg=NOTE_BG)
-        font_row.pack(fill="x", pady=(0, 8))
-        tk.Label(font_row, text="字体", bg=NOTE_BG, fg="#2B2F36",
-                 font=(UI_FONT, 10)).pack(side="left")
+        appearance = []
+
+        def appearance_row(text):
+            row = tk.Frame(f, bg=NOTE_BG)
+            row.pack(fill="x", pady=(0, 4))
+            label = tk.Label(row, text=text, bg=NOTE_BG, fg="#2B2F36",
+                             font=(UI_FONT, 10), anchor="w", justify="left")
+            controls = tk.Frame(row, bg=NOTE_BG)
+            appearance.append((row, label, controls))
+            return controls
+
+        font_row = appearance_row("字体")
         self.font_choice = tk.StringVar(master=self, value=FONT_CHOICES[app.data["settings"]["fontFamily"]])
         self.font_selector = FontSelector(font_row, self.font_choice, self._font_family)
-        self.font_selector.pack(side="right")
-        row = tk.Frame(f, bg=NOTE_BG); row.pack(fill="x", pady=(0, 4))
-        tk.Label(row, text="透明度", bg=NOTE_BG, fg="#2B2F36",
-                 font=(UI_FONT, 10)).pack(side="left")
+        row = appearance_row("不透明度")
         opacity_value = tk.Label(row, bg=NOTE_BG, fg=QUIET,
-                                 font=(UI_FONT, 9), width=4, anchor="center")
-        opacity_value.pack(side="right")
+                                 font=(UI_FONT, 9), anchor="e", padx=0, bd=0)
         def update_opacity(v):
-            opacity_value.config(text=f"{v}%")
+            opacity_value.config(text=f"{100 - v}%")
             self._op(v)
-        s = SettingsScale(row, 0, 50, 10, update_opacity)
+        s = SettingsScale(row, 0, 50, 10, update_opacity, reverse=True)
         app.opacity_scale = s
         s.set(round((1 - app.data["settings"]["opacity"]) * 100))
-        opacity_value.config(text=f"{s.get()}%")
+        opacity_value.config(text=f"{100 - s.get()}%")
         if app.data["settings"]["opacity"] != (100 - s.get()) / 100:
             self._op(s.get())
-        s.pack(side="right")
-
-        row3 = tk.Frame(f, bg=NOTE_BG); row3.pack(fill="x", pady=(4, 0))
-        tk.Label(row3, text="字号", bg=NOTE_BG, fg="#2B2F36",
-                 font=(UI_FONT, 10)).pack(side="left")
+        row3 = appearance_row("字号")
         font_value = tk.Label(row3, bg=NOTE_BG, fg=QUIET,
-                              font=(UI_FONT, 9), width=4, anchor="center")
-        font_value.pack(side="right")
+                              font=(UI_FONT, 9), anchor="e", padx=0, bd=0)
         def update_font(v):
             font_value.config(text=str(v))
             self._font(v)
@@ -4788,7 +4814,33 @@ class SettingsWindow(tk.Toplevel):
         font_value.config(text=str(s2.get()))
         if app.data["settings"]["fontSize"] != s2.get():
             self._font(s2.get())
-        s2.pack(side="right")
+        inset = SettingsScale.TRACK_INSET
+        self.font_selector.grid(row=0, column=0, sticky="ew", padx=inset)
+        for controls, scale_widget, value in ((row, s, opacity_value), (row3, s2, font_value)):
+            scale_widget.grid(row=0, column=0, sticky="ew")
+            value.grid(row=0, column=1, sticky="ew", padx=(4, 0))
+
+        def layout_appearance(content_width):
+            value_width = int(self.tk.call("font", "measure", opacity_value.cget("font"), "100%")) + 8
+            rail_width = max(180, self.font_selector.winfo_reqwidth() + 2 * inset)
+            label_width = max(int(self.tk.call("font", "measure", label.cget("font"), label.cget("text")))
+                              for _, label, _ in appearance)
+            available = max(1, content_width - 8)
+            desired = rail_width + value_width
+            stacked = label_width + 16 + desired > available
+            controls_width = min(available, desired)
+            common_height = max(36, self.font_selector.winfo_reqheight())
+            for appearance_line, label, controls in appearance:
+                appearance_line.columnconfigure(0, weight=1)
+                appearance_line.columnconfigure(1, minsize=0 if stacked else controls_width)
+                label.configure(wraplength=available)
+                label.grid(row=0, column=0, sticky="w", pady=(0, 4) if stacked else 0)
+                controls.grid(row=1 if stacked else 0, column=0 if stacked else 1, sticky="e")
+                controls.columnconfigure(0, minsize=max(1, controls_width - value_width), weight=1)
+                controls.columnconfigure(1, minsize=value_width)
+                controls.rowconfigure(0, minsize=common_height)
+                controls.configure(width=controls_width, height=common_height)
+                controls.grid_propagate(False)
 
         hotkey_heading = section("快捷键")
         reset_font = tkfont.Font(root=self, family=UI_FONT, size=9)
@@ -4842,14 +4894,21 @@ class SettingsWindow(tk.Toplevel):
             entry.bind("<FocusIn>", lambda _e, action=action:
                        setattr(app, "_hotkey_capture", (self, action)), add="+")
             entry.bind("<FocusOut>", lambda _e: setattr(app, "_hotkey_capture", None), add="+")
+            entry.bind("<FocusIn>", lambda _e, action=action:
+                       self._show_hotkey_feedback("请按组合键，Esc 取消。", action, prompt=True), add="+")
+            entry.bind("<FocusOut>", lambda _e, action=action:
+                       self._clear_hotkey_prompt(action), add="+")
             self.hotkey_entries[action] = entry
             self._hotkey_borders.append(border)
             hotkey_rows.append((hotkey_row, label, border))
-        hotkey_hint = tk.Label(f, text="点击方框后按下组合键，自动保存。Esc 取消。",
+        hotkey_hint = tk.Label(f, text="点快捷键框修改。",
                               bg=NOTE_BG, fg=QUIET, font=(UI_FONT, 9), justify="left",
                               anchor="w")
         self._hotkey_hint = hotkey_hint
-        hotkey_hint.pack(fill="x", pady=(8, 0))
+        self._hotkey_heading = hotkey_heading
+        self._feedback_action = None
+        self._feedback_prompt = False
+        hotkey_hint.pack(fill="x", after=hotkey_heading)
         self.bind("<Destroy>", lambda e: e.widget == self and setattr(app, "_hotkey_capture", None))
         update_heading = section("关于与更新")
         tk.Label(update_heading, text=f"z-note {APP_VERSION}", bg=NOTE_BG, fg=QUIET,
@@ -4932,20 +4991,16 @@ class SettingsWindow(tk.Toplevel):
         content_width = max(1, width - 2 * RADIUS - scrollbar.winfo_reqwidth() - 4)
         # 文本按实际可用宽度换行，窗口高度在换行完成后再计算。
         startup.configure(wraplength=max(1, content_width - self._check_images[False].width() - 16))
-        hotkey_hint.configure(wraplength=max(1, content_width - 16))
         path.configure(wraplength=max(1, content_width - 16))
         layout_hotkeys(content_width)
+        self._layout_hotkey_feedback(content_width)
         body.itemconfigure(content, width=content_width)
-        for appearance_row in (font_row, row, row3):
-            label = appearance_row.winfo_children()[0]
-            label.configure(wraplength=max(1, content_width - 16), justify="left")
-            if appearance_row.winfo_reqwidth() > content_width - 8:
-                label.pack_configure(side="top", anchor="w")
+        layout_appearance(content_width)
         self._layout_update_status(content_width - 2 * f.winfo_pixels(f.cget("padx")))
         self.update_idletasks()
         content_height = f.winfo_reqheight()
         bottom_padding = 10
-        height = min(content_height + RADIUS + bottom_padding, available_h)
+        height = min(content_height + RADIUS + header.winfo_reqheight() + 10 + bottom_padding, available_h)
         body.configure(yscrollcommand=scrollbar.set)
         self._smooth_wheel = SmoothWheel(body)
         self.bind("<MouseWheel>", lambda e: self._smooth_wheel.wheel(e.delta))
@@ -4956,27 +5011,24 @@ class SettingsWindow(tk.Toplevel):
             if event.widget != self:
                 return
             w, h = event.width, event.height
-            viewport_height = max(1, h - RADIUS - bottom_padding)
+            body_top = RADIUS + header.winfo_reqheight() + 10
+            viewport_height = max(1, h - body_top - bottom_padding)
             # Reserve scrollbar space so wrapping does not oscillate at the overflow boundary.
             content_width = max(1, w - 2 * RADIUS - scrollbar.winfo_reqwidth() - 4)
-            body.place(x=RADIUS, y=RADIUS, width=content_width, height=viewport_height)
+            header.place(x=RADIUS, y=RADIUS, width=content_width)
+            body.place(x=RADIUS, y=body_top, width=content_width, height=viewport_height)
             body.itemconfigure(content, width=content_width)
             startup.configure(wraplength=max(1, content_width - self._check_images[False].width() - 16))
-            hotkey_hint.configure(wraplength=max(1, content_width - 16))
             path.configure(wraplength=max(1, content_width - 16))
             layout_hotkeys(content_width)
-            for appearance_row in (row, row3):
-                label = appearance_row.winfo_children()[0]
-                label.configure(wraplength=max(1, content_width - 16), justify="left")
-                controls_width = sum(c.winfo_reqwidth() for c in appearance_row.winfo_children()[1:])
-                label.pack_configure(side="top" if controls_width + label.winfo_reqwidth() > content_width - 8 else "left",
-                                     anchor="w")
+            self._layout_hotkey_feedback(content_width)
+            layout_appearance(content_width)
             cv.coords(border, 0, 0, w - 1, h - 1)
 
         def update_region(_event=None):
             body.configure(scrollregion=(0, 0, body.winfo_width(), f.winfo_reqheight()))
             if f.winfo_reqheight() > body.winfo_height():
-                scrollbar.place(x=self.winfo_width() - RADIUS - scrollbar.winfo_reqwidth(), y=RADIUS,
+                scrollbar.place(x=self.winfo_width() - RADIUS - scrollbar.winfo_reqwidth(), y=body.winfo_y(),
                                 width=scrollbar.winfo_reqwidth(), height=body.winfo_height())
             else:
                 scrollbar.place_forget()
@@ -5193,7 +5245,8 @@ class SettingsWindow(tk.Toplevel):
             self._drag = None
             return
         if (event.widget in (self._close_button, self._minimize_button, *self._hotkey_borders) or
-                isinstance(event.widget, (SettingsScale, VerticalThumb, tk.Checkbutton, tk.Button, tk.Scrollbar, tk.Entry))):
+                isinstance(event.widget, (SettingsScale, FontSelector, VerticalThumb, tk.Checkbutton, tk.Button,
+                                          tk.Scrollbar, tk.Entry))):
             self._drag = None
             return
         self._drag = (event.x_root - self.winfo_x(), event.y_root - self.winfo_y())
@@ -5210,6 +5263,8 @@ class SettingsWindow(tk.Toplevel):
 
     def _capture_hotkey(self, event, action):
         if event.keysym == "Escape":
+            self._hotkey_hint.pack_forget()
+            self._feedback_prompt = False
             self.focus_set()
             return "break"
         key = next((name for name, code in HOTKEY_KEYS.items() if code == event.keycode), None)
@@ -5220,22 +5275,45 @@ class SettingsWindow(tk.Toplevel):
         self._apply_hotkey(action, "+".join(parts + [key]))
         return "break"
 
+    def _layout_hotkey_feedback(self, content_width):
+        available = max(1, content_width - 8)
+        inset = 0
+        if self._feedback_action is not None:
+            border = self.hotkey_entries[self._feedback_action].master
+            inset = max(0, available - border.winfo_reqwidth())
+        self._hotkey_hint.configure(wraplength=max(1, available - inset))
+        if self._hotkey_hint.winfo_manager():
+            self._hotkey_hint.pack_configure(padx=(inset, 0))
+
+    def _show_hotkey_feedback(self, text, action=None, *, error=False, prompt=False):
+        self._feedback_action = action
+        self._feedback_prompt = prompt
+        target = self._hotkey_heading if action is None else self.hotkey_entries[action].master.master
+        self._hotkey_hint.configure(text=text, fg="#A44A42" if error else QUIET)
+        self._hotkey_hint.pack(fill="x", after=target)
+        self._layout_hotkey_feedback(target.master.winfo_width())
+
+    def _clear_hotkey_prompt(self, action):
+        if self._feedback_prompt and self._feedback_action == action:
+            self._hotkey_hint.pack_forget()
+            self._feedback_prompt = False
+
     def _apply_hotkey(self, action, value):
         error = self.app.update_hotkey(action, value)
         if error:
-            self._hotkey_hint.configure(text=error, fg="#A44A42")
+            self._show_hotkey_feedback(error, action, error=True)
         else:
             self._hotkey_vars[action].set(value)
-            self._hotkey_hint.configure(text="快捷键已保存并生效。", fg=QUIET)
+            self._show_hotkey_feedback("快捷键已保存并生效。", action)
 
     def _reset_hotkeys(self):
         error = self.app.reset_hotkeys()
         if error:
-            self._hotkey_hint.configure(text=error, fg="#A44A42")
+            self._show_hotkey_feedback(error, error=True)
         else:
             for action in HOTKEY_LABELS:
                 self._hotkey_vars[action].set(self.app.hotkey_text(action))
-            self._hotkey_hint.configure(text="快捷键已恢复默认值。", fg=QUIET)
+            self._show_hotkey_feedback("快捷键已恢复默认值。")
 
     def _toggle_boot(self):
         settings = self.app.data["settings"]

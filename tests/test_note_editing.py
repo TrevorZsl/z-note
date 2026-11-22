@@ -2177,12 +2177,11 @@ class NoteEditingTests(unittest.TestCase):
         self.app.root.update()
         scale = self.app.opacity_scale
         scale.event_generate("<Button-1>", x=8, y=14)
-        self.assertEqual(scale.get(), 0)
+        self.assertEqual(self.note.d["opacity"], 0.5)
         scale.focus_force()
         self.app.root.update()
         scale.event_generate("<Right>")
-        self.assertEqual(scale.get(), 10)
-        self.assertEqual(self.note.d["opacity"], 0.9)
+        self.assertEqual(self.note.d["opacity"], 0.6)
         x, y = settings.winfo_x(), settings.winfo_y()
         settings._drag_press(type("Event", (), {"widget": settings, "x_root": x + 40, "y_root": y + 20})())
         settings._drag_move(type("Event", (), {"x_root": x + 55, "y_root": y + 30})())
@@ -2201,9 +2200,9 @@ class NoteEditingTests(unittest.TestCase):
         opacity = self.app.opacity_scale
         font = next(scale for scale in scales if scale != opacity)
         self.assertEqual(settings._check_images[False].width(), 22)
-        opacity_value = opacity.master.winfo_children()[1]
-        font_value = font.master.winfo_children()[1]
-        self.assertEqual(opacity_value.cget("text"), "0%")
+        opacity_value = next(w for w in opacity.master.winfo_children() if isinstance(w, main.tk.Label))
+        font_value = next(w for w in font.master.winfo_children() if isinstance(w, main.tk.Label))
+        self.assertEqual(opacity_value.cget("text"), "100%")
         self.assertEqual(opacity_value.winfo_rootx() + opacity_value.winfo_width(),
                          font_value.winfo_rootx() + font_value.winfo_width())
         for value, scale in ((opacity_value, opacity), (font_value, font)):
@@ -2212,10 +2211,10 @@ class NoteEditingTests(unittest.TestCase):
         # 拖动须从滑块上按下开始。
         opacity.event_generate("<Button-1>", x=0, y=14)
         font.event_generate("<Button-1>", x=0, y=14)
-        for x in range(0, 181):
-            opacity.event_generate("<B1-Motion>", x=x, y=14)
+        for step in range(181):
+            opacity.event_generate("<B1-Motion>", x=round(step * opacity.winfo_width() / 180), y=14)
             self.assertIn(opacity.get(), range(0, 51, 10))
-            font.event_generate("<B1-Motion>", x=x, y=14)
+            font.event_generate("<B1-Motion>", x=round(step * font.winfo_width() / 180), y=14)
             self.assertIn(font.get(), range(10, 16))
         self.assertEqual(self.app.data["settings"]["fontSize"], 15)
         self.assertEqual((opacity.maximum - opacity.minimum) // opacity.step,
@@ -2248,10 +2247,10 @@ class NoteEditingTests(unittest.TestCase):
         x, y = settings.winfo_x(), settings.winfo_y()
         scale = self.app.opacity_scale
         scale.event_generate("<Button-1>", x=12, y=14)
-        scale.event_generate("<B1-Motion>", x=168, y=14)
+        scale.event_generate("<B1-Motion>", x=scale.winfo_width() - scale.TRACK_INSET, y=14)
         self.app.root.update()
         self.assertEqual((settings.winfo_x(), settings.winfo_y()), (x, y))
-        self.assertEqual(scale.get(), 50)
+        self.assertEqual(self.note.d["opacity"], 1.0)
         settings.destroy()
 
     def test_hotkey_capture_updates_box_and_esc_does_not_close_settings(self):
@@ -3316,6 +3315,9 @@ class NoteEditingTests(unittest.TestCase):
         thumb.event_generate("<ButtonRelease-1>", x=4, y=thumb.winfo_height()-6)
         self.app.root.update()
         self.assertGreater(body.yview()[0], 0)
+        self.assertGreaterEqual(win._close_button.winfo_rooty(), win.winfo_rooty())
+        self.assertLess(win._close_button.winfo_rooty() + win._close_button.winfo_height(),
+                        body.winfo_rooty())
         self.assertEqual((win.winfo_x(), win.winfo_y()), position)
         self.assertIsNone(win._resize)
         self.assertIsNone(thumb._drag_offset)
