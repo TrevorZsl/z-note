@@ -79,7 +79,8 @@ jobs:
           path: |
             dist/z-note-setup-${{ env.RELEASE_VERSION }}.exe
             dist/SHA256SUMS
-          retention-days: 7
+          # Artifact 仅用于同次运行的两个下游任务；保留 1 天控制存储配额，更晚的 Gitee 补传需重新构建。
+          retention-days: 1
           if-no-files-found: error
 
   github-draft:
