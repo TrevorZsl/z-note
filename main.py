@@ -940,6 +940,9 @@ class NoteEditor:
                             font=win.app.base_font, insertbackground="#2B2F36",
                             insertwidth=self.INSERT_WIDTH, cursor="xterm")
         self.text.place(x=0, y=0, relwidth=1)
+        self._punctuation_probe = tk.Text(self.app.root, wrap="char", padx=self.text.cget("padx"),
+                                          bd=0, highlightthickness=0, takefocus=False)
+        self._punctuation_probe.place(x=-10000, y=0, width=1, height=1)
         self.scroll_thumb = VerticalThumb(win, self.body, self._bg, auto_hide=True)
         self._make_check_images()
         self.text.tag_config("done", font=self.done_font)  # 只加删除线，不改字色
@@ -956,6 +959,8 @@ class NoteEditor:
         self._pending_removal = None  # 删整行前记下的旧布局，由下一次 render 播放收起
         self._removal = None
         self._removal_tags = set()  # 已配置的收起间距 tag；重配或删除会让 Tk 重测全文
+        self._punctuation_width = 0
+        self._punctuation_rows = None  # None 表示栏宽变化或重建正文，需要检查所有行。
         self._document_height = 0
         self._content_height = 1
         self._chunk_start = 0
@@ -1101,12 +1106,18 @@ class NoteEditor:
             self.win.after_cancel(self._strike_job)
             self._strike_job = None
         self.scroll_thumb.destroy()
+        self._punctuation_probe.destroy()
         self.body.destroy()
 
     def _body_configured(self, event):
         self._cancel_row_drag()
         changed = event.width != getattr(self, "_body_width", None)
         self._body_width = event.width
+        if changed and self.win._resizing and self._punctuation_width:
+            # 在宽度首次变化时撤下显示边距，后续拉伸帧直接走 Tk 原有布局。
+            self._clear_punctuation_margins(self.text)
+            self._punctuation_width = 0
+            self._punctuation_rows = None
         previous_x = getattr(self, "_body_x", None)
         self._body_x = event.x
         if previous_x is not None and previous_x != event.x:
@@ -1289,7 +1300,12 @@ class NoteEditor:
                     measure.tag_add("drag_margin", "1.0", "end")
                     if line["type"] == "todo":
                         measure.tag_add("todo_indent", "1.0", "end")
+                        if line["checked"]:
+                            measure.tag_configure("done", font=editor.done_font)
+                            measure.tag_add("done", f"1.{editor._prefix_len(line)}", "1.end")
                     measure.update_idletasks()
+                    editor._wrap_punctuation(measure, [line])
+                    measure.count("1.0", "end", "update", "ypixels")
                     drag["floating_rows"][editor] = editor._measure_drag_rows(measure)[0]
                 drag["float"] = tk.Canvas(self.win, bg=self._bg, bd=0, highlightthickness=0)
             self.body.update_idletasks()
@@ -1951,6 +1967,102 @@ class NoteEditor:
             self._selection_corner_spares.append(corner)
         del self._selection_corners[used:]
 
+    @staticmethod
+    def _clear_punctuation_margins(text, rows=None):
+        tags = {tag for tag in text.tag_names() if tag.startswith("punctuation_margin_")}
+        ranges = None if rows is None else [(f"{row}.0", f"{row + 1}.0") for row in rows]
+        for tag in tags:
+            remove = (text.tag_ranges(tag) if ranges is None else
+                      [index for first, end in ranges if text.tag_nextrange(tag, first, end)
+                       for index in (first, end)])
+            if remove:
+                text.tk.call(text, "tag", "remove", tag, *remove)
+        return tags
+
+    def _wrap_punctuation(self, text, lines, rows=None):
+        tags = self._clear_punctuation_margins(text, rows)
+        punctuation = "，。、"
+        probe = self._punctuation_probe
+        width = text.winfo_width()
+        probe_width = probe.winfo_width()
+        inner_width = width - 2 * int(text.cget("padx"))
+        normal_margin = int(text.tag_cget("drag_margin", "rmargin"))
+        for row in (range(1, len(lines) + 1) if rows is None else rows):
+            line = lines[row - 1]
+            content = line["text"]
+            last_mark = max(content.rfind(mark) for mark in punctuation)
+            if last_mark <= 0:
+                continue
+            if probe_width != width:
+                probe.place_configure(width=width)
+                probe.update_idletasks()
+                probe_width = width
+            todo = line["type"] == "todo"
+            font = self.done_font if todo and line["checked"] else text.cget("font")
+            probe.configure(font=font)
+            left = int(text.tag_cget("todo_indent" if todo else "drag_margin", "lmargin2"))
+            probe.tag_configure("indent", lmargin1=left, lmargin2=left, rmargin=normal_margin)
+
+            # Tk 查询续行索引时会从逻辑行首重排。用短窗口测当前显示行，避免长段落反复从头扫描。
+            start, column, span = 0, self._prefix_len(line), 48
+            while start < last_mark:
+                probe.delete("1.0", "end")
+                probe.insert("1.0", content[start:start + span], "indent")
+                next_line = probe.index("1.0 display lineend +1 indices")
+                if next_line == "2.0":
+                    if start + span >= len(content):
+                        break
+                    span *= 2
+                    continue
+
+                cut = start + len(probe.get("1.0", next_line))
+                if cut <= start or cut >= len(content):
+                    break
+                if content[cut] in punctuation:
+                    anchor = cut - 1
+                    while anchor > start and content[anchor] in punctuation:
+                        anchor -= 1
+                    if anchor > start and content[anchor].isalnum() and content[start:anchor].strip():
+                        before = f"1.{probe.tk.call('string', 'length', content[start:anchor])}"
+                        offset = probe.count("1.0", before, "xpixels") or (0,)
+                        margin = inner_width - offset[0]
+                        if offset[0] and margin > normal_margin:
+                            group_end = cut + 1
+                            while group_end < len(content) and content[group_end] in punctuation:
+                                group_end += 1
+                            if group_end > start + span:
+                                probe.insert("1.end", content[start + span:group_end], "indent")
+                            final = f"1.{probe.tk.call('string', 'length', content[start:group_end - 1])}"
+                            probe.tag_configure("shorten", rmargin=margin)
+                            probe.tag_add("shorten", "1.0", "1.1")
+                            if probe.index(f"{final} display linestart") == before:
+                                cut = anchor
+                                tag = f"punctuation_margin_{margin}"
+                                if tag not in tags:
+                                    text.tag_configure(tag, rmargin=margin)
+                                    tags.add(tag)
+                                text.tag_add(tag, f"{row}.{column if start else 0}")
+                column += int(probe.tk.call("string", "length", content[start:cut]))
+                start = cut
+
+    def _refresh_punctuation_wrap(self):
+        if self.win._resizing or self.win._resize_ending:
+            return
+        width = self.text.winfo_width()
+        if width < 50:
+            return
+        if width != self._punctuation_width:
+            self._punctuation_width = width
+            self._punctuation_rows = None
+        if self._punctuation_rows is not None and not self._punctuation_rows:
+            return
+        if self.win._ime_composing(self.text):
+            return
+        self._wrap_punctuation(self.text, self.lines, self._punctuation_rows)
+        self._punctuation_rows = set()
+        self._document_height = 0
+        self._row_layout.clear()
+
     def _layout_text(self):
         # 全文重加 tag 会让 Tk 重测每一行；收起动画逐帧布局时正文结构不变，render 已加过。
         if self._removal is None:
@@ -1969,6 +2081,7 @@ class NoteEditor:
         # 正文和所有装饰始终留在同一内容坐标系，滚动只移动整个 Text 窗口。
         if self.text.winfo_width() != width:
             self.body.update_idletasks()
+        self._refresh_punctuation_wrap()
         if not self._document_height:
             self._document_height = self.text.count("1.0", "end", "update", "ypixels")
         pad = int(self.text.cget("pady"))
@@ -2287,6 +2400,7 @@ class NoteEditor:
         scroll_y = self.body.canvasy(0)
         old_chunk = self._chunk_start
         top = self.text.dlineinfo(view)
+        self._punctuation_rows = None
         self.text.delete("1.0", "end")
         self.text.tag_remove("merged_right", "1.0", "end")
         lines = self.lines or [{"type": "text", "text": "", "checked": False}]
@@ -2314,6 +2428,8 @@ class NoteEditor:
             self.text.mark_set("insert", cur)
         self._clamp_todo_cursor()
         self.win.update_status()
+        if self._pending_removal is not None:
+            self._refresh_punctuation_wrap()
         self._begin_removal()  # 在首次重绘前补上被删行的高度，下面的行不会先跳上去
         self._queue_strikes()
         self.body.update_idletasks()
@@ -2703,6 +2819,9 @@ class NoteEditor:
         if structure_changed:
             self.render()
         else:
+            if self._punctuation_rows is not None:
+                self._punctuation_rows.update(row for row, (before, after) in enumerate(zip(old, lines), 1)
+                                              if before["text"] != after["text"] or before["checked"] != after["checked"])
             for row, line in enumerate(lines, 1):
                 if line["type"] == "todo":
                     t.tag_add("todo_indent", f"{row}.0", f"{row}.end")
@@ -3547,6 +3666,10 @@ class NoteWindow(tk.Toplevel):
         self._ime_active = False
         self._ime_widget = None
         if editor is not None:
+            if "\n" in self._ime_selected:
+                editor._punctuation_rows = None
+            elif editor._punctuation_rows is not None:
+                editor._punctuation_rows.add(int(self._ime_start.split(".")[0]))
             self.after_idle(editor._on_keyrelease, None)
         elif self.focus_get() != widget:
             self.after_idle(lambda: widget.event_generate("<FocusOut>") if widget.winfo_exists() else None)

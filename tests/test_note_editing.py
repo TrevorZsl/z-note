@@ -329,6 +329,33 @@ class NoteEditingTests(unittest.TestCase):
         left._cancel_row_drag()
         self.assertEqual(right.body.canvasy(0), 0)
 
+    def test_cross_column_drag_preview_keeps_punctuation_with_preceding_text(self):
+        self.note.geometry("660x500")
+        self.note.toggle_columns()
+        left, right = self.note.editors
+        probe = dict(type="todo", text="汉" * 20, checked=True)
+        right.lines = [probe]
+        right.render()
+        self.app.root.update()
+        t = right.text
+        split = t.index("1.0 +1 displayline")
+        prefix = t.get("1.3", split)
+        content = prefix + "，。后续文字"
+        left.lines = [dict(probe, text=content)]
+        right.lines = [dict(type="todo", text="", checked=False)]
+        left.render()
+        right.render()
+        self._start_row_drag(0, left)
+        event = self._drag_event(80, 25, right)
+        left._row_drag_motion(event)
+        preview = left._row_drag["floating_rows"][right][1]
+        self.assertEqual(preview[0], prefix[:-1])
+        self.assertTrue(preview[1].startswith("汉，。"))
+        left._row_drag_release(event)
+        self.app.root.update()
+        self.assertEqual(right._measure_drag_rows()[0][1], preview)
+        self.assertEqual(right.lines, [dict(probe, text=content)])
+
     def test_drag_handle_hover_and_fast_gutter_press_do_not_select_text(self):
         editor = self.note.editors[0]
         editor.lines = [dict(type="text", text="普通文字", checked=False),
@@ -1574,6 +1601,38 @@ class NoteEditingTests(unittest.TestCase):
         self.assertGreater(len(note._strike_widgets), 1)
         note._finish_resize(cancel=True)
 
+    def test_punctuation_wrap_waits_for_resize_release(self):
+        note, t = self.note, self.text
+        editor = note.editors[0]
+        note.geometry("380x440+180+180")
+        line = dict(type="todo", text="汉" * 30, checked=True)
+        editor.lines = [line]
+        editor.render()
+        self.app.root.update()
+        split = t.index("1.0 +1 displayline")
+        prefix = t.get("1.3", split)
+        editor.lines = [dict(line, text=prefix + "，后续文字" * 28)]
+        editor.render()
+        self.app.root.update()
+        self.assertNotEqual(t.index(f"{split} display linestart"), split)
+        self._begin_resize_session(x=378, y=220, width=380)
+        probe_width = editor._punctuation_probe.winfo_width()
+        with patch.object(editor, "_wrap_punctuation", wraps=editor._wrap_punctuation) as wrap:
+            for offset in (*range(10, 110, 10), *range(90, -70, -10), *range(-50, 1, 10)):
+                self._resize_to_pointer(558 + offset, 400)
+                self.assertEqual(editor._punctuation_probe.winfo_width(), probe_width)
+            wrap.assert_not_called()
+            self.assertFalse(any(t.tag_ranges(tag) for tag in t.tag_names() if tag.startswith("punctuation_margin_")))
+            self.assertEqual(t.index(f"{split} display linestart"), split)
+            note._finish_resize()
+            wrap.assert_not_called()
+            self.app.root.update()
+            wrap.assert_called_once()
+            self.assertEqual(t.index(f"{split} display linestart"), t.index(f"{split} -1 indices"))
+            editor.body.yview_scroll(60, "units")
+            self.app.root.update()
+            wrap.assert_called_once()
+
     def test_unchanged_rectangle_skips_frame_and_latest_pointer_wins(self):
         note = self.note
         surface = self._begin_resize_session()
@@ -2038,6 +2097,53 @@ class NoteEditingTests(unittest.TestCase):
         self.app.root.update()
         self.assertEqual(self.note.d["lines"][1]["text"], original + "中")
         self.assertFalse(self.text.tag_ranges("ime_preedit"))
+
+    def test_soft_wrap_keeps_chinese_punctuation_with_the_preceding_character(self):
+        editor, t = self.note.editors[0], self.text
+        self.note.geometry("400x500")
+        for kind, checked, display_row, marks in (("text", False, 1, "，"),
+                                                  ("todo", False, 2, "。"),
+                                                  ("todo", True, 1, "、，")):
+            with self.subTest(kind=kind, checked=checked, marks=marks):
+                original = [dict(type=kind, text="汉" * 35, checked=checked),
+                            dict(type="text", text="，这是手动换行", checked=False)]
+                editor.lines = original
+                editor.render()
+                self.app.root.update()
+                split = t.index(f"1.0 +{display_row} displaylines")
+                preceding = t.index(f"{split} -1 indices")
+                if kind == "todo" and not checked:
+                    t.mark_set("insert", split)
+                    self.note._begin_preedit(t)
+                    self.note._replace_preedit(marks)
+                    self.assertEqual(t.index(f"{split} display linestart"), split)
+                    self.assertEqual(editor.lines, original)
+                    self.note._finish_preedit(marks)
+                else:
+                    t.insert(split, marks)
+                    editor._on_keyrelease(None)
+                self.app.root.update()
+                last_mark = t.index(f"{split} +{len(marks)-1} indices")
+                self.assertEqual(t.index(f"{last_mark} display linestart"), preceding)
+                self.assertEqual(t.index("2.0 display linestart"), "2.0")
+                body = f"1.{editor._prefix_len(original[0])}"
+                content = t.get(body, "1.end")
+                self.assertEqual(editor.lines[0], dict(original[0], text=content))
+                t.tag_add("sel", body, "1.end")
+                with patch.object(t, "clipboard_clear"), patch.object(t, "clipboard_append") as copy:
+                    editor._clipboard_edit("tk_textCopy")
+                    copy.assert_called_once_with(content)
+                if checked:
+                    x, y, width, height = t.bbox(last_mark)
+                    self.assertTrue(any(bar.winfo_x() <= x < bar.winfo_x() + bar.winfo_width()
+                                        and y < bar.winfo_y() < y + height for bar in editor._strike_widgets))
+                    self.assertLess(x + width, editor._drag_gutter.winfo_x())
+                editor._undo_edit()
+                self.assertEqual(editor.lines, original)
+                self.assertEqual(t.index(f"{split} display linestart"), split)
+                editor._undo_edit(redo=True)
+                self.assertEqual(t.get(body, "1.end"), content)
+                self.assertEqual(t.index(f"{last_mark} display linestart"), preceding)
 
     def test_wrapped_preedit_preserves_todo_indentation(self):
         note, text = self.note, self.text
