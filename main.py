@@ -3001,6 +3001,7 @@ class NoteEditor:
             ("在下方插入新行", lambda: self.insert_line(row)),
             (delete_label, self.delete_selection) if self.text.tag_ranges("sel")
             else ("删除此行", lambda: self.delete_line(row)),
+            ("复制全部内容", self.win.copy_all),  # 整张便签，与选区和点到的那一行无关
         ]
         self.win._show_context_menu(e.x_root, e.y_root, actions, shortcuts={0: self.app.hotkey_text("convert")})
 
@@ -4005,17 +4006,19 @@ class NoteWindow(tk.Toplevel):
         _round_popup(p)
         font = tkfont.Font(family=UI_FONT, size=10)
         # compact：单项小菜单（收纳书签），去掉固定最小宽度并收紧行高与边距。
-        min_width, min_row, side, bottom = (0, 0, 36, 8) if compact else (184, 34, 44, 9)
+        min_width, min_row, side = (0, 0, 36) if compact else (184, 34, 44)
         width = max(min_width, max(font.measure(label) + (font.measure(shortcuts[i]) + 32 if i in shortcuts else 0)
                                    for i, (label, _) in enumerate(actions)) + side)
         row_h = max(min_row, font.metrics("linespace") + (8 if compact else 12))
-        height = (8 if compact else 16) + row_h * len(actions) + bottom
+        # 上下各留 8px；第 3 项起每跨一组（上方有分隔线）下移 9px。
+        lift = lambda i: 9 * max(0, i - 1)
+        height = 16 + row_h * len(actions) + lift(len(actions) - 1)
         cv = tk.Canvas(p, width=width, height=height, bg=NOTE_BG,
                        highlightthickness=0, bd=0)
         cv.pack()
         highlights = []
         for i, (label, _) in enumerate(actions):
-            top = 8 + i * row_h + (9 if i == 2 else 0)
+            top = 8 + i * row_h + lift(i)
             highlight = round_rect(cv, 5, top, width - 5, top + row_h, 7,
                                    fill="#F2F3F5", outline="", state="hidden")
             highlights.append(highlight)
@@ -4028,8 +4031,10 @@ class NoteWindow(tk.Toplevel):
             cv.tag_bind(f"item{i}", "<Button-1>", lambda _e, n=i: activate(n))
             cv.tag_bind(highlight, "<Enter>", lambda _e, n=i: select(n))
             cv.tag_bind(highlight, "<Button-1>", lambda _e, n=i: activate(n))
-        sep_y = 8 + 2 * row_h + 4
-        cv.create_line(14, sep_y, width - 14, sep_y, fill="#E2E4E8")
+        for i in (1, 2):  # 组间画分隔线：这一项后面还有项才画
+            if i + 1 < len(actions):
+                sep_y = 8 + (i + 1) * row_h + lift(i) + 4
+                cv.create_line(14, sep_y, width - 14, sep_y, fill="#E2E4E8")
 
         selected = [None]
 
@@ -4074,6 +4079,20 @@ class NoteWindow(tk.Toplevel):
         p.deiconify()
         p.grab_set()
         p.focus_set()
+
+    def copy_all(self):
+        # 整张便签（含右栏）复制成纯文字；行结构照 Ctrl+C 的做法留在应用内，贴到别的便签时能认出待办。
+        self._sync_lines_from_text()
+        keys = ("lines", "lines2") if self.d.get("twoColumn") else ("lines",)
+        # 只留三个键：折叠双栏留下的 mergedColumn 不带去别的便签。
+        lines = [{"type": line["type"], "text": line["text"], "checked": line["checked"]}
+                 for key in keys for line in self.d.get(key) or []]
+        if not any(line["text"] for line in lines):
+            return  # 空便签不覆盖剪贴板
+        content = "\n".join(line["text"] for line in lines)
+        self.clipboard_clear()
+        self.clipboard_append(content)
+        self.app._clipboard_lines = (user32.GetClipboardSequenceNumber(), content, lines)
 
     def clear_done(self):
         self.app.archive_done(self)

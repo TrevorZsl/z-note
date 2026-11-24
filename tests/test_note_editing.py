@@ -3940,6 +3940,130 @@ class NoteEditingTests(unittest.TestCase):
         self.assertFalse(popup.winfo_exists())
         self.assertEqual(self.note.d["lines"][0]["type"], "text")
 
+    def test_copy_all_puts_whole_note_on_clipboard_and_pastes_structure_into_another_note(self):
+        from copy import deepcopy
+        source = self.note
+        original = [
+            {"type": "text", "text": "说明", "checked": False},
+            {"type": "todo", "text": "买牛奶", "checked": False},
+            {"type": "todo", "text": "已处理", "checked": True},
+            {"type": "todo", "text": "", "checked": False}]
+        source.d["lines"] = deepcopy(original)
+        source.render()
+        source.text.tag_add("sel", "2.0", "2.end")  # 选区只盖住一行，复制的仍是整张便签
+        selection = tuple(map(str, source.text.tag_ranges("sel")))
+        target = self.app.new_note()
+        try:
+            clipboard = self.text.clipboard_get()
+        except main.tk.TclError:
+            clipboard = None
+        try:
+            source.copy_all()
+            copied = source.text.clipboard_get()
+            self.assertEqual(copied, "说明\n买牛奶\n已处理\n")
+            self.assertEqual(self.app._clipboard_lines[2], original)
+            self.assertEqual(source.d["lines"], original)
+            self.assertEqual(tuple(map(str, source.text.tag_ranges("sel"))), selection)
+            before = deepcopy(target.d["lines"])
+            target.text.tag_add("sel", "1.0", "end-1c")
+            target.text.event_generate("<<Paste>>")
+            self.assertEqual(target.d["lines"], original)
+            target.text.event_generate("<<Undo>>")
+            self.assertEqual(target.d["lines"], before)
+            target.text.event_generate("<<Redo>>")
+            self.assertEqual(target.d["lines"], original)
+            # 文字与「全选后 Ctrl+C」一致
+            source.text.tag_add("sel", "1.0", "end-1c")
+            source.text.event_generate("<<Copy>>")
+            self.assertEqual(source.text.clipboard_get(), copied)
+        finally:
+            self.text.clipboard_clear()
+            if clipboard is not None:
+                self.text.clipboard_append(clipboard)
+
+    def test_copy_all_includes_right_column_and_leaves_clipboard_alone_on_empty_note(self):
+        from copy import deepcopy
+        note = self.note
+        left = [{"type": "text", "text": "左", "checked": False}]
+        right = [{"type": "todo", "text": "右", "checked": True}]
+        try:
+            clipboard = self.text.clipboard_get()
+        except main.tk.TclError:
+            clipboard = None
+        try:
+            note.toggle_columns()
+            note.d["lines"], note.d["lines2"] = deepcopy(left), deepcopy(right)
+            note.render()
+            note.copy_all()
+            self.assertEqual(note.text.clipboard_get(), "左\n右")
+            note.toggle_columns()  # 折叠后，原右栏的行带上 mergedColumn
+            self.assertEqual(note.d["lines"][1].get("mergedColumn"), 1)
+            note.copy_all()
+            target = self.app.new_note()
+            target.text.tag_add("sel", "1.0", "end-1c")
+            target.text.event_generate("<<Paste>>")
+            self.assertEqual(target.d["lines"], left + right)  # 不带 mergedColumn
+            target.toggle_columns()  # 再切双栏，贴进来的行留在贴入的那一栏
+            self.app.root.update()
+            self.assertEqual(target.d["lines"], left + right)
+            self.assertEqual(target.d["lines2"], [{"type": "todo", "text": "", "checked": False}])
+            empty = self.app.new_note()
+            empty.copy_all()
+            self.assertEqual(empty.text.clipboard_get(), "左\n右")
+            self.assertEqual(self.app._clipboard_lines[2], left + right)
+        finally:
+            self.text.clipboard_clear()
+            if clipboard is not None:
+                self.text.clipboard_append(clipboard)
+
+    def test_context_menu_offers_copy_all_as_fourth_row(self):
+        note, text = self.note, self.text
+        self.app.root.update()
+        box = text.bbox("1.0")
+        event = type("Event", (), {"x": box[0] + 1, "y": box[1] + 1,
+                                  "x_root": 100, "y_root": 100})()
+        try:
+            clipboard = text.clipboard_get()
+        except main.tk.TclError:
+            clipboard = None
+        try:
+            with patch.object(note, "_show_context_menu") as menu:
+                note._on_rightclick(event)
+            labels = [label for label, _ in menu.call_args.args[2]]
+            self.assertEqual(labels, ["转为待办", "在下方插入新行", "删除此行", "复制全部内容"])
+            menu.call_args.args[2][3][1]()
+            self.assertEqual(text.clipboard_get(),
+                             "欢迎使用 z-note\n点前面的圆框勾选我\n右键这行：转换/插入/删除\nCtrl+滚轮 调透明度")
+            # 三行与四行菜单：上下各留 8px，第 3 项起每项上方 9px 和一条分隔线。
+            for count, separators in ((3, 1), (4, 2)):
+                note._show_context_menu(100, 100, [(label, lambda: None) for label in labels[:count]],
+                                        shortcuts={0: "Ctrl+Shift+L"})
+                self.app.root.update()
+                popup = note._context_menu
+                canvas = popup.winfo_children()[0]
+                centers = [sum(canvas.bbox(f"item{i}")[1::2]) / 2 for i in range(count)]
+                row_h = centers[1] - centers[0]
+                self.assertEqual(centers[2] - centers[1], row_h + 9)
+                self.assertEqual(popup.winfo_height(), 16 + row_h * count + 9 * (count - 2))
+                self.assertEqual(len([item for item in canvas.find_all() if canvas.type(item) == "line"]),
+                                 separators)
+                popup.event_generate("<Escape>")
+            called = []
+            note._show_context_menu(100, 100, [(label, lambda label=label: called.append(label))
+                                               for label in labels])
+            self.app.root.update()
+            popup = note._context_menu
+            box = popup.winfo_children()[0].bbox("item3")
+            popup.winfo_children()[0].event_generate("<Button-1>", x=(box[0] + box[2]) // 2,
+                                                     y=(box[1] + box[3]) // 2)
+            self.app.root.update()
+            self.assertEqual(called, ["复制全部内容"])
+            self.assertFalse(popup.winfo_exists())
+        finally:
+            text.clipboard_clear()
+            if clipboard is not None:
+                text.clipboard_append(clipboard)
+
     def test_add_todo_inserts_below_cursor_line(self):
         before = list(self.note.d["lines"])
         self.text.mark_set("insert", "2.end")
