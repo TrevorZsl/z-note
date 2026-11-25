@@ -2377,13 +2377,75 @@ class NoteEditingTests(unittest.TestCase):
         self.app.root.update()
         with patch.object(self.app, "update_hotkey", return_value="快捷键已占用"):
             entry.event_generate("<KeyPress>", keycode=76, state=4)
-            self.assertEqual(entry.get(), "Ctrl+Shift+K")
+            self.assertEqual(entry.get(), "")
             self.assertEqual(settings._hotkey_hint.cget("text"), "快捷键已占用")
         x, y = settings.winfo_x(), settings.winfo_y()
         entry.event_generate("<Button-1>", x=5, y=5)
         entry.event_generate("<B1-Motion>", x=40, y=25)
         self.app.root.update()
         self.assertEqual((settings.winfo_x(), settings.winfo_y()), (x, y))
+        settings.destroy()
+
+    def test_hotkey_box_blanks_while_capturing_and_restores_saved_value_on_blur(self):
+        settings = main.SettingsWindow(self.app)
+        self.app.root.update()
+        entry, other = settings.hotkey_entries["new"], settings.hotkey_entries["show"]
+        saved = entry.get()
+        entry.focus_force()
+        self.app.root.update()
+        self.assertEqual(entry.get(), "")
+        other.focus_force()
+        self.app.root.update()
+        self.assertEqual(entry.get(), saved)
+        entry.focus_force()
+        self.app.root.update()
+        with patch.object(self.app, "update_hotkey", return_value="快捷键已占用"):
+            entry.event_generate("<KeyPress>", keycode=76, state=4)
+        entry.event_generate("<KeyPress-Escape>")
+        self.app.root.update()
+        self.assertEqual(entry.get(), saved)
+        settings.destroy()
+
+    def test_clicking_elsewhere_in_settings_ends_hotkey_capture_and_hides_feedback(self):
+        settings = main.SettingsWindow(self.app)
+        self.app.root.update()
+        entry, hint, blank = (settings.hotkey_entries["convert"], settings._hotkey_hint,
+                              settings._hotkey_heading)
+        border = entry.master
+
+        def look():
+            return (entry.get(), hint.winfo_manager(),
+                    border.itemcget(border.find_all()[0], "outline"))
+
+        def click_elsewhere():
+            blank.event_generate("<Button-1>")
+            blank.event_generate("<ButtonRelease-1>")
+            self.app.root.update()
+
+        listening, idle = ("", "pack", "#94A3B8"), (entry.get(), "", main.NOTE_BORDER)
+        entry.focus_force()
+        self.app.root.update()
+        self.assertEqual(look(), listening)
+        click_elsewhere()
+        self.assertEqual(look(), idle)
+        with patch.object(self.app, "update_hotkey", return_value="快捷键已占用"):
+            entry.focus_force()
+            self.app.root.update()
+            entry.event_generate("<KeyPress>", keycode=76, state=4)
+            self.assertEqual(look(), listening)
+            self.assertEqual(hint.cget("text"), "快捷键已占用")
+            click_elsewhere()
+            self.assertEqual(look(), idle)
+        entry.focus_force()
+        self.app.root.update()
+        entry.event_generate("<KeyPress>", keycode=119, state=0)  # F8，本地快捷键会真的保存
+        self.assertEqual(look(), ("F8", "pack", "#94A3B8"))
+        self.assertEqual(hint.cget("text"), "快捷键已保存并生效。")
+        click_elsewhere()
+        self.assertEqual(look(), ("F8", "", main.NOTE_BORDER))
+        border.event_generate("<Button-1>")  # 点框本身仍进入监听
+        self.app.root.update()
+        self.assertEqual(look(), listening)
         settings.destroy()
 
     def test_settings_lists_show_before_hide_and_reports_editor_hotkey_conflicts(self):
@@ -2537,8 +2599,8 @@ class NoteEditingTests(unittest.TestCase):
                         while pending:
                             widget = pending.pop()
                             pending.extend(widget.winfo_children())
-                            if widget is settings._update_progress_text:
-                                continue  # 下载进度文字只在下载时布局。
+                            if widget in (settings._update_progress_text, settings._hotkey_hint):
+                                continue  # 下载进度文字、快捷键提示只在用到时布局。
                             if isinstance(widget, (main.tk.Label, main.tk.Checkbutton)):
                                 self.assertGreaterEqual(widget.winfo_width(), widget.winfo_reqwidth(),
                                                         str(widget.cget("text")))
@@ -3501,7 +3563,8 @@ class NoteEditingTests(unittest.TestCase):
         body.yview_moveto(0)
         self.app.root.update()
         content = next(w for w in body.winfo_children() if isinstance(w, main.tk.Frame))
-        packed = [(child, child.pack_info()) for child in content.winfo_children()]
+        packed = [(child, child.pack_info()) for child in content.winfo_children()
+                  if child.winfo_manager()]  # 快捷键提示没有提示时不布局。
         for child, _ in packed:
             child.pack_forget()
         placeholder = main.tk.Label(content, text="短内容")

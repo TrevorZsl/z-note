@@ -4904,6 +4904,7 @@ class SettingsWindow(tk.Toplevel):
         self._close_button = close
         self._minimize_button = minimize
         self.bind("<Button-1>", self._drag_press)
+        self.bind("<Button-1>", self._end_hotkey_capture, add="+")
         self.bind("<B1-Motion>", self._drag_move)
         self.bind("<ButtonRelease-1>", lambda _e: setattr(self, "_drag", None))
 
@@ -5056,9 +5057,14 @@ class SettingsWindow(tk.Toplevel):
                        setattr(app, "_hotkey_capture", (self, action)), add="+")
             entry.bind("<FocusOut>", lambda _e: setattr(app, "_hotkey_capture", None), add="+")
             entry.bind("<FocusIn>", lambda _e, action=action:
-                       self._show_hotkey_feedback("请按组合键，Esc 取消。", action, prompt=True), add="+")
+                       self._show_hotkey_feedback("请按组合键，Esc 取消。", action), add="+")
             entry.bind("<FocusOut>", lambda _e, action=action:
                        self._clear_hotkey_prompt(action), add="+")
+            # 聚焦即清空表示正在监听，未改动就失焦则还原为已保存的值。
+            entry.bind("<FocusIn>", lambda _e, action=action:
+                       self._hotkey_vars[action].set(""), add="+")
+            entry.bind("<FocusOut>", lambda _e, action=action:
+                       self._hotkey_vars[action].set(app.hotkey_text(action)), add="+")
             self.hotkey_entries[action] = entry
             self._hotkey_borders.append(border)
             hotkey_rows.append((hotkey_row, label, border))
@@ -5068,8 +5074,6 @@ class SettingsWindow(tk.Toplevel):
         self._hotkey_hint = hotkey_hint
         self._hotkey_heading = hotkey_heading
         self._feedback_action = None
-        self._feedback_prompt = False
-        hotkey_hint.pack(fill="x", after=hotkey_heading)
         self.bind("<Destroy>", lambda e: e.widget == self and setattr(app, "_hotkey_capture", None))
         update_heading = section("关于与更新")
         tk.Label(update_heading, text=f"z-note {APP_VERSION}", bg=NOTE_BG, fg=QUIET,
@@ -5484,10 +5488,15 @@ class SettingsWindow(tk.Toplevel):
                                    event.y_root - self._drag[1]))
         self.update_idletasks()
 
+    # Tk 点击标签、空白处不会转移焦点，点到快捷键框以外时把焦点交回窗口以结束监听。
+    def _end_hotkey_capture(self, event):
+        if event.widget not in (*self._hotkey_borders, *self.hotkey_entries.values(),
+                                self._close_button, self._minimize_button):
+            self.focus_set()
+
     def _capture_hotkey(self, event, action):
         if event.keysym == "Escape":
             self._hotkey_hint.pack_forget()
-            self._feedback_prompt = False
             self.focus_set()
             return "break"
         key = next((name for name, code in HOTKEY_KEYS.items() if code == event.keycode), None)
@@ -5508,18 +5517,16 @@ class SettingsWindow(tk.Toplevel):
         if self._hotkey_hint.winfo_manager():
             self._hotkey_hint.pack_configure(padx=(inset, 0))
 
-    def _show_hotkey_feedback(self, text, action=None, *, error=False, prompt=False):
+    def _show_hotkey_feedback(self, text, action=None, *, error=False):
         self._feedback_action = action
-        self._feedback_prompt = prompt
         target = self._hotkey_heading if action is None else self.hotkey_entries[action].master.master
         self._hotkey_hint.configure(text=text, fg="#A44A42" if error else QUIET)
         self._hotkey_hint.pack(fill="x", after=target)
         self._layout_hotkey_feedback(target.master.winfo_width())
 
     def _clear_hotkey_prompt(self, action):
-        if self._feedback_prompt and self._feedback_action == action:
+        if self._feedback_action == action:
             self._hotkey_hint.pack_forget()
-            self._feedback_prompt = False
 
     def _apply_hotkey(self, action, value):
         error = self.app.update_hotkey(action, value)
