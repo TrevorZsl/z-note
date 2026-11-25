@@ -2333,6 +2333,22 @@ class NoteEditingTests(unittest.TestCase):
         self.assertEqual(self.app.data["settings"]["fontSize"], 10)
         settings.destroy()
 
+    def test_settings_value_boxes_are_centered_and_refit_for_each_ui_font(self):
+        settings = self.app.settings_win = main.SettingsWindow(self.app)
+        self.app.root.update()
+        call = self.app.root.tk.call
+        for choice in ("yahei", "simsun", "system", "classic"):
+            settings._font_family(main.FONT_CHOICES[choice])
+            self.app.root.update()
+            for value in settings._value_boxes:
+                self.assertEqual(value.cget("compound"), "center")
+                self.assertEqual(value.winfo_reqwidth(),
+                                 int(call("font", "measure", value.cget("font"), "100%")) + 16)
+                self.assertEqual(value.winfo_reqheight(),
+                                 int(call("font", "metrics", value.cget("font"), "-linespace")) + 16)
+            self.assertEqual(settings._value_boxes[0].winfo_width(), settings._value_boxes[1].winfo_width())
+        settings.destroy()
+
     def test_settings_background_and_text_drag_without_moving_on_slider(self):
         settings = main.SettingsWindow(self.app)
         self.app.root.update()

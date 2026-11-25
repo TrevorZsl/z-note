@@ -4955,7 +4955,7 @@ class SettingsWindow(tk.Toplevel):
         self.font_selector = FontSelector(font_row, self.font_choice, self._font_family)
         row = appearance_row("不透明度")
         opacity_value = tk.Label(row, bg=NOTE_BG, fg=QUIET,
-                                 font=(UI_FONT, 9), anchor="e", padx=0, bd=0)
+                                 font=(UI_FONT, 9), anchor="e", padx=0, pady=0, bd=0)
         def update_opacity(v):
             opacity_value.config(text=f"{100 - v}%")
             self._op(v)
@@ -4967,7 +4967,7 @@ class SettingsWindow(tk.Toplevel):
             self._op(s.get())
         row3 = appearance_row("字号")
         font_value = tk.Label(row3, bg=NOTE_BG, fg=QUIET,
-                              font=(UI_FONT, 9), anchor="e", padx=0, bd=0)
+                              font=(UI_FONT, 9), anchor="e", padx=0, pady=0, bd=0)
         def update_font(v):
             font_value.config(text=str(v))
             self._font(v)
@@ -4976,6 +4976,8 @@ class SettingsWindow(tk.Toplevel):
         font_value.config(text=str(s2.get()))
         if app.data["settings"]["fontSize"] != s2.get():
             self._font(s2.get())
+        self._value_boxes = (opacity_value, font_value)
+        self._fit_value_boxes()
         inset = SettingsScale.TRACK_INSET
         self.font_selector.grid(row=0, column=0, sticky="ew", padx=inset)
         for controls, scale_widget, value in ((row, s, opacity_value), (row3, s2, font_value)):
@@ -4983,7 +4985,7 @@ class SettingsWindow(tk.Toplevel):
             value.grid(row=0, column=1, sticky="ew", padx=(4, 0))
 
         def layout_appearance(content_width):
-            value_width = int(self.tk.call("font", "measure", opacity_value.cget("font"), "100%")) + 8
+            value_width = opacity_value.winfo_reqwidth() + 4
             rail_width = max(180, self.font_selector.winfo_reqwidth() + 2 * inset)
             label_width = max(int(self.tk.call("font", "measure", label.cget("font"), label.cget("text")))
                               for _, label, _ in appearance)
@@ -5463,6 +5465,19 @@ class SettingsWindow(tk.Toplevel):
             border.delete(shape)
         self.update_idletasks()
         self._relayout()
+
+    def _fit_value_boxes(self):
+        """按数值标签当前字体重画外观区数值框；切换字体后跟着放大或缩小。"""
+        for value in self._value_boxes:
+            font = value.cget("font")
+            w = int(self.tk.call("font", "measure", font, "100%")) + 16
+            h = int(self.tk.call("font", "metrics", font, "-linespace")) + 16  # 与快捷键框等高
+            image = Image.new("RGB", (w * 4, h * 4), NOTE_BG)
+            ImageDraw.Draw(image).rounded_rectangle((2, 2, w * 4 - 3, h * 4 - 3), radius=28,
+                                                    fill=NOTE_BG, outline=NOTE_BORDER, width=4)
+            value._box_image = ImageTk.PhotoImage(
+                image.resize((w, h), Image.Resampling.LANCZOS), master=self)
+            value.configure(image=value._box_image, compound="center")
 
     def _drag_press(self, event):
         x, y = event.x_root-self.winfo_rootx(), event.y_root-self.winfo_rooty()
@@ -7816,6 +7831,7 @@ class App:
             note._layout_footer()
         if self.settings_win is not None and self.settings_win.winfo_exists():
             self.settings_win.font_selector._fit()
+            self.settings_win._fit_value_boxes()
             self.settings_win._fit_hotkey_boxes()
 
     def set_opacity(self, percent):
